@@ -96,7 +96,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           <Divider orientation="vertical" flexItem />
           <Box><span>{p.model.simulations.toLocaleString()}회 최빈 스코어</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>{modeOutcome ? '가장 많이 나온 결과' : '승률이 높은 결과'}</span><strong>{modeOutcome ? outcomeLabel(modeOutcome.value, game) : favoriteLabel(p, game)}</strong><small>{modeOutcome ? modeFrequency(modeOutcome) : pct(Math.max(p.home_win_probability, p.away_win_probability))}</small></Box>
+          <Box><span>{ranking ? '가장 많이 나온 결과 1위' : modeOutcome ? '가장 많이 나온 결과' : '승률이 높은 결과'}</span><strong>{ranking ? ranking.outcomes[0].label : modeOutcome ? outcomeLabel(modeOutcome.value, game) : favoriteLabel(p, game)}</strong><small>{ranking ? `${pct(ranking.outcomes[0].probability)}${ranking.outcomes[0].note ? ` · ${ranking.outcomes[0].note}` : ''}` : modeOutcome ? modeFrequency(modeOutcome) : pct(Math.max(p.home_win_probability, p.away_win_probability))}</small></Box>
         </Box>
 
         {p.top_scores?.length ? <Box className="score-candidates">
