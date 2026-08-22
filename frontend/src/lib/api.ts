@@ -8,13 +8,14 @@ function apiUrl(path: string): string {
 
 async function request(path: string, init?: RequestInit, timeoutMs = 20_000): Promise<Response> {
   const canRetry = !init?.method || init.method.toUpperCase() === 'GET'
-  for (let attempt = 0; attempt < (canRetry ? 2 : 1); attempt += 1) {
+  const attempts = canRetry ? 3 : 1
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const controller = new AbortController()
     const timer = window.setTimeout(() => controller.abort(), timeoutMs)
     try {
       const response = await fetch(apiUrl(path), { ...init, signal: controller.signal })
-      if (attempt === 0 && [502, 503, 504].includes(response.status)) {
-        await new Promise((resolve) => window.setTimeout(resolve, 450))
+      if (attempt < attempts - 1 && [502, 503, 504].includes(response.status)) {
+        await new Promise((resolve) => window.setTimeout(resolve, (attempt + 1) * 1_000))
         continue
       }
       return response
@@ -22,8 +23,8 @@ async function request(path: string, init?: RequestInit, timeoutMs = 20_000): Pr
       if (error instanceof DOMException && error.name === 'AbortError') {
         throw new Error('서버 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.')
       }
-      if (attempt === 0 && canRetry) {
-        await new Promise((resolve) => window.setTimeout(resolve, 450))
+      if (attempt < attempts - 1 && canRetry) {
+        await new Promise((resolve) => window.setTimeout(resolve, (attempt + 1) * 1_000))
         continue
       }
       throw new Error('서버에 연결할 수 없습니다. 네트워크 상태와 API 배포 상태를 확인해 주세요.')
