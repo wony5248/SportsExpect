@@ -72,7 +72,10 @@ def predict_with_runtime(runtime: dict[str, Any], features: dict[str, Any],
     probability = 1 / (1 + math.exp(-max(-8.0, min(8.0, win_logit))))
     home_runs = float(runtime["home_run_intercept"] + standardized @ np.asarray(runtime["home_run_coefficients"], dtype=float))
     away_runs = float(runtime["away_run_intercept"] + standardized @ np.asarray(runtime["away_run_coefficients"], dtype=float))
-    return probability, _clip(home_runs, .6, 10.0), _clip(away_runs, .6, 10.0)
+    # The classifier must influence the same score distribution shown in the UI. Convert its
+    # log-odds to a conservative run-margin signal and combine it with the two run regressors.
+    home_runs, away_runs = _coherent_run_means(probability, home_runs, away_runs)
+    return probability, home_runs, away_runs
 
 
 def run_model_lifecycle(session: Session, league: str) -> dict[str, Any]:
@@ -170,7 +173,7 @@ def _training_samples(session: Session, league: str) -> list[dict[str, Any]]:
         payload = prediction.payload or {}
         base_home = float(snapshot.input_payload.get("home_expected", payload.get("base_home_expected_runs", prediction.home_expected_runs)))
         base_away = float(snapshot.input_payload.get("away_expected", payload.get("base_away_expected_runs", prediction.away_expected_runs)))
-        baseline_probability = float(payload.get("base_logistic_home_probability", prediction.home_win_probability))
+        baseline_probability = _two_way_poisson_probability(base_home, base_away)
         by_game[game.id] = {
             "game_id": game.id, "captured_at": snapshot.captured_at, "features": features,
             "base_home_runs": base_home, "base_away_runs": base_away,
@@ -277,9 +280,10 @@ def _evaluate(runtime: dict[str, Any] | None, samples: list[dict[str, Any]]) -> 
     predictions = []
     for row in samples:
         if runtime:
-            probability, home_runs, away_runs = predict_with_runtime(
+            _classification_probability, home_runs, away_runs = predict_with_runtime(
                 runtime, row["features"], row["base_home_runs"], row["base_away_runs"],
             )
+            probability = _two_way_poisson_probability(home_runs, away_runs)
         else:
             probability, home_runs, away_runs = (
                 row["baseline_probability"], row["base_home_runs"], row["base_away_runs"],
@@ -314,6 +318,26 @@ def _fit_ridge(x: np.ndarray, y: np.ndarray) -> tuple[float, np.ndarray]:
     regularization = np.eye(x.shape[1]) * 6.0
     coefficients = np.linalg.pinv(x.T @ x + regularization) @ x.T @ centered
     return float(y.mean()), coefficients
+
+
+def _coherent_run_means(probability: float, home_runs: float, away_runs: float) -> tuple[float, float]:
+    home_runs, away_runs = _clip(home_runs, .6, 10.0), _clip(away_runs, .6, 10.0)
+    total = _clip(home_runs + away_runs, 1.2, 20.0)
+    logit = math.log(_clip(probability, .02, .98) / (1 - _clip(probability, .02, .98)))
+    classifier_margin = 2.2 * logit
+    combined_margin = .65 * (home_runs - away_runs) + .35 * classifier_margin
+    combined_margin = _clip(combined_margin, -(total - 1.2), total - 1.2)
+    return _clip((total + combined_margin) / 2, .6, 10.0), _clip((total - combined_margin) / 2, .6, 10.0)
+
+
+def _two_way_poisson_probability(home_mean: float, away_mean: float) -> float:
+    """Deterministic score proxy used for candidate comparison; production still uses Monte Carlo."""
+    maximum = 30
+    home_pmf = [math.exp(-home_mean) * home_mean ** score / math.factorial(score) for score in range(maximum)]
+    away_pmf = [math.exp(-away_mean) * away_mean ** score / math.factorial(score) for score in range(maximum)]
+    home_win = sum(home_pmf[h] * away_pmf[a] for h in range(maximum) for a in range(h))
+    away_win = sum(home_pmf[h] * away_pmf[a] for a in range(maximum) for h in range(a))
+    return home_win / max(home_win + away_win, 1e-12)
 
 
 def _feature_values(features: dict[str, Any], base_home_runs: float, base_away_runs: float,

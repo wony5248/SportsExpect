@@ -95,8 +95,8 @@ def test_trained_runtime_produces_bounded_probability_and_runs():
     }
     probability, home_runs, away_runs = predict_with_runtime(runtime, {}, 5.0, 4.0)
     assert .59 < probability < .61
-    assert home_runs == 10.0
-    assert away_runs == .6
+    assert .6 <= away_runs < home_runs <= 10.0
+    assert round(home_runs + away_runs, 6) == 10.6
 
 
 def test_supabase_database_url_selects_psycopg_driver(monkeypatch):

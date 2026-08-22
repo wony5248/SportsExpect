@@ -16,6 +16,16 @@ depends_on = None
 
 
 def upgrade() -> None:
+    lifecycle_tables = {"model_artifacts", "model_registry", "model_lifecycle_events"}
+    existing = set(sa.inspect(op.get_bind()).get_table_names())
+    # Revision 01 intentionally creates the current metadata for a brand-new local
+    # SQLite database. In that case the tables already exist before Alembic reaches 09.
+    if lifecycle_tables.issubset(existing):
+        _secure_backend_tables()
+        return
+    partial = lifecycle_tables & existing
+    if partial:
+        raise RuntimeError(f"Incomplete model lifecycle schema already exists: {sorted(partial)}")
     op.create_table(
         "model_artifacts",
         sa.Column("id", sa.Integer(), primary_key=True),
@@ -64,6 +74,10 @@ def upgrade() -> None:
     op.create_index("ix_model_lifecycle_events_league", "model_lifecycle_events", ["league"])
     op.create_index("ix_model_lifecycle_events_event_type", "model_lifecycle_events", ["event_type"])
     op.create_index("ix_model_lifecycle_events_created_at", "model_lifecycle_events", ["created_at"])
+    _secure_backend_tables()
+
+
+def _secure_backend_tables() -> None:
     if op.get_bind().dialect.name == "postgresql":
         for table in ("model_artifacts", "model_registry", "model_lifecycle_events"):
             op.execute(f"alter table {table} enable row level security")
