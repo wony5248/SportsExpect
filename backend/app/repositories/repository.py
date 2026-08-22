@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from collections import defaultdict
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
@@ -265,28 +266,96 @@ def game_cards(session: Session, target_date: date, league: str | None = "KBO") 
     if league and league != "ALL":
         query = query.where(Game.league == league)
     games = session.scalars(query.order_by(Game.start_at, Game.start_time, Game.external_id)).all()
-    return [_serialize_game(session, game) for game in games]
+    context = _game_serialization_context(session, games)
+    return [_serialize_game(game, context) for game in games]
 
 
 def game_detail(session: Session, external_id: str) -> dict[str, Any] | None:
     game = session.scalar(select(Game).options(joinedload(Game.away_team), joinedload(Game.home_team)).where(Game.external_id == external_id))
-    return _serialize_game(session, game) if game else None
+    return _serialize_game(game, _game_serialization_context(session, [game])) if game else None
 
 
-def _serialize_game(session: Session, game: Game) -> dict[str, Any]:
-    prediction = session.scalar(select(Prediction).where(Prediction.game_id == game.id).order_by(Prediction.created_at.desc()).limit(1))
-    pitchers = session.scalars(select(PitcherStat).where(PitcherStat.game_id == game.id)).all()
-    lineups = session.scalars(select(LineupEntry).where(LineupEntry.game_id == game.id).order_by(LineupEntry.side, LineupEntry.batting_order)).all()
+def _game_serialization_context(session: Session, games: list[Game]) -> dict[str, Any]:
+    """Fetch card dependencies in bounded batches instead of once per game.
+
+    Supabase round trips dominate response time, so the former per-card query
+    pattern made the ALL board take tens of seconds. This stays at eight
+    dependency queries regardless of the number of games on the board.
+    """
+    game_ids = [game.id for game in games]
+    team_ids = list({team_id for game in games for team_id in (game.away_team_id, game.home_team_id)})
+    empty: dict[Any, Any] = {}
+    if not game_ids:
+        return {
+            "predictions": empty, "prediction_history": empty, "predictions_by_id": empty,
+            "pitchers": empty, "lineups": empty, "team_stats": empty, "results": empty,
+            "markets": empty, "snapshots": empty,
+        }
+
+    predictions_by_game: dict[int, list[Prediction]] = defaultdict(list)
+    predictions_by_id: dict[int, Prediction] = {}
+    for row in session.scalars(select(Prediction).where(
+        Prediction.game_id.in_(game_ids),
+    ).order_by(Prediction.game_id, Prediction.created_at.desc())).all():
+        predictions_by_game[row.game_id].append(row)
+        predictions_by_id[row.id] = row
+
+    pitchers_by_game: dict[int, list[PitcherStat]] = defaultdict(list)
+    for row in session.scalars(select(PitcherStat).where(PitcherStat.game_id.in_(game_ids))).all():
+        pitchers_by_game[row.game_id].append(row)
+
+    lineups_by_game: dict[int, list[LineupEntry]] = defaultdict(list)
+    for row in session.scalars(select(LineupEntry).where(
+        LineupEntry.game_id.in_(game_ids),
+    ).order_by(LineupEntry.game_id, LineupEntry.side, LineupEntry.batting_order)).all():
+        lineups_by_game[row.game_id].append(row)
+
+    # Sorted newest-first; keep only the first row for each team.
+    team_stats: dict[int, TeamStat] = {}
+    max_target_date = max(game.game_date for game in games)
+    for row in session.scalars(select(TeamStat).where(
+        TeamStat.team_id.in_(team_ids), TeamStat.effective_date <= max_target_date,
+    ).order_by(TeamStat.team_id, TeamStat.effective_date.desc(), TeamStat.collected_at.desc())).all():
+        team_stats.setdefault(row.team_id, row)
+
+    results = {row.game_id: row for row in session.scalars(select(GameResult).where(GameResult.game_id.in_(game_ids))).all()}
+
+    markets: dict[int, MarketConsensus] = {}
+    for row in session.scalars(select(MarketConsensus).where(
+        MarketConsensus.game_id.in_(game_ids),
+    ).order_by(MarketConsensus.game_id, MarketConsensus.collected_at.desc())).all():
+        markets.setdefault(row.game_id, row)
+
+    snapshots_by_game: dict[int, list[PredictionSnapshot]] = defaultdict(list)
+    for row in session.scalars(select(PredictionSnapshot).where(
+        PredictionSnapshot.game_id.in_(game_ids),
+    ).order_by(PredictionSnapshot.game_id, PredictionSnapshot.captured_at.desc())).all():
+        if len(snapshots_by_game[row.game_id]) < 20:
+            snapshots_by_game[row.game_id].append(row)
+
+    return {
+        "predictions": {game_id: rows[0] for game_id, rows in predictions_by_game.items()},
+        "prediction_history": {game_id: rows[:10] for game_id, rows in predictions_by_game.items()},
+        "predictions_by_id": predictions_by_id,
+        "pitchers": pitchers_by_game,
+        "lineups": lineups_by_game,
+        "team_stats": team_stats,
+        "results": results,
+        "markets": markets,
+        "snapshots": snapshots_by_game,
+    }
+
+
+def _serialize_game(game: Game, context: dict[str, Any]) -> dict[str, Any]:
+    prediction = context["predictions"].get(game.id)
+    pitchers = context["pitchers"].get(game.id, [])
+    lineups = context["lineups"].get(game.id, [])
     pitcher_map = {p.side: p for p in pitchers}
-    home_stat = latest_team_stat(session, game.home_team_id, game.game_date)
-    away_stat = latest_team_stat(session, game.away_team_id, game.game_date)
-    result = session.get(GameResult, game.id)
-    market = session.scalar(select(MarketConsensus).where(
-        MarketConsensus.game_id == game.id,
-    ).order_by(MarketConsensus.collected_at.desc()).limit(1))
-    snapshots = session.scalars(select(PredictionSnapshot).where(
-        PredictionSnapshot.game_id == game.id,
-    ).order_by(PredictionSnapshot.captured_at.desc()).limit(20)).all()
+    home_stat = context["team_stats"].get(game.home_team_id)
+    away_stat = context["team_stats"].get(game.away_team_id)
+    result = context["results"].get(game.id)
+    market = context["markets"].get(game.id)
+    snapshots = context["snapshots"].get(game.id, [])
     source_objects = [value for value in (home_stat, away_stat, *pitchers, *lineups) if value]
     latest_update = max([game.collected_at, *(item.collected_at for item in source_objects)])
     age_minutes = max(0, round((datetime.now(KST).replace(tzinfo=None) - _naive(latest_update)).total_seconds() / 60))
@@ -299,8 +368,8 @@ def _serialize_game(session: Session, game: Game) -> dict[str, Any]:
         "result": {"away_score": result.away_score, "home_score": result.home_score} if result else None,
         "prediction": _prediction_payload(prediction) if prediction else None,
         "market": _market_payload(market, prediction) if market else None,
-        "prediction_history": _history_payload(session, game.id, snapshots),
-        "prediction_timeline": _timeline_payload(session, snapshots),
+        "prediction_history": _history_payload(context["prediction_history"].get(game.id, []), snapshots),
+        "prediction_timeline": _timeline_payload(context["predictions_by_id"], snapshots),
         "lineups": {side: [_lineup_payload(item) for item in lineups if item.side == side] for side in ("away", "home")},
         "sources": _sources(game, home_stat, away_stat, pitchers, lineups),
         "freshness": {"last_updated_at": _iso(latest_update), "age_minutes": age_minutes,
@@ -368,8 +437,7 @@ def _market_payload(market: MarketConsensus, prediction: Prediction | None) -> d
     return output
 
 
-def _history_payload(session: Session, game_id: int, snapshots: list[PredictionSnapshot]) -> list[dict[str, Any]]:
-    rows = session.scalars(select(Prediction).where(Prediction.game_id == game_id).order_by(Prediction.created_at.desc()).limit(10)).all()
+def _history_payload(rows: list[Prediction], snapshots: list[PredictionSnapshot]) -> list[dict[str, Any]]:
     by_prediction = {snapshot.prediction_id: snapshot for snapshot in snapshots}
     return [{"created_at": _iso(p.created_at), "home_win_probability": p.home_win_probability,
              "away_win_probability": p.away_win_probability, "home_expected_runs": p.home_expected_runs,
@@ -379,10 +447,7 @@ def _history_payload(session: Session, game_id: int, snapshots: list[PredictionS
              "changes": by_prediction[p.id].changes if p.id in by_prediction else []} for p in rows]
 
 
-def _timeline_payload(session: Session, snapshots: list[PredictionSnapshot]) -> list[dict[str, Any]]:
-    predictions = {p.id: p for p in session.scalars(select(Prediction).where(
-        Prediction.id.in_([s.prediction_id for s in snapshots if s.prediction_id is not None])
-    )).all()} if snapshots else {}
+def _timeline_payload(predictions: dict[int, Prediction], snapshots: list[PredictionSnapshot]) -> list[dict[str, Any]]:
     rows = []
     for snapshot in reversed(snapshots):
         prediction = predictions.get(snapshot.prediction_id)

@@ -9,7 +9,7 @@ from backend.app.config import KST
 from backend.app.database import SessionLocal, database_now
 from backend.app.models import Game
 from backend.app.services.operations import job_lock
-from backend.app.services.refresh import refresh_kbo, refresh_mlb
+from backend.app.services.refresh import refresh_kbo, refresh_market, refresh_mlb
 
 
 RefreshOperation = Callable[..., dict[str, Any]]
@@ -55,6 +55,12 @@ def run_tomorrow_discovery(league: str) -> dict[str, Any]:
     return run_full_refresh(league, target_date, trigger="supabase_tomorrow_discovery")
 
 
+def run_market_refresh(league: str) -> dict[str, Any]:
+    slot_date = datetime.now(KST).date()
+    with job_lock(f"market:{league}:{slot_date.isoformat()}"):
+        return refresh_market(league)
+
+
 def run_cron_refresh(league: str, scope: str) -> dict[str, Any]:
     if scope == "full":
         return run_full_refresh(league)
@@ -62,4 +68,6 @@ def run_cron_refresh(league: str, scope: str) -> dict[str, Any]:
         return run_nearby_refresh(league)
     if scope == "tomorrow":
         return run_tomorrow_discovery(league)
+    if scope == "market":
+        return run_market_refresh(league)
     raise ValueError(f"Unsupported refresh scope: {scope}")

@@ -56,11 +56,23 @@ docker compose exec api python -m backend.app.cli refresh --date 2026-08-22 --le
 # .env에 추가한 뒤 재기동
 ODDS_API_KEY=발급받은키
 ODDS_API_REGIONS=us
-ODDS_REFRESH_MINUTES=720
 docker compose up -d --build
 ```
 
-키가 없으면 이 수집만 자동으로 건너뛰므로 무료 기본 운영은 그대로 유지됩니다. 기본 12시간 간격·한 지역·두 마켓으로 호출량을 제한합니다. 현재 Cron 구성에서는 다음 날 일정 조회분까지 대략 월 360크레딧이므로 500크레딧 무료 플랜에 여유를 두지만, 수동 강제 갱신과 제공자 정책 변경에 따라 달라질 수 있습니다.
+키가 없으면 이 수집만 자동으로 건너뛰므로 무료 기본 운영은 그대로 유지됩니다. KBO는 매일 12:00 KST, MLB는 매일 00:00 KST에 한 지역·두 마켓을 한 번씩 조회합니다. 리그당 2크레딧, 두 리그 합계 하루 4크레딧으로 30일 기준 약 120크레딧입니다. 다음 날 경기까지 같은 응답에서 함께 저장하며 성공한 일일 슬롯은 다시 호출하지 않습니다.
+
+### The Odds API 무료 키 발급·등록
+
+1. [The Odds API Get Access](https://the-odds-api.com/#get-access)에서 `Starter FREE · 500 credits/month`의 `START`를 선택합니다.
+2. 이메일 주소로 가입하고 받은 API 키를 복사합니다. 원문 키는 Git, 프런트 코드, 메신저에 올리지 않습니다.
+3. Oracle VM은 `/home/ubuntu/sports-expect/.env`에 `ODDS_API_KEY=발급키`와 `ODDS_API_REGIONS=us`를 넣고 `docker compose -f compose.yaml -f compose.oracle.yaml up -d --build`를 실행합니다.
+4. Vercel은 백엔드 프로젝트의 `Settings → Environment Variables`에 같은 두 값을 `Production` 대상으로 등록한 뒤 재배포합니다. Supabase와 프런트 Vercel 프로젝트에는 배당 키를 등록하지 않습니다.
+5. 배포 후 관리자 API의 `scope=market`을 호출하거나 다음 정기 시각을 기다립니다. 응답이 `collected`면 수집, `already_collected`면 해당 일일 슬롯에서 이미 수집된 상태입니다.
+
+```bash
+curl -X POST -H 'x-admin-token: YOUR_ADMIN_TOKEN' \
+  'https://YOUR-API.vercel.app/api/v1/admin/cron/refresh?league=KBO&scope=market'
+```
 
 ## 선택형 Claude 보조 예측
 
@@ -126,7 +138,6 @@ BACKUP_RETENTION_DAYS=14
 STALE_AFTER_MINUTES=360
 ODDS_API_KEY=
 ODDS_API_REGIONS=us
-ODDS_REFRESH_MINUTES=720
 SECRET_ENCRYPTION_KEY=long-random-secret
 ```
 

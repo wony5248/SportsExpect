@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import logging
 from types import SimpleNamespace
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import Text, create_engine, event
 from sqlalchemy.orm import Session
 from backend.app.config import KST, database_url_from_environment
 from backend.app.database.base import Base
 from backend.app.models import Game, GameResult, ModelVersion, Prediction, PredictionSnapshot, RuntimeSecret, Team
-from backend.app.repositories.repository import _prediction_changes
+from backend.app.repositories.repository import _prediction_changes, game_cards
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services import claude_advisor, runtime_secrets
 from backend.app.services.claude_advisor import blend_with_claude
@@ -16,7 +17,8 @@ from backend.app.collectors.kbo.client import (_batter_pitcher_split, _data_id_t
                                                _pitcher_opponent_split, _rank_table, _record_rate)
 from backend.app.collectors.odds import _consensus_event
 from backend.app.services.feature_engineering import _effective_lineup_ops, _lineup_matchup_summary
-from backend.app.services.refresh import _months_for_recent, _prediction_stage, _recent_by_team
+from backend.app.services.refresh import (_market_event_date, _market_refresh_due, _months_for_recent,
+                                          _prediction_stage, _recent_by_team)
 from backend.app.services.simulation import simulate_scores
 from backend.app.services.prediction import predict_game, select_primary_score
 from backend.app.services.jobs import _missing_leagues_for_date
@@ -52,11 +54,58 @@ def test_month_range_crosses_year_boundary():
     assert _months_for_recent(date(2026, 1, 10), 80) == [(2025, 10), (2025, 11), (2025, 12), (2026, 1)]
 
 
+def test_market_refresh_slots_are_anchored_to_kst_once_per_day():
+    kbo_latest = datetime(2026, 8, 21, 12, 0, tzinfo=KST)
+    assert not _market_refresh_due("KBO", kbo_latest, datetime(2026, 8, 22, 11, 59, tzinfo=KST))
+    assert _market_refresh_due("KBO", kbo_latest, datetime(2026, 8, 22, 12, 0, tzinfo=KST))
+    mlb_latest = datetime(2026, 8, 22, 0, 0, tzinfo=KST)
+    assert not _market_refresh_due("MLB", mlb_latest, datetime(2026, 8, 22, 23, 59, tzinfo=KST))
+    assert _market_refresh_due("MLB", mlb_latest, datetime(2026, 8, 23, 0, 0, tzinfo=KST))
+    assert _market_event_date("2026-08-22T15:30:00Z") == date(2026, 8, 23)
+
+
 def test_supabase_database_url_selects_psycopg_driver(monkeypatch):
     monkeypatch.setenv("BASEBALL_DATABASE_URL", "postgresql://user:pass@example.com:6543/postgres?sslmode=require")
     assert database_url_from_environment() == (
         "postgresql+psycopg://user:pass@example.com:6543/postgres?sslmode=require"
     )
+
+
+def test_model_algorithm_accepts_auditable_long_descriptions():
+    assert isinstance(ModelVersion.__table__.c.algorithm.type, Text)
+
+
+def test_http_client_info_logs_are_suppressed_for_query_string_secrets():
+    assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+    assert logging.getLogger("httpcore").getEffectiveLevel() >= logging.WARNING
+
+
+def test_game_cards_use_bounded_batch_queries():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    target = date(2026, 8, 22)
+    with Session(engine) as session:
+        away = Team(league="KBO", code="AW", name="Away")
+        home = Team(league="KBO", code="HM", name="Home")
+        session.add_all([away, home]); session.flush()
+        session.add_all([
+            Game(external_id=f"BATCH-{index}", league="KBO", game_date=target,
+                 away_team_id=away.id, home_team_id=home.id, status="SCHEDULED",
+                 source="test", source_url="test", collected_at=datetime(2026, 8, 22, 12, index))
+            for index in range(6)
+        ])
+        session.commit()
+        queries = 0
+
+        def count_query(*_args):
+            nonlocal queries
+            queries += 1
+
+        event.listen(engine, "before_cursor_execute", count_query)
+        rows = game_cards(session, target, "KBO")
+        event.remove(engine, "before_cursor_execute", count_query)
+        assert len(rows) == 6
+        assert queries <= 8
 
 
 def test_simulation_is_reproducible_and_coherent():

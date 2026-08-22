@@ -63,6 +63,7 @@ Git 저장소를 Vercel에서 가져오고 첫 번째 프로젝트를 다음처�
 | `CORS_ORIGINS` | 프런트 URL 확정 전에는 로컬 URL, 확정 후 Vercel 프런트 URL |
 | `SECRET_ENCRYPTION_KEY` | UI에서 등록한 Claude 키를 암호화할 별도 장기 비밀값 |
 | `ODDS_API_KEY` | 보유한 경우만 등록 |
+| `ODDS_API_REGIONS` | `us` (한 지역만 조회해 크레딧 제한) |
 
 Claude API 키·모델·활성 여부는 배포 후 웹의 `Claude 설정`에서 관리합니다. 혼합 비율, 타임아웃, 최대 출력 토큰은 코드 정책이므로 Vercel 환경변수로 등록하지 않습니다.
 
@@ -102,6 +103,7 @@ select vault.create_secret('YOUR_ADMIN_TOKEN', 'dugout_admin_token');
 - KBO/MLB 전체 갱신: 각 1시간
 - 경기 임박 갱신: 전체 갱신 사이의 30분 시점
 - 다음 날 경기 발견: KBO 13:10 KST, MLB 00:20 KST
+- 시장 배당: KBO 12:00 KST, MLB 00:00 KST에 리그당 하루 1회
 
 중복 호출은 PostgreSQL advisory lock으로 차단되므로 같은 리그·날짜 수집이 동시에 DB를 갱신하지 않습니다.
 
@@ -120,7 +122,7 @@ select id, status_code, error_msg, created from net._http_response order by crea
 1. API `/health`가 `database: connected`를 반환합니다.
 2. 수동 KBO 및 MLB 갱신이 각각 `200`을 반환합니다.
 3. 프런트에서 오늘 날짜의 경기 카드가 나타납니다.
-4. `cron.job`에 6개 `dugout-*` 작업이 활성화되어 있습니다.
+4. `cron.job`에 8개 `dugout-*` 작업이 활성화되어 있습니다.
 5. 다음 정각 이후 `net._http_response`에서 응답 코드가 확인됩니다.
 6. Claude를 켰다면 Vercel 로그에서 모델 ID 오류나 시간 초과가 없는지 확인합니다.
 

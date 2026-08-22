@@ -190,7 +190,9 @@ class ModelVersion(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True)
-    algorithm: Mapped[str] = mapped_column(String(120))
+    # Keep the complete, auditable model description. V10 already exceeds the
+    # former 120-character limit and PostgreSQL correctly rejected the insert.
+    algorithm: Mapped[str] = mapped_column(Text)
     feature_schema: Mapped[dict[str, Any]] = mapped_column(JSON)
     checksum: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))

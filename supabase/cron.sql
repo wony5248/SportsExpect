@@ -23,7 +23,7 @@ begin
   if refresh_league not in ('KBO', 'MLB') then
     raise exception 'Unsupported league: %', refresh_league;
   end if;
-  if refresh_scope not in ('full', 'nearby', 'tomorrow') then
+  if refresh_scope not in ('full', 'nearby', 'tomorrow', 'market') then
     raise exception 'Unsupported scope: %', refresh_scope;
   end if;
 
@@ -52,12 +52,16 @@ $$;
 revoke all on function public.invoke_dugout_refresh(text, text) from public, anon, authenticated;
 
 -- Idempotently replace only Dugout Lab jobs when this file is run again.
+-- The command check also removes legacy jobs created before the dugout-* naming convention.
 do $$
 declare
   existing_job record;
 begin
   for existing_job in
-    select jobid from cron.job where jobname like 'dugout-%'
+    select jobid
+    from cron.job
+    where jobname like 'dugout-%'
+       or command like '%invoke_dugout_refresh%'
   loop
     perform cron.unschedule(existing_job.jobid);
   end loop;
@@ -72,6 +76,14 @@ select cron.schedule('dugout-mlb-full', '19 * * * *',
   $$select public.invoke_dugout_refresh('MLB', 'full')$$);
 select cron.schedule('dugout-mlb-nearby', '49 * * * *',
   $$select public.invoke_dugout_refresh('MLB', 'nearby')$$);
+
+-- One structured market request per league/day. UTC schedules correspond to
+-- 12:00 KST for KBO and 00:00 KST for MLB. Hourly refreshes provide catch-up
+-- if either exact-time request fails, while the application daily gate prevents duplicates.
+select cron.schedule('dugout-kbo-market', '0 3 * * *',
+  $$select public.invoke_dugout_refresh('KBO', 'market')$$);
+select cron.schedule('dugout-mlb-market', '0 15 * * *',
+  $$select public.invoke_dugout_refresh('MLB', 'market')$$);
 
 -- 13:10 KST and 00:20 KST: discover the following day's schedule.
 select cron.schedule('dugout-kbo-tomorrow', '10 4 * * *',

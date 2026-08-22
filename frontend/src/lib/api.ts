@@ -6,34 +6,50 @@ function apiUrl(path: string): string {
   return `${API_BASE_URL}${path}`
 }
 
+async function request(path: string, init?: RequestInit, timeoutMs = 20_000): Promise<Response> {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(apiUrl(path), { ...init, signal: controller.signal })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw new Error('서버 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.')
+    }
+    throw new Error('서버에 연결할 수 없습니다. 네트워크 상태와 API 배포 상태를 확인해 주세요.')
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
 export async function fetchGames(date: string, league = 'ALL'): Promise<Game[]> {
-  const response = await fetch(apiUrl(`/api/v1/games?date=${encodeURIComponent(date)}&league=${encodeURIComponent(league)}`))
+  const response = await request(`/api/v1/games?date=${encodeURIComponent(date)}&league=${encodeURIComponent(league)}`)
   if (!response.ok) throw new Error(`API ${response.status}: 경기 데이터를 불러오지 못했습니다.`)
   const payload = await response.json() as { games: Game[] }
+  if (!Array.isArray(payload.games)) throw new Error('경기 데이터 형식이 올바르지 않습니다.')
   return payload.games
 }
 
 export async function fetchOperations(): Promise<OperationsStatus> {
-  const response = await fetch(apiUrl('/api/v1/operations/status'))
+  const response = await request('/api/v1/operations/status', undefined, 12_000)
   if (!response.ok) throw new Error(`API ${response.status}: 운영 상태를 불러오지 못했습니다.`)
   return response.json() as Promise<OperationsStatus>
 }
 
 export async function fetchBacktest(league = 'ALL'): Promise<Backtest> {
-  const response = await fetch(apiUrl(`/api/v1/model/backtest?league=${encodeURIComponent(league)}`))
+  const response = await request(`/api/v1/model/backtest?league=${encodeURIComponent(league)}`, undefined, 12_000)
   if (!response.ok) throw new Error(`API ${response.status}: 모델 평가를 불러오지 못했습니다.`)
   return response.json() as Promise<Backtest>
 }
 
 async function adminRequest(path: string, adminToken: string, init?: RequestInit) {
-  const response = await fetch(apiUrl(path), {
+  const response = await request(path, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
       'X-Admin-Token': adminToken,
       ...init?.headers,
     },
-  })
+  }, 25_000)
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as { detail?: string }
     throw new Error(payload.detail ?? `API ${response.status}: 관리자 요청에 실패했습니다.`)

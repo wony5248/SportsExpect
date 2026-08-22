@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -8,6 +9,11 @@ from zoneinfo import ZoneInfo
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 KST = ZoneInfo("Asia/Seoul")
+
+# httpx's INFO message contains the complete request URL. The Odds API uses a
+# query-string credential, so successful request logs must never include it.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def database_url_from_environment() -> str:
@@ -41,8 +47,6 @@ class Settings:
     stale_after_minutes: int = int(os.getenv("STALE_AFTER_MINUTES", "360"))
     odds_api_key: str | None = os.getenv("ODDS_API_KEY")
     odds_api_regions: str = os.getenv("ODDS_API_REGIONS", "us")
-    # Keep the optional two-league/two-market feed within the provider's small free quota.
-    odds_refresh_minutes: int = int(os.getenv("ODDS_REFRESH_MINUTES", "720"))
     claude_api_key: str | None = os.getenv("ANTHROPIC_API_KEY")
     # Used to encrypt UI-registered provider keys. ADMIN_TOKEN is the fallback for small installs.
     secret_encryption_key: str | None = os.getenv("SECRET_ENCRYPTION_KEY")

@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
@@ -90,10 +90,14 @@ def operations_status(session: Session = Depends(get_session)):
 
 @app.get("/api/v1/games")
 def list_games(
+    response: Response,
     target_date: date = Query(alias="date", default_factory=lambda: datetime.now(KST).date()),
     league: str = Query(default="ALL", pattern="^(ALL|KBO|MLB)$"),
     session: Session = Depends(get_session),
 ):
+    # Let Vercel serve repeated four-user dashboard reads without another DB
+    # round trip while keeping scheduled updates visible within one minute.
+    response.headers["Cache-Control"] = "public, max-age=0, s-maxage=60, stale-while-revalidate=300"
     return {"date": target_date.isoformat(), "league": league, "games": game_cards(session, target_date, league)}
 
 
@@ -132,7 +136,7 @@ def refresh(target_date: date = Query(alias="date", default_factory=lambda: date
 @app.post("/api/v1/admin/cron/refresh", dependencies=[Depends(require_admin)])
 def cron_refresh(
     league: str = Query(pattern="^(KBO|MLB)$"),
-    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow)$"),
+    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market)$"),
 ):
     try:
         return run_cron_refresh(league, scope)

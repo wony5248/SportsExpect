@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import time
 from typing import Any, Callable
 
@@ -13,7 +13,7 @@ from backend.app.collectors.mlb import MlbClient
 from backend.app.collectors.odds import OddsClient
 from backend.app.config import KST, settings
 from backend.app.database import database_now, init_db, session_scope
-from backend.app.models import CrawlLog, Game, LineupEntry, MarketConsensus, PitcherStat, Team
+from backend.app.models import CrawlLog, Game, LineupEntry, PitcherStat, Team
 from backend.app.repositories.repository import (
     latest_team_stat,
     replace_lineups,
@@ -88,7 +88,7 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                         if game:
                             replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
 
-        _refresh_market("KBO", target_date, errors)
+        _refresh_market("KBO", errors)
         predicted = _predict_games("KBO", target_date, game_ids, errors, trigger)
         return {"date": target_date.isoformat(), "games": len(fetched_games) or predicted, "predictions": predicted, "errors": errors, "used_cached_team_stats": fresh and not force}
     finally:
@@ -149,7 +149,7 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
                         game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
                         if game:
                             replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
-        _refresh_market("MLB", target_date, errors)
+        _refresh_market("MLB", errors)
         predicted = _predict_games("MLB", target_date, game_ids, errors, trigger)
         return {"date": target_date.isoformat(), "league": "MLB", "games": len(fetched_games) or predicted,
                 "predictions": predicted, "errors": errors, "used_cached_team_stats": fresh and not force}
@@ -258,31 +258,78 @@ def _months_for_recent(target: date, days: int) -> list[tuple[int, int]]:
     return months
 
 
-def _refresh_market(league: str, target_date: date, errors: list[str]) -> None:
+MARKET_REFRESH_HOURS_KST = {"KBO": 12, "MLB": 0}
+
+
+def _market_refresh_due(league: str, latest: datetime | None, now: datetime) -> bool:
+    """Return true once per league-specific KST daily market slot, with missed-run catch-up."""
+    scheduled = now.replace(hour=MARKET_REFRESH_HOURS_KST[league], minute=0, second=0, microsecond=0)
+    if now < scheduled:
+        scheduled -= timedelta(days=1)
+    return latest is None or latest < scheduled
+
+
+def _market_event_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(KST).date()
+    except ValueError:
+        return None
+
+
+def refresh_market(league: str) -> dict[str, Any]:
+    """Run the daily structured-market collector without refreshing baseball sources."""
+    init_db()
+    errors: list[str] = []
+    result = _refresh_market(league, errors)
+    return {"league": league, "collector": "market", **result, "errors": errors}
+
+
+def _refresh_market(league: str, errors: list[str]) -> dict[str, Any]:
     if not settings.odds_api_key:
-        return
-    threshold = database_now() - timedelta(minutes=settings.odds_refresh_minutes)
+        return {"status": "disabled", "matched_games": 0}
+    collector = f"{league.lower()}_market"
+    now = database_now()
     with session_scope() as session:
-        latest = session.scalar(select(func.max(MarketConsensus.collected_at)).join(
-            Game, Game.id == MarketConsensus.game_id,
-        ).where(Game.league == league, Game.game_date == target_date))
-    if latest and latest >= threshold:
-        return
+        # CrawlLog gates provider calls even when no event matches a locally stored game.
+        latest = session.scalar(select(func.max(CrawlLog.finished_at)).where(
+            CrawlLog.collector == collector, CrawlLog.status == "SUCCESS",
+        ))
+    if not _market_refresh_due(league, latest, now):
+        return {"status": "already_collected", "matched_games": 0}
     client = OddsClient()
     try:
-        source = _tracked(f"{league.lower()}_market", "https://api.the-odds-api.com/v4/sports",
+        source = _tracked(collector, "https://api.the-odds-api.com/v4/sports",
                           lambda: client.consensus(league), errors)
         if not source:
-            return
+            return {"status": "failed", "matched_games": 0}
+        matched_games = 0
         with session_scope() as session:
             games = session.scalars(select(Game).options(joinedload(Game.home_team), joinedload(Game.away_team)).where(
-                Game.league == league, Game.game_date == target_date,
+                Game.league == league, Game.status.in_(("SCHEDULED", "LIVE")),
             )).all()
-            by_matchup = {(_team_key(game.away_team.name), _team_key(game.home_team.name)): game for game in games}
+            by_matchup = {
+                (game.game_date, _team_key(game.away_team.name), _team_key(game.home_team.name)): game
+                for game in games
+            }
             for row in source.data:
-                game = by_matchup.get((_team_key(row["away_name"]), _team_key(row["home_name"])))
+                game = by_matchup.get((
+                    _market_event_date(row.get("commence_time")),
+                    _team_key(row["away_name"]),
+                    _team_key(row["home_name"]),
+                ))
                 if game:
                     upsert_market_consensus(session, game, row, source.source_url, source.collected_at)
+                    matched_games += 1
+        return {
+            "status": "collected",
+            "provider_events": len(source.data),
+            "matched_games": matched_games,
+        }
     finally:
         client.close()
 

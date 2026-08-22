@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert, Box, Button, CircularProgress, Container, Stack, TextField, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material'
 import RefreshRounded from '@mui/icons-material/RefreshRounded'
 import SettingsRounded from '@mui/icons-material/SettingsRounded'
@@ -19,17 +19,30 @@ export default function App() {
   const [operations, setOperations] = useState<OperationsStatus | null>(null)
   const [backtest, setBacktest] = useState<Backtest | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const requestId = useRef(0)
 
   const load = useCallback(async () => {
+    const currentRequest = ++requestId.current
     setLoading(true); setError(null)
+    const auxiliary = Promise.allSettled([fetchOperations(), fetchBacktest(league)])
     try {
-      const [gameRows, operationStatus, evaluation] = await Promise.all([
-        fetchGames(date, league), fetchOperations(), fetchBacktest(league),
-      ])
-      setGames(gameRows); setOperations(operationStatus); setBacktest(evaluation)
+      const gameRows = await fetchGames(date, league)
+      if (currentRequest !== requestId.current) return
+      setGames(gameRows)
     }
-    catch (err) { setError(err instanceof Error ? err.message : '알 수 없는 오류') }
-    finally { setLoading(false) }
+    catch (err) {
+      if (currentRequest !== requestId.current) return
+      setGames([])
+      setError(err instanceof Error ? err.message : '알 수 없는 오류')
+    }
+    finally {
+      if (currentRequest === requestId.current) setLoading(false)
+    }
+
+    const [operationResult, backtestResult] = await auxiliary
+    if (currentRequest !== requestId.current) return
+    if (operationResult.status === 'fulfilled') setOperations(operationResult.value)
+    if (backtestResult.status === 'fulfilled') setBacktest(backtestResult.value)
   }, [date, league])
 
   useEffect(() => { void load() }, [load])
@@ -77,12 +90,13 @@ export default function App() {
             <Typography className="game-count">{games.length} GAMES</Typography>
           </Stack>
 
-          {error && <Alert severity="error" sx={{ mb: 3 }}>{error}<br />백엔드 실행과 해당 날짜의 refresh 여부를 확인하세요.</Alert>}
-          {loading ? <Box className="loading"><CircularProgress size={28} /><span>예측 보드를 불러오는 중</span></Box> : (
+          {error && <Alert severity="error" sx={{ mb: 3 }} action={<Button color="inherit" size="small" onClick={() => void load()}>재시도</Button>}>{error}</Alert>}
+          {loading && games.length === 0 ? <Box className="loading"><CircularProgress size={28} /><Box><b>예측 보드를 불러오는 중</b><span>최대 20초 안에 결과 또는 오류를 표시합니다.</span></Box></Box> : (
             <Box className="game-grid">
               {games.map((game) => <GameCard key={game.id} game={game} />)}
             </Box>
           )}
+          {loading && games.length > 0 && <Box className="refreshing"><CircularProgress size={16} /><span>최신 데이터 확인 중</span></Box>}
           {!loading && !error && games.length === 0 && (
             <Box className="empty-state">
               <SportsBaseballRounded />
