@@ -193,6 +193,23 @@ export type OperationsStatus = {
   last_success: null | { collector: string; status: string; finished_at: string; error: string | null }
 }
 
+export type ClaudeKeyStatus = {
+  configured: boolean
+  enabled: boolean
+  source: 'admin_ui' | 'environment' | 'none'
+  fingerprint: string | null
+  updated_at: string | null
+  model: string
+  error: string | null
+  connection_verified?: boolean
+  configured_model_available?: boolean
+}
+
+export type ClaudeModel = {
+  id: string
+  display_name: string
+}
+
 export type Backtest = {
   sample_size: number
   message?: string

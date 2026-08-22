@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from backend.app.config import settings
+from backend.app.services.runtime_secrets import claude_configuration
 
 
 _OUTPUT_SCHEMA = {
@@ -39,16 +40,26 @@ _cache_lock = Lock()
 _CACHE_LIMIT = 256
 
 
-def claude_prediction_advice(cache_key: str, context: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+def clear_claude_cache() -> None:
+    with _cache_lock:
+        _cache.clear()
+
+
+def claude_prediction_advice(cache_key: str, context: dict[str, Any],
+                             configuration: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Return optional structured Claude advice and non-sensitive execution metadata."""
-    enabled = bool(settings.claude_prediction_enabled and settings.claude_api_key)
+    runtime = configuration or claude_configuration()
+    api_key = runtime.get("api_key")
+    enabled = bool(runtime.get("enabled") and api_key)
     metadata: dict[str, Any] = {
         "enabled": enabled,
         "used": False,
         "model": settings.claude_model if enabled else None,
+        "key_source": runtime.get("source"),
+        "key_fingerprint": runtime.get("fingerprint"),
     }
     if not enabled:
-        metadata["status"] = "missing_api_key" if settings.claude_prediction_enabled else "disabled"
+        metadata["status"] = "missing_api_key" if not runtime.get("configured") else "disabled"
         return None, metadata
 
     with _cache_lock:
@@ -58,7 +69,7 @@ def claude_prediction_advice(cache_key: str, context: dict[str, Any]) -> tuple[d
             return cached, {**metadata, "used": True, "status": "cached"}
 
     try:
-        advice, usage = _request_advice(context)
+        advice, usage = _request_advice(context, str(api_key), str(runtime.get("model") or settings.claude_model))
     except Exception as exc:  # External AI must never block the statistical forecast.
         metadata["status"] = "fallback"
         metadata["error"] = _safe_error(exc)
@@ -94,16 +105,16 @@ def blend_with_claude(base_home_probability: float, base_home_runs: float, base_
     )
 
 
-def _request_advice(context: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
+def _request_advice(context: dict[str, Any], api_key: str, model: str) -> tuple[dict[str, Any], dict[str, int]]:
     response = httpx.post(
         "https://api.anthropic.com/v1/messages",
         headers={
-            "x-api-key": settings.claude_api_key or "",
+            "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         },
         json={
-            "model": settings.claude_model,
+            "model": model,
             "max_tokens": settings.claude_max_tokens,
             "temperature": 0,
             "system": _SYSTEM_PROMPT,

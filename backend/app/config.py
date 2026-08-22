@@ -41,14 +41,18 @@ class Settings:
     stale_after_minutes: int = int(os.getenv("STALE_AFTER_MINUTES", "360"))
     odds_api_key: str | None = os.getenv("ODDS_API_KEY")
     odds_api_regions: str = os.getenv("ODDS_API_REGIONS", "us")
-    odds_refresh_minutes: int = int(os.getenv("ODDS_REFRESH_MINUTES", "360"))
+    # Keep the optional two-league/two-market feed within the provider's small free quota.
+    odds_refresh_minutes: int = int(os.getenv("ODDS_REFRESH_MINUTES", "720"))
     claude_api_key: str | None = os.getenv("ANTHROPIC_API_KEY")
-    # Explicit opt-in: setting an API key alone must not transmit prediction inputs.
-    claude_prediction_enabled: bool = os.getenv("CLAUDE_PREDICTION_ENABLED", "false").lower() in {"1", "true", "yes", "on"}
-    claude_model: str = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
-    claude_blend_weight: float = float(os.getenv("CLAUDE_BLEND_WEIGHT", "0.15"))
-    claude_timeout_seconds: float = float(os.getenv("CLAUDE_TIMEOUT_SECONDS", "20"))
-    claude_max_tokens: int = int(os.getenv("CLAUDE_MAX_TOKENS", "600"))
+    # Used to encrypt UI-registered provider keys. ADMIN_TOKEN is the fallback for small installs.
+    secret_encryption_key: str | None = os.getenv("SECRET_ENCRYPTION_KEY")
+    # Claude runtime safety limits are application policy, not deployment knobs. The administrator
+    # UI controls enablement and model selection after authenticating the provider key.
+    claude_prediction_enabled: bool = False
+    claude_model: str = "claude-sonnet-5"
+    claude_blend_weight: float = 0.15
+    claude_timeout_seconds: float = 20.0
+    claude_max_tokens: int = 600
     cors_origins: tuple[str, ...] = tuple(
         value.strip() for value in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if value.strip()
     )

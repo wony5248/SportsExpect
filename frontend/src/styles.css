@@ -86,6 +86,10 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .comparison .MuiLinearProgress-root { height: 4px; background: #1d3a31; }.comparison .MuiLinearProgress-bar { background: #7ee7b8; }
 .score-chips .MuiChip-root { background: rgba(119,155,140,.1); color: #aabdb5; font-size: .7rem; }
 .source-note { color: #688078; font-size: .67rem !important; line-height: 1.5 !important; }
+.settings-copy { color: #8ca49a; font-size: .8rem !important; line-height: 1.65 !important; }
+.claude-key-state { min-width: 190px; display: grid; gap: 2px; padding: 8px 11px; border: 1px solid rgba(191,233,215,.12); border-radius: 9px; }
+.claude-key-state b { color: #9eb3aa; font-size: .72rem; }.claude-key-state small { color: #688078; font-size: .61rem; }
+.claude-key-state.enabled { border-color: rgba(126,231,184,.25); background: rgba(126,231,184,.07); }.claude-key-state.enabled b { color: #7ee7b8; }
 .lineup-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .lineup-grid > div { padding: 12px; background: rgba(3,16,12,.24); border-radius: 10px; }
 .lineup-grid ol { margin: 9px 0 0; padding-left: 22px; color: #789087; }

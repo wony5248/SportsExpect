@@ -7,7 +7,7 @@
 - Supabase 프로젝트 1개
 - Vercel 프로젝트 2개: `dugout-api`, `dugout-web`
 - 32바이트 이상의 임의 `ADMIN_TOKEN`
-- 선택 사항: `ANTHROPIC_API_KEY`, `ODDS_API_KEY`
+- 선택 사항: `ODDS_API_KEY` (Claude 키는 배포 후 관리자 UI에서 등록)
 
 토큰은 아래처럼 생성할 수 있습니다.
 
@@ -61,10 +61,10 @@ Git 저장소를 Vercel에서 가져오고 첫 번째 프로젝트를 다음처�
 | `ADMIN_TOKEN` | 위에서 생성한 토큰 |
 | `AUTO_CREATE_SCHEMA` | `false` |
 | `CORS_ORIGINS` | 프런트 URL 확정 전에는 로컬 URL, 확정 후 Vercel 프런트 URL |
-| `ANTHROPIC_API_KEY` | Claude를 쓸 때만 등록 |
-| `CLAUDE_PREDICTION_ENABLED` | Claude 전송을 허용할 때 `true` |
-| `CLAUDE_MODEL` | 구독/API 계정에서 사용할 수 있는 모델 ID |
+| `SECRET_ENCRYPTION_KEY` | UI에서 등록한 Claude 키를 암호화할 별도 장기 비밀값 |
 | `ODDS_API_KEY` | 보유한 경우만 등록 |
+
+Claude API 키·모델·활성 여부는 배포 후 웹의 `Claude 설정`에서 관리합니다. 혼합 비율, 타임아웃, 최대 출력 토큰은 코드 정책이므로 Vercel 환경변수로 등록하지 않습니다.
 
 배포 후 API 주소를 기록하고 확인합니다.
 

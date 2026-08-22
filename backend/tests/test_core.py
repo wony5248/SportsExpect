@@ -2,13 +2,15 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from backend.app.config import KST, database_url_from_environment
 from backend.app.database.base import Base
-from backend.app.models import Game, GameResult, ModelVersion, Prediction, PredictionSnapshot, Team
+from backend.app.models import Game, GameResult, ModelVersion, Prediction, PredictionSnapshot, RuntimeSecret, Team
 from backend.app.repositories.repository import _prediction_changes
 from backend.app.services.backtest import walk_forward_backtest
+from backend.app.services import claude_advisor, runtime_secrets
 from backend.app.services.claude_advisor import blend_with_claude
 from backend.app.collectors.kbo.client import (_batter_pitcher_split, _data_id_table,
                                                _pitcher_opponent_split, _rank_table, _record_rate)
@@ -18,6 +20,7 @@ from backend.app.services.refresh import _months_for_recent, _prediction_stage, 
 from backend.app.services.simulation import simulate_scores
 from backend.app.services.prediction import predict_game, select_primary_score
 from backend.app.services.jobs import _missing_leagues_for_date
+from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
 
 
 def test_rank_and_data_tables_are_schema_driven():
@@ -103,7 +106,11 @@ def test_claude_advice_cannot_overpower_statistical_baseline():
     assert 3.9 <= away_runs <= 4.2
 
 
-def test_confirmed_lineup_change_creates_new_prediction_input():
+def test_confirmed_lineup_change_creates_new_prediction_input(monkeypatch):
+    monkeypatch.setattr("backend.app.services.prediction.claude_configuration", lambda: {
+        "configured": False, "enabled": False, "source": "none", "fingerprint": None,
+        "updated_at": None, "model": "claude-sonnet-5", "api_key": None, "error": None,
+    })
     home_team, away_team = SimpleNamespace(name="Home"), SimpleNamespace(name="Away")
     recent = {"10": {"games": 10, "win_rate": .5}}
     home = SimpleNamespace(team=home_team, recent=recent, win_rate=.55, home_win_rate=.58, runs_per_game=4.8,
@@ -129,6 +136,53 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     assert after["payload"]["coherence_valid"] is True
     assert after["home_win_probability"] == after["payload"]["simulation_home_probability"]
     assert after["away_win_probability"] == round(1 - after["home_win_probability"], 4)
+
+
+def test_ui_registered_secret_is_encrypted_and_requires_same_master_key():
+    raw = "sk-ant-test-key-that-must-never-be-returned"
+    encrypted = encrypt_secret(raw, "test-master-secret-long-enough")
+    assert raw not in encrypted
+    assert decrypt_secret(encrypted, "test-master-secret-long-enough") == raw
+    with pytest.raises(RuntimeError):
+        decrypt_secret(encrypted, "different-test-master-secret")
+
+
+def test_ui_registered_claude_model_is_stored_with_key(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(runtime_secrets, "encrypt_secret", lambda value: f"encrypted:{value}")
+    monkeypatch.setattr(runtime_secrets, "decrypt_secret", lambda value: value.removeprefix("encrypted:"))
+    with Session(engine) as session:
+        status = runtime_secrets.save_claude_key(
+            session, "sk-ant-test-key-that-is-long-enough", "claude-sonnet-5", enabled=True,
+        )
+        row = session.get(RuntimeSecret, runtime_secrets.CLAUDE_SECRET_NAME)
+        assert row is not None
+        assert row.model == "claude-sonnet-5"
+        assert status["model"] == "claude-sonnet-5"
+        assert "api_key" not in status
+
+
+def test_claude_advisor_uses_ui_runtime_key_without_exposing_it(monkeypatch):
+    observed: dict[str, str] = {}
+
+    def fake_request(_context, api_key, model):
+        observed.update(api_key=api_key, model=model)
+        return {
+            "home_win_probability": .55, "home_expected_runs": 4.8, "away_expected_runs": 4.2,
+            "confidence": 70, "reasons": ["test"], "caution": "test",
+        }, {"input_tokens": 10, "output_tokens": 5}
+
+    monkeypatch.setattr(claude_advisor, "_request_advice", fake_request)
+    claude_advisor.clear_claude_cache()
+    advice, metadata = claude_advisor.claude_prediction_advice("ui-key-test", {}, {
+        "configured": True, "enabled": True, "source": "admin_ui", "fingerprint": "abcdef123456",
+        "updated_at": None, "model": "claude-sonnet-5", "api_key": "sk-ant-runtime-secret", "error": None,
+    })
+    assert advice is not None
+    assert observed == {"api_key": "sk-ant-runtime-secret", "model": "claude-sonnet-5"}
+    assert metadata["key_source"] == "admin_ui"
+    assert "api_key" not in metadata
 
 
 def test_prediction_stage_and_change_reason_are_explicit():

@@ -56,27 +56,19 @@ docker compose exec api python -m backend.app.cli refresh --date 2026-08-22 --le
 # .env에 추가한 뒤 재기동
 ODDS_API_KEY=발급받은키
 ODDS_API_REGIONS=us
-ODDS_REFRESH_MINUTES=360
+ODDS_REFRESH_MINUTES=720
 docker compose up -d --build
 ```
 
-키가 없으면 이 수집만 자동으로 건너뛰므로 무료 기본 운영은 그대로 유지됩니다. 기본 6시간 간격·한 지역·두 마켓으로 호출량을 제한하며, 제공 범위·호출 한도·요금제는 데이터 제공자 정책에 따릅니다.
+키가 없으면 이 수집만 자동으로 건너뛰므로 무료 기본 운영은 그대로 유지됩니다. 기본 12시간 간격·한 지역·두 마켓으로 호출량을 제한합니다. 현재 Cron 구성에서는 다음 날 일정 조회분까지 대략 월 360크레딧이므로 500크레딧 무료 플랜에 여유를 두지만, 수동 강제 갱신과 제공자 정책 변경에 따라 달라질 수 있습니다.
 
 ## 선택형 Claude 보조 예측
 
 Claude는 기존 통계 모델을 대체하지 않습니다. 팀명, 리그·구장, 파생 통계 특징, 기존 승률·기대득점만 구조화 출력 API에 보내고, 응답을 최대 25% 이내의 보조 가중치로 결합합니다. 실제 기본 가중치는 15%에 Claude가 반환한 자신도를 곱해 더 낮아질 수 있습니다. 선수명, 수집 원문, API 키는 프롬프트에 넣지 않습니다. API 오류·시간 초과·한도 초과 시 해당 경기는 통계 모델만으로 즉시 계산됩니다.
 
-키를 넣는 것만으로는 데이터가 전송되지 않습니다. 아래 두 값을 모두 설정해야 활성화됩니다.
+배포 후 화면 상단 `Claude 설정`에서 관리자 토큰과 API 키를 입력하고 `키 인증 · 모델 불러오기`를 누릅니다. 이 키의 Anthropic 계정에서 실제 사용 가능한 모델만 표시되며, 모델과 사용 여부를 선택해 저장합니다. 이미 키가 저장되어 있으면 API 키를 다시 입력하지 않고 모델이나 활성 상태만 변경할 수 있습니다.
 
-```bash
-ANTHROPIC_API_KEY=발급받은_API_키
-CLAUDE_PREDICTION_ENABLED=true
-CLAUDE_MODEL=claude-sonnet-5
-CLAUDE_BLEND_WEIGHT=0.15
-docker compose up -d --build
-```
-
-`CLAUDE_BLEND_WEIGHT`는 코드에서 최대 `0.25`로 제한됩니다. Claude 웹/앱 구독과 API Console 사용량 결제는 동일하지 않을 수 있으므로 Anthropic Console에서 API 키와 사용 한도를 확인해야 합니다. API 형식은 [Anthropic Messages API](https://platform.claude.com/docs/en/api/messages)와 [구조화 출력](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)을 따릅니다.
+보조 혼합 비율 `0.15`, 요청 제한시간 `20초`, 최대 출력 `600토큰`은 안전 정책으로 코드에 고정되어 배포 환경변수로 조절하지 않습니다. Claude 웹/앱 구독과 API Console 사용량 결제는 동일하지 않을 수 있으므로 Anthropic Console에서 API 키와 사용 한도를 확인해야 합니다. API 형식은 [Anthropic Messages API](https://platform.claude.com/docs/en/api/messages), [Models API](https://platform.claude.com/docs/en/api/models/list), [구조화 출력](https://platform.claude.com/docs/en/build-with-claude/structured-outputs)을 따릅니다.
 
 Oracle Cloud VM 배포는 `docs/ORACLE_VM.md`의 순서대로 진행합니다.
 데이터 소스별 채택·제외 근거는 `docs/DATA_SOURCES.md`에 정리했습니다.
@@ -98,6 +90,7 @@ cd frontend && npm run build
 - `/ready`: 최근 수집 성공까지 포함한 준비 상태
 - `/api/v1/operations/status`: 오류율, 최근 성공, 변경 알림, 예측 수
 - `/api/v1/model/backtest`: 누수 방지 walk-forward 평가
+- 화면의 `Claude 설정`: 관리자 토큰으로 Claude API 키 연결 확인·암호화 저장·교체
 - `/api/v1/games`: KBO/MLB 카드·신선도·변화 타임라인
 - `/api/v1/admin/refresh`, `/api/v1/admin/backup`: `ADMIN_TOKEN` 설정 시 `X-Admin-Token` 필요
 
@@ -133,13 +126,8 @@ BACKUP_RETENTION_DAYS=14
 STALE_AFTER_MINUTES=360
 ODDS_API_KEY=
 ODDS_API_REGIONS=us
-ODDS_REFRESH_MINUTES=360
-ANTHROPIC_API_KEY=
-CLAUDE_PREDICTION_ENABLED=false
-CLAUDE_MODEL=claude-sonnet-5
-CLAUDE_BLEND_WEIGHT=0.15
-CLAUDE_TIMEOUT_SECONDS=20
-CLAUDE_MAX_TOKENS=600
+ODDS_REFRESH_MINUTES=720
+SECRET_ENCRYPTION_KEY=long-random-secret
 ```
 
 상세 설계는 [docs/DESIGN.md](docs/DESIGN.md), 장애·백업·복구 흐름은 [docs/OPERATIONS.md](docs/OPERATIONS.md), [유료화 전략](docs/MONETIZATION.md), [모델·AI 로드맵](docs/MODEL_AI_ROADMAP.md)을 참고하세요.

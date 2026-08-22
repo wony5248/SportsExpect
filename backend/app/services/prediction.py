@@ -8,6 +8,7 @@ from backend.app.config import settings
 from backend.app.services.claude_advisor import blend_with_claude, claude_prediction_advice
 from backend.app.services.feature_engineering import build_features, expected_runs, logistic_probability
 from backend.app.services.simulation import simulate_scores
+from backend.app.services.runtime_secrets import claude_configuration
 
 
 MODEL_ALGORITHM = "dynamic league environment + matchup-strength means + bounded optional Claude run adjustment + validated overdispersed correlated gamma-Poisson score distribution"
@@ -36,6 +37,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
          getattr(item, "matchup_slg", None), getattr(item, "matchup_ops", None))
         for item in (lineups or [])
     ]
+    ai_configuration = claude_configuration()
     input_data = {
         "game": game.external_id,
         "features": features,
@@ -46,9 +48,11 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
                      (getattr(home_pitcher, "player_id", None), getattr(home_pitcher, "name", None))],
         "lineups": lineup_fingerprint,
         "ai_config": {
-            "enabled": bool(settings.claude_prediction_enabled and settings.claude_api_key),
-            "model": settings.claude_model,
+            "enabled": bool(ai_configuration["enabled"] and ai_configuration["api_key"]),
+            "model": ai_configuration["model"],
             "blend_weight": settings.claude_blend_weight,
+            "key_source": ai_configuration["source"],
+            "key_fingerprint": ai_configuration["fingerprint"],
         },
     }
     base_input_hash = hashlib.sha256(json.dumps(input_data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -68,7 +72,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         },
         "features": features,
     }
-    advice, ai_metadata = claude_prediction_advice(base_input_hash, advice_context)
+    advice, ai_metadata = claude_prediction_advice(base_input_hash, advice_context, ai_configuration)
     logistic, home_runs, away_runs, ai_weight = blend_with_claude(
         base_logistic, base_home_runs, base_away_runs, advice,
     )

@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -17,6 +18,18 @@ from backend.app.repositories.repository import game_cards, game_detail, perform
 from backend.app.services.operations import LockUnavailable, backup_database, operational_status
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services.jobs import run_cron_refresh, run_full_refresh
+from backend.app.services.claude_advisor import clear_claude_cache
+from backend.app.services.runtime_secrets import (claude_configuration, public_claude_status,
+                                                  remove_claude_key, save_claude_key, verify_claude_key)
+
+
+class ClaudeKeyAccess(BaseModel):
+    api_key: SecretStr | None = Field(default=None, min_length=20, max_length=512)
+
+
+class ClaudeKeyRegistration(ClaudeKeyAccess):
+    model: str = Field(min_length=3, max_length=80, pattern=r"^claude-")
+    enabled: bool = True
 
 
 @asynccontextmanager
@@ -134,6 +147,61 @@ def backup():
         return backup_database()
     except LockUnavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.get("/api/v1/admin/claude-key", dependencies=[Depends(require_admin)])
+def claude_key_status(session: Session = Depends(get_session)):
+    return public_claude_status(session)
+
+
+@app.post("/api/v1/admin/claude-key/models", dependencies=[Depends(require_admin)])
+def claude_models(access: ClaudeKeyAccess, session: Session = Depends(get_session)):
+    try:
+        api_key = access.api_key.get_secret_value() if access.api_key else claude_configuration(session).get("api_key")
+        if not api_key:
+            raise ValueError("Register or enter a Claude API key first")
+        return {"models": verify_claude_key(str(api_key))}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/claude-key", dependencies=[Depends(require_admin)])
+def register_claude_key(registration: ClaudeKeyRegistration, session: Session = Depends(get_session)):
+    try:
+        api_key = registration.api_key.get_secret_value() if registration.api_key else claude_configuration(session).get("api_key")
+        if not api_key:
+            raise ValueError("Register or enter a Claude API key first")
+        available_models = verify_claude_key(api_key)
+        if registration.model not in {item["id"] for item in available_models}:
+            raise ValueError("The selected Claude model is not available for this API key")
+        status = save_claude_key(session, api_key, registration.model, registration.enabled)
+        session.commit()
+        clear_claude_cache()
+        return {
+            **status,
+            "connection_verified": True,
+            "configured_model_available": True,
+        }
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        session.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/claude-key/remove", dependencies=[Depends(require_admin)])
+def delete_claude_key(session: Session = Depends(get_session)):
+    try:
+        status = remove_claude_key(session)
+        session.commit()
+        clear_claude_cache()
+        return status
+    except RuntimeError as exc:
+        session.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 frontend_dist = Path(__file__).resolve().parents[2] / "frontend" / "dist"

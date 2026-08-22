@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Alert, Box, Button, CircularProgress, Container, Stack, TextField, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material'
 import RefreshRounded from '@mui/icons-material/RefreshRounded'
+import SettingsRounded from '@mui/icons-material/SettingsRounded'
 import SportsBaseballRounded from '@mui/icons-material/SportsBaseballRounded'
 import { fetchBacktest, fetchGames, fetchOperations, kstToday } from './lib/api'
 import type { Backtest, Game, OperationsStatus } from './types'
 import GameCard from './components/GameCard'
+import ClaudeSettingsDialog from './components/ClaudeSettingsDialog'
 
 export default function App() {
   const initialQuery = new URLSearchParams(window.location.search)
@@ -16,6 +18,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const [operations, setOperations] = useState<OperationsStatus | null>(null)
   const [backtest, setBacktest] = useState<Backtest | null>(null)
+  const [settingsOpen, setSettingsOpen] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true); setError(null)
@@ -54,6 +57,7 @@ export default function App() {
             </ToggleButtonGroup>
             <TextField type="date" value={date} onChange={(event) => setDate(event.target.value)} size="small" inputProps={{ 'aria-label': '경기 날짜' }} />
             <Button variant="outlined" startIcon={<RefreshRounded />} onClick={() => void load()} disabled={loading}>다시 불러오기</Button>
+            <Button variant="outlined" startIcon={<SettingsRounded />} onClick={() => setSettingsOpen(true)}>Claude 설정</Button>
           </Stack>
         </header>
 
@@ -104,10 +108,11 @@ export default function App() {
         </main>
 
         <footer>
-          <span>DATA · KBO / MLB OFFICIAL</span><span>MODEL · MATCHUP BASELINES</span><span>NO LLM · OPTIONAL MARKET API</span>
+          <span>DATA · KBO / MLB OFFICIAL</span><span>MODEL · MATCHUP BASELINES</span><span>OPTIONAL CLAUDE · OPTIONAL MARKET API</span>
           <p>모든 확률은 통계적 추정치이며 경기 결과 또는 수익을 보장하지 않습니다.</p>
         </footer>
       </Container>
+      <ClaudeSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
     </Box>
   )
 }

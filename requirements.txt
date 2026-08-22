@@ -7,3 +7,4 @@ beautifulsoup4==4.13.4
 numpy==2.3.2
 pytest==8.4.1
 alembic==1.16.5
+cryptography==46.0.3

@@ -59,6 +59,7 @@ def init_db() -> None:
                 "matchup_hit_by_pitch": "INTEGER", "matchup_strikeouts": "INTEGER",
                 "matchup_avg": "FLOAT", "matchup_obp": "FLOAT", "matchup_slg": "FLOAT", "matchup_ops": "FLOAT",
             },
+            "runtime_secrets": {"model": "VARCHAR(80)"},
         }
         with engine.begin() as connection:
             for table, expected in additions.items():
