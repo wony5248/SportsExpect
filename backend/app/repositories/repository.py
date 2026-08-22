@@ -468,8 +468,20 @@ def _team_payload(team: Team, stat: TeamStat | None, pitcher: PitcherStat | None
     data: dict[str, Any] = {"code": team.code, "name": team.name}
     data["stats"] = ({key: getattr(stat, key) for key in (
         "games", "wins", "losses", "draws", "win_rate", "home_win_rate", "away_win_rate", "runs_per_game",
-        "runs_allowed_per_game", "avg", "obp", "slg", "ops", "era", "whip", "recent"
+        "runs_allowed_per_game", "avg", "obp", "slg", "ops", "era", "whip"
     )} if stat else None)
+    if data["stats"] is not None:
+        # The model consumes full season matchup/game logs before persistence.
+        # Cards only need the aggregate recent windows; omitting hidden raw rows
+        # keeps a 15-game MLB board small enough for mobile connections.
+        recent = stat.recent or {}
+        data["stats"]["recent"] = {
+            window: {key: value.get(key) for key in (
+                "games", "wins", "draws", "win_rate", "avg_runs", "avg_runs_allowed"
+            )}
+            for window in ("5", "10", "20")
+            if isinstance((value := recent.get(window)), dict)
+        }
     data["starter"] = ({key: getattr(pitcher, key) for key in (
         "player_id", "name", "confirmed", "era", "whip", "war", "games", "avg_start_innings", "quality_starts",
         "fip", "k_bb_rate", "rest_days", "recent_pitches", "handedness"

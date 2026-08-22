@@ -36,7 +36,7 @@ async function request(path: string, init?: RequestInit, timeoutMs = 20_000): Pr
 }
 
 export async function fetchGames(date: string, league = 'ALL'): Promise<Game[]> {
-  const response = await request(`/api/v1/games?date=${encodeURIComponent(date)}&league=${encodeURIComponent(league)}`)
+  const response = await request(`/api/v1/games?date=${encodeURIComponent(date)}&league=${encodeURIComponent(league)}`, undefined, 45_000)
   if (!response.ok) throw new Error(`API ${response.status}: 경기 데이터를 불러오지 못했습니다.`)
   const payload = await response.json() as { games: Game[] }
   if (!Array.isArray(payload.games)) throw new Error('경기 데이터 형식이 올바르지 않습니다.')
