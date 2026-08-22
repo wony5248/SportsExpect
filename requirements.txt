@@ -1,1 +1,9 @@
--r backend/requirements.txt
+fastapi==0.116.1
+uvicorn[standard]==0.35.0
+SQLAlchemy==2.0.43
+psycopg[binary]==3.2.9
+httpx==0.28.1
+beautifulsoup4==4.13.4
+numpy==2.3.2
+pytest==8.4.1
+alembic==1.16.5
