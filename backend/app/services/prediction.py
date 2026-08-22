@@ -46,6 +46,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     ]
     input_data = {
         "game": game.external_id,
+        "simulation_summary_schema": 3,
         "features": features,
         "home_expected": round(base_home_runs, 6),
         "away_expected": round(base_away_runs, 6),
@@ -80,7 +81,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     disagreement = abs(logistic - simulation["home_two_way_probability"])
     confidence, confidence_label, missing = _confidence(features, disagreement)
     reasons = _reasons(home, away, home_pitcher, away_pitcher, features)
-    display_score = {"away": round(away_runs, 1), "home": round(home_runs, 1)}
+    display_score = {"away": primary_score["away"], "home": primary_score["home"]}
     return {
         "input_hash": input_hash,
         "input_payload": input_data,
@@ -94,7 +95,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "statistical_expected_total": round(home_runs + away_runs, 2),
         "confidence": confidence,
         "payload": {
-            "summary_schema_version": 2,
+            "summary_schema_version": 3,
             "coherence_valid": True,
             "probability_source": "9_inning_score_simulation_two_way_excluding_ties",
             "model": {
@@ -123,6 +124,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "tie_probability": round(simulation["tie_probability"], 4),
             "top_scores": simulation["top_scores"],
             "primary_score": primary_score,
+            "simulation_modes": simulation["simulation_modes"],
             "total_quantiles": simulation["total_quantiles"],
             "team_quantiles": simulation["team_quantiles"],
             "game_shape": {key: round(value, 4) for key, value in simulation["game_shape"].items()},
@@ -134,21 +136,12 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
 
 def select_primary_score(top_scores: list[dict[str, Any]], home_expected: float, away_expected: float,
                          home_win_probability: float) -> dict[str, Any]:
-    """Choose a representative score coherent with the winner, component means, and rounded total."""
+    """Return the exact final score observed most often in the simulation."""
     if not top_scores:
         return {"home": round(home_expected), "away": round(away_expected), "probability": None}
-    expects_home_win = home_win_probability >= .5
-    winner_consistent = [
-        score for score in top_scores
-        if score["home"] != score["away"] and ((score["home"] > score["away"]) == expects_home_win)
-    ]
-    candidates = winner_consistent or top_scores
-    target_total = round(home_expected + away_expected)
-    return min(candidates, key=lambda score: (
-        abs((score["home"] + score["away"]) - target_total),
-        abs(score["home"] - home_expected) + abs(score["away"] - away_expected),
-        -float(score.get("probability") or 0.0),
-    ))
+    # simulate_scores orders this list by the unrounded occurrence count. Do not
+    # replace the mode with a hand-picked score near the mean or favored winner.
+    return top_scores[0]
 
 
 def _confidence(features: dict[str, Any], disagreement: float) -> tuple[int, str, list[str]]:

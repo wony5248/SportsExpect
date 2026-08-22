@@ -263,6 +263,9 @@ def test_simulation_is_reproducible_and_coherent():
     assert abs(first["handicap"]["away_minus_1_5"] + first["handicap"]["home_plus_1_5"] - 1) < 1e-9
     assert first["home_minus_1_5"] <= first["home_two_way_probability"]
     representative = first["top_scores"][0]
+    assert representative["rank"] == 1
+    assert representative["count"] == max(score["count"] for score in first["top_scores"])
+    assert representative["probability"] == round(representative["count"] / 20_000, 4)
     assert len(representative["inning_line"]) == 9
     assert sum(item["away"] for item in representative["inning_line"]) == representative["away"]
     assert sum(item["home"] for item in representative["inning_line"]) == representative["home"]
@@ -270,17 +273,19 @@ def test_simulation_is_reproducible_and_coherent():
     assert first["team_quantiles"]["away"]["p10"] < first["team_quantiles"]["away"]["p90"]
     assert first["total_quantiles"]["p10"] < first["total_quantiles"]["p90"]
     assert 0 < first["game_shape"]["blowout_probability"] < 1
+    for mode in first["simulation_modes"].values():
+        assert mode["count"] > 0
+        assert mode["probability"] == round(mode["count"] / 20_000, 4)
 
 
-def test_representative_score_prioritizes_winner_and_expected_total():
+def test_representative_score_is_exact_simulation_mode():
     scores = [
         {"away": 3, "home": 4, "probability": .08},
         {"away": 4, "home": 6, "probability": .06},
         {"away": 5, "home": 3, "probability": .07},
     ]
     selected = select_primary_score(scores, home_expected=5.6, away_expected=4.2, home_win_probability=.61)
-    assert selected == scores[1]
-    assert selected["away"] + selected["home"] == round(5.6 + 4.2)
+    assert selected == scores[0]
 
 
 def test_claude_advice_cannot_overpower_statistical_baseline():
@@ -318,8 +323,13 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     score = after["payload"]["display_expected_score"]
     assert after["expected_total"] == round(score["away"] + score["home"], 1)
     assert after["statistical_expected_total"] == round(after["home_expected_runs"] + after["away_expected_runs"], 2)
-    assert after["payload"]["summary_schema_version"] == 2
+    assert after["payload"]["summary_schema_version"] == 3
     assert after["payload"]["coherence_valid"] is True
+    assert after["payload"]["primary_score"] == after["payload"]["top_scores"][0]
+    assert after["payload"]["display_expected_score"] == {
+        "away": after["payload"]["primary_score"]["away"],
+        "home": after["payload"]["primary_score"]["home"],
+    }
     assert after["home_win_probability"] == after["payload"]["simulation_home_probability"]
     assert after["away_win_probability"] == round(1 - after["home_win_probability"], 4)
 

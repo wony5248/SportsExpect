@@ -81,8 +81,7 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     away_two_way = away_win_probability / decided_probability if decided_probability else .5
     score_counts = Counter(zip(home.tolist(), away.tolist(), strict=False))
     top_scores = []
-    # Keep enough candidates for the representative-score selector to honor both winner and total.
-    for (h, a), count in score_counts.most_common(16):
+    for rank, ((h, a), count) in enumerate(score_counts.most_common(16), 1):
         indices = np.flatnonzero((home == h) & (away == a))
         trajectory_counts = Counter(
             tuple(away_innings[index].tolist() + home_innings[index].tolist()) for index in indices
@@ -99,10 +98,24 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                 "away_cumulative": away_cumulative, "home_cumulative": home_cumulative,
             })
         top_scores.append({
-            "home": h, "away": a, "probability": round(count / simulations, 4),
+            "rank": rank, "home": h, "away": a, "count": count,
+            "probability": round(count / simulations, 4),
             "inning_line": inning_line,
+            "trajectory_count": trajectory_count,
             "trajectory_probability_given_score": round(trajectory_count / count, 4),
         })
+    outcome_counts = Counter({
+        "HOME_WIN": int(np.count_nonzero(home > away)),
+        "AWAY_WIN": int(np.count_nonzero(away > home)),
+        "TIE": int(np.count_nonzero(home == away)),
+    })
+    simulation_modes = {
+        "home_runs": _mode_payload(Counter(home.tolist()), simulations),
+        "away_runs": _mode_payload(Counter(away.tolist()), simulations),
+        "total_runs": _mode_payload(Counter(total.tolist()), simulations),
+        "run_margin": _mode_payload(Counter((home - away).tolist()), simulations),
+        "outcome": _mode_payload(outcome_counts, simulations),
+    }
     handicap = {
         "home_minus_1_5": float(np.mean(home - away >= 2)),
         "away_minus_1_5": float(np.mean(away - home >= 2)),
@@ -129,6 +142,7 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
         "away_plus_1_5": handicap["away_plus_1_5"],
         "totals": totals,
         "top_scores": top_scores,
+        "simulation_modes": simulation_modes,
         "total_quantiles": {
             "p10": float(np.quantile(total, .10)), "p50": float(np.quantile(total, .50)), "p90": float(np.quantile(total, .90)),
         },
@@ -144,3 +158,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     }
     validate_simulation_summary(result)
     return result
+
+
+def _mode_payload(counts: Counter[Any], simulations: int) -> dict[str, Any]:
+    value, count = counts.most_common(1)[0]
+    return {"value": value, "count": count, "probability": round(count / simulations, 4)}

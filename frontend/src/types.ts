@@ -70,6 +70,13 @@ export type Prediction = {
   tie_probability: number
   top_scores: SimulatedScore[]
   primary_score?: SimulatedScore
+  simulation_modes?: {
+    home_runs: SimulationMode<number>
+    away_runs: SimulationMode<number>
+    total_runs: SimulationMode<number>
+    run_margin: SimulationMode<number>
+    outcome: SimulationMode<'HOME_WIN' | 'AWAY_WIN' | 'TIE'>
+  }
   total_quantiles?: { p10: number; p50: number; p90: number }
   team_quantiles?: {
     away: { p10: number; p50: number; p90: number }
@@ -95,9 +102,12 @@ export type Prediction = {
 }
 
 export type SimulatedScore = {
+  rank?: number
   home: number
   away: number
+  count?: number
   probability: number | null
+  trajectory_count?: number
   trajectory_probability_given_score?: number
   inning_line?: {
     inning: number
@@ -106,6 +116,12 @@ export type SimulatedScore = {
     away_cumulative: number
     home_cumulative: number
   }[]
+}
+
+export type SimulationMode<T> = {
+  value: T
+  count: number
+  probability: number
 }
 
 export type Game = {
