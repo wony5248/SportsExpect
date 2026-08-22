@@ -23,7 +23,7 @@ from backend.app.services.feature_engineering import _effective_lineup_ops, _lin
 from backend.app.services.refresh import (_market_event_date, _market_refresh_due, _months_for_recent,
                                           _prediction_stage, _recent_by_team)
 from backend.app.services.simulation import simulate_scores
-from backend.app.services.prediction import predict_game, select_primary_score
+from backend.app.services.prediction import build_score_estimates, predict_game, select_primary_score
 from backend.app.services.jobs import _missing_leagues_for_date, checkpoint_stage_for_minutes
 from backend.app.services.model_lifecycle import _promotion_decision, predict_with_runtime
 from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
@@ -288,6 +288,29 @@ def test_representative_score_is_exact_simulation_mode():
     assert selected == scores[0]
 
 
+def test_score_estimates_combine_mean_mode_and_weighted_top_scores():
+    top_scores = [
+        {"away": 3, "home": 4, "count": 1200, "probability": .06},
+        {"away": 4, "home": 3, "count": 1000, "probability": .05},
+        {"away": 3, "home": 3, "count": 800, "probability": .04},
+        {"away": 2, "home": 4, "count": 600, "probability": .03},
+        {"away": 4, "home": 4, "count": 400, "probability": .02},
+    ]
+    estimates = build_score_estimates(top_scores, top_scores[0], home_expected=4.27, away_expected=3.61,
+                                      simulations=20_000)
+    assert estimates["headline"] == "MEAN"
+    assert estimates["mean"] == {"away": 3.6, "home": 4.3}
+    assert estimates["mode"] == {"away": 3, "home": 4, "count": 1200, "probability": .06}
+    weighted = estimates["top5_weighted"]
+    assert weighted["scores_used"] == 5
+    assert weighted["coverage_probability"] == round(4000 / 20_000, 4)
+    assert weighted["away"] == round((3 * 1200 + 4 * 1000 + 3 * 800 + 2 * 600 + 4 * 400) / 4000, 1)
+    assert weighted["home"] == round((4 * 1200 + 3 * 1000 + 3 * 800 + 4 * 600 + 4 * 400) / 4000, 1)
+    # Without any simulated scores the weighted estimate is honestly absent, never fabricated.
+    assert build_score_estimates([], {"away": 4, "home": 4, "probability": None},
+                                 home_expected=4.1, away_expected=3.9, simulations=20_000)["top5_weighted"] is None
+
+
 def test_claude_advice_cannot_overpower_statistical_baseline():
     probability, home_runs, away_runs, weight = blend_with_claude(.55, 4.8, 4.2, {
         "home_win_probability": 1.0,
@@ -323,13 +346,23 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     score = after["payload"]["display_expected_score"]
     assert after["expected_total"] == round(score["away"] + score["home"], 1)
     assert after["statistical_expected_total"] == round(after["home_expected_runs"] + after["away_expected_runs"], 2)
-    assert after["payload"]["summary_schema_version"] == 3
+    assert after["payload"]["summary_schema_version"] == 4
     assert after["payload"]["coherence_valid"] is True
     assert after["payload"]["primary_score"] == after["payload"]["top_scores"][0]
-    assert after["payload"]["display_expected_score"] == {
-        "away": after["payload"]["primary_score"]["away"],
-        "home": after["payload"]["primary_score"]["home"],
-    }
+    estimates = after["payload"]["score_estimates"]
+    # Hybrid headline: the displayed score is the distribution mean, while the exact-score
+    # mode and the top-5 weighted average travel alongside it for the UI.
+    assert after["payload"]["display_expected_score"] == estimates["mean"]
+    assert estimates["headline"] == "MEAN"
+    assert estimates["mode"]["away"] == after["payload"]["primary_score"]["away"]
+    assert estimates["mode"]["home"] == after["payload"]["primary_score"]["home"]
+    assert 0 < estimates["mode"]["probability"] <= 1
+    weighted = estimates["top5_weighted"]
+    assert weighted["scores_used"] == 5
+    assert 0 < weighted["coverage_probability"] <= 1
+    top5 = after["payload"]["top_scores"][:5]
+    assert min(s["away"] for s in top5) <= weighted["away"] <= max(s["away"] for s in top5)
+    assert min(s["home"] for s in top5) <= weighted["home"] <= max(s["home"] for s in top5)
     assert after["home_win_probability"] == after["payload"]["simulation_home_probability"]
     assert after["away_win_probability"] == round(1 - after["home_win_probability"], 4)
 

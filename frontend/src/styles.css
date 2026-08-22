@@ -62,6 +62,11 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .score-row strong i { color: #49665b; font-style: normal; padding: 0 3px; }
 .score-row strong small { color: #718b81; font-size: .65rem; }
 .score-row > div > small { margin-top: 3px; color: #607a70; font-size: .58rem; }
+.score-candidates { display: grid; gap: 6px; margin: -10px 0 16px; padding: 0 4px; }
+.score-candidates > span { color: #728b81; font-size: .67rem; }
+.score-candidates b { padding: 4px 10px; border-radius: 8px; background: rgba(119,155,140,.1); color: #b7c8c1; font-size: .74rem; font-weight: 600; }
+.score-candidates b small { margin-left: 6px; color: #6f8980; font-size: .62rem; font-weight: 500; }
+.score-candidates b.mode-total { background: rgba(119,155,140,.05); color: #9db0a8; }
 .forecast-range { display: grid; gap: 3px; margin: -8px 0 18px; padding: 11px 14px; border-radius: 10px; background: rgba(119,155,140,.07); }
 .forecast-range span { color: #728b81; font-size: .67rem; }.forecast-range b { color: #b7c8c1; font-size: .78rem; }.forecast-range small { color: #6f8980; font-size: .67rem; }
 .inning-forecast { margin: -4px 0 16px; padding: 13px 14px; border: 1px solid rgba(126,231,184,.11); border-radius: 11px; background: rgba(3,16,12,.22); }

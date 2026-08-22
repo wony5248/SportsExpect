@@ -55,6 +55,12 @@ export type Prediction = {
   expected_total: number
   statistical_expected_total?: number
   display_expected_score?: { away: number; home: number }
+  score_estimates?: {
+    headline: 'MEAN'
+    mean: { away: number; home: number }
+    top5_weighted: null | { away: number; home: number; scores_used: number; coverage_probability: number }
+    mode: { away: number; home: number; count?: number | null; probability?: number | null }
+  }
   confidence: number
   confidence_label: 'HIGH' | 'MEDIUM' | 'LOW'
   confidence_missing: string[]

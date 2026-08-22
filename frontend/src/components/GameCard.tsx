@@ -8,6 +8,7 @@ import { getAccessToken } from '../lib/auth'
 import type { Game, PersonalClaudeAnalysis, Team } from '../types'
 
 const pct = (value: number) => `${Math.round(value * 100)}%`
+const pctFine = (value: number) => `${(value * 100).toFixed(1)}%`
 const stat = (value: number | null | undefined, digits = 2) =>
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
 
@@ -26,6 +27,10 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const expectedScore = predictedScore ? { away: predictedScore.away, home: predictedScore.home } : p?.display_expected_score ?? (p ? {
     away: Number(p.away_expected_runs.toFixed(1)), home: Number(p.home_expected_runs.toFixed(1)),
   } : undefined)
+  const meanScore = p?.score_estimates?.mean ?? (p ? {
+    away: Number(p.away_expected_runs.toFixed(1)), home: Number(p.home_expected_runs.toFixed(1)),
+  } : undefined)
+  const weightedScore = p?.score_estimates?.top5_weighted
   const modeTotal = p?.simulation_modes?.total_runs
   const modeOutcome = p?.simulation_modes?.outcome
   const marketLine = game.market?.total_line
@@ -88,12 +93,22 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>
 
         <Box className="score-row">
-          <Box><span>{p.model.simulations.toLocaleString()}회 최빈 스코어</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}</small></Box>
+          <Box><span>시뮬레이션 평균 스코어</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>{weightedScore ? `최빈 5개 가중 ${stat(weightedScore.away, 1)} : ${stat(weightedScore.home, 1)} (표본 ${pct(weightedScore.coverage_probability)})` : `평균 총점 ${stat(statisticalExpectedTotal, 1)}점`}</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>{modeTotal ? '가장 많이 나온 총점' : '최빈 스코어 총점'}</span><strong>{modeTotal ? `${modeTotal.value}점` : `${stat(predictedScore ? predictedScore.away + predictedScore.home : p.expected_total, 0)}점`}</strong><small>{modeTotal ? modeFrequency(modeTotal) : '기존 저장 예측'}</small></Box>
+          <Box><span>{p.model.simulations.toLocaleString()}회 최빈 스코어</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}</small></Box>
           <Divider orientation="vertical" flexItem />
           <Box><span>{modeOutcome ? '가장 많이 나온 결과' : '승률이 높은 결과'}</span><strong>{modeOutcome ? outcomeLabel(modeOutcome.value, game) : favoriteLabel(p, game)}</strong><small>{modeOutcome ? modeFrequency(modeOutcome) : pct(Math.max(p.home_win_probability, p.away_win_probability))}</small></Box>
         </Box>
+
+        {p.top_scores?.length ? <Box className="score-candidates">
+          <span>유력 최종 스코어 TOP 3</span>
+          <Stack direction="row" flexWrap="wrap" gap={.8}>
+            {p.top_scores.slice(0, 3).map((score) => <b key={`${score.away}-${score.home}`}>
+              {score.away} : {score.home}<small>{score.probability == null ? '—' : pctFine(score.probability)}</small>
+            </b>)}
+            {modeTotal ? <b className="mode-total">최빈 총점 {modeTotal.value}점<small>{pctFine(modeTotal.probability)}</small></b> : null}
+          </Stack>
+        </Box> : null}
 
         {p.team_quantiles && p.total_quantiles && p.game_shape ? <Box className="forecast-range">
           <span>시뮬레이션 중앙 80% 득점 구간</span>
@@ -154,7 +169,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
                 <small>{personalAnalysis.model} · {personalAnalysis.disclaimer}</small>
               </Box>}
             </Box>
-            <Typography className="source-note">화면의 단일 스코어·총점·승패 결과는 20,000회 분포의 각 최빈값입니다. 분포 평균 총점 {stat(statisticalExpectedTotal, 2)}점 · 확률과 구간도 같은 시뮬레이션에서 계산하며 9이닝 동점 표본은 양자 승률 계산에서 제외합니다.</Typography>
+            <Typography className="source-note">화면의 평균 스코어는 시뮬레이션 분포의 평균, 최빈 스코어·총점·승패 결과는 같은 분포의 각 최빈값이며 최빈 5개 가중 스코어는 그 중간 추정치입니다. 분포 평균 총점 {stat(statisticalExpectedTotal, 2)}점 · 확률과 구간도 같은 시뮬레이션에서 계산하며 9이닝 동점 표본은 양자 승률 계산에서 제외합니다.</Typography>
             <Typography variant="subtitle2">최근 10경기</Typography>
             <Box className="comparison"><Compare team={game.away} /><Compare team={game.home} /></Box>
             <Typography variant="subtitle2">{lineupTitle(game)}</Typography>

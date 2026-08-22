@@ -46,7 +46,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     ]
     input_data = {
         "game": game.external_id,
-        "simulation_summary_schema": 3,
+        "simulation_summary_schema": 4,
         "features": features,
         "home_expected": round(base_home_runs, 6),
         "away_expected": round(base_away_runs, 6),
@@ -81,7 +81,13 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     disagreement = abs(logistic - simulation["home_two_way_probability"])
     confidence, confidence_label, missing = _confidence(features, disagreement)
     reasons = _reasons(home, away, home_pitcher, away_pitcher, features)
-    display_score = {"away": primary_score["away"], "home": primary_score["home"]}
+    score_estimates = build_score_estimates(
+        simulation["top_scores"], primary_score, home_runs, away_runs, settings.simulations,
+    )
+    # Hybrid headline: the distribution mean separates games from each other far better than
+    # the mode (low-scoring baseball collapses every mode into the same handful of scores).
+    # The exact-score mode and top-score candidates remain alongside it in score_estimates.
+    display_score = dict(score_estimates["mean"])
     return {
         "input_hash": input_hash,
         "input_payload": input_data,
@@ -95,7 +101,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "statistical_expected_total": round(home_runs + away_runs, 2),
         "confidence": confidence,
         "payload": {
-            "summary_schema_version": 3,
+            "summary_schema_version": 4,
             "coherence_valid": True,
             "probability_source": "9_inning_score_simulation_two_way_excluding_ties",
             "model": {
@@ -116,6 +122,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "league_average_runs": round(league_avg, 3),
             "statistical_expected_total": round(home_runs + away_runs, 2),
             "display_expected_score": display_score,
+            "score_estimates": score_estimates,
             "simulation_environment_variance": round(environment_variance, 4),
             "simulation_team_variance": round(team_variance, 4),
             "features": features,
@@ -142,6 +149,33 @@ def select_primary_score(top_scores: list[dict[str, Any]], home_expected: float,
     # simulate_scores orders this list by the unrounded occurrence count. Do not
     # replace the mode with a hand-picked score near the mean or favored winner.
     return top_scores[0]
+
+
+def build_score_estimates(top_scores: list[dict[str, Any]], primary_score: dict[str, Any],
+                          home_expected: float, away_expected: float, simulations: int) -> dict[str, Any]:
+    """Three complementary point estimates of the same simulation distribution.
+
+    - mean: distribution mean (the gamma shocks preserve expected means), minimizes per-team
+      squared error and differs game to game — used as the displayed headline score.
+    - top5_weighted: occurrence-weighted average of the five most frequent exact scores,
+      an integer-anchored middle ground between mode and mean.
+    - mode: the single most frequent exact score with its honest (low) probability.
+    """
+    estimates: dict[str, Any] = {
+        "headline": "MEAN",
+        "mean": {"away": round(away_expected, 1), "home": round(home_expected, 1)},
+        "mode": {"away": primary_score["away"], "home": primary_score["home"],
+                 "count": primary_score.get("count"), "probability": primary_score.get("probability")},
+    }
+    candidates = top_scores[:5]
+    weight = sum(int(score.get("count") or 0) for score in candidates)
+    estimates["top5_weighted"] = {
+        "away": round(sum(score["away"] * int(score["count"]) for score in candidates) / weight, 1),
+        "home": round(sum(score["home"] * int(score["count"]) for score in candidates) / weight, 1),
+        "scores_used": len(candidates),
+        "coverage_probability": round(weight / simulations, 4),
+    } if weight else None
+    return estimates
 
 
 def _confidence(features: dict[str, Any], disagreement: float) -> tuple[int, str, list[str]]:
