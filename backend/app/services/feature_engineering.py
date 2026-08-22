@@ -9,10 +9,22 @@ KBO_PARK_FACTORS = {
     "잠실": 0.96, "고척": 0.98, "대전": 1.02, "문학": 1.03, "창원": 1.01,
     "대구": 1.04, "사직": 1.01, "수원": 1.02, "광주": 1.01,
 }
+# Versioned multi-year run park factors covering every current MLB park (plus recent aliases),
+# so no game silently falls back to a neutral 1.0.
 MLB_PARK_FACTORS = {
-    "Coors Field": 1.10, "Fenway Park": 1.04, "Yankee Stadium": 1.02,
-    "Great American Ball Park": 1.04, "Globe Life Field": 1.01,
-    "Oracle Park": 0.96, "Petco Park": 0.98, "T-Mobile Park": 0.98,
+    "Coors Field": 1.12, "Fenway Park": 1.04, "Yankee Stadium": 1.02,
+    "Great American Ball Park": 1.05, "Globe Life Field": 1.01,
+    "Oracle Park": 0.95, "Petco Park": 0.97, "T-Mobile Park": 0.94,
+    "Wrigley Field": 1.00, "Dodger Stadium": 0.98, "Angel Stadium": 1.00,
+    "Daikin Park": 1.00, "Minute Maid Park": 1.00,
+    "Citi Field": 0.97, "Citizens Bank Park": 1.03, "Nationals Park": 1.01,
+    "Truist Park": 1.01, "loanDepot park": 0.97, "LoanDepot Park": 0.97,
+    "PNC Park": 0.98, "American Family Field": 1.02, "Busch Stadium": 0.98,
+    "Rate Field": 1.03, "Guaranteed Rate Field": 1.03,
+    "Progressive Field": 0.99, "Comerica Park": 0.98, "Kauffman Stadium": 1.01,
+    "Target Field": 1.00, "Rogers Centre": 1.01, "Oriole Park at Camden Yards": 1.00,
+    "Camden Yards": 1.00, "Tropicana Field": 0.96, "George M. Steinbrenner Field": 1.04,
+    "Chase Field": 1.03, "Sutter Health Park": 1.04,
 }
 
 
@@ -145,15 +157,16 @@ def expected_runs(home: Any, away: Any, home_pitcher: Any | None, away_pitcher: 
     # alone are a noisy substitute and are used only by isolated callers/tests.
     league_avg = supplied_environment if supplied_environment > 0 else .75 * league_baseline + .25 * observed_environment
     # Multiplicative strengths preserve matchup differences better than averaging two 4-6 run values.
-    # Exponents intentionally shrink noisy team rates toward the league environment.
+    # Team rates are already sample-size shrunk once in _shrunk_rate; the exponents only trim the
+    # residual opponent-quality double count, so genuine team differences survive to the mean.
     home_games = _v(getattr(home, "games", None), 0.0)
     away_games = _v(getattr(away, "games", None), 0.0)
     home_offense = _shrunk_rate(home.runs_per_game, league_avg, home_games) / league_avg
     away_offense = _shrunk_rate(away.runs_per_game, league_avg, away_games) / league_avg
     home_defense = _shrunk_rate(home.runs_allowed_per_game, league_avg, home_games) / league_avg
     away_defense = _shrunk_rate(away.runs_allowed_per_game, league_avg, away_games) / league_avg
-    home_base = league_avg * home_offense ** .82 * away_defense ** .68
-    away_base = league_avg * away_offense ** .82 * home_defense ** .68
+    home_base = league_avg * home_offense ** .90 * away_defense ** .78
+    away_base = league_avg * away_offense ** .90 * home_defense ** .78
 
     avg_anchor = max(.210, (_v(getattr(home, "avg", None), .260) + _v(getattr(away, "avg", None), .260)) / 2)
     obp_anchor = max(.280, (_v(getattr(home, "obp", None), .330) + _v(getattr(away, "obp", None), .330)) / 2)
@@ -161,18 +174,18 @@ def expected_runs(home: Any, away: Any, home_pitcher: Any | None, away_pitcher: 
     home_batting = math.exp(_clip(
         .20 * (_v(getattr(home, "avg", None), avg_anchor) / avg_anchor - 1)
         + .40 * (_v(getattr(home, "obp", None), obp_anchor) / obp_anchor - 1)
-        + .28 * (_v(getattr(home, "slg", None), slg_anchor) / slg_anchor - 1), -.10, .10))
+        + .28 * (_v(getattr(home, "slg", None), slg_anchor) / slg_anchor - 1), -.14, .14))
     away_batting = math.exp(_clip(
         .20 * (_v(getattr(away, "avg", None), avg_anchor) / avg_anchor - 1)
         + .40 * (_v(getattr(away, "obp", None), obp_anchor) / obp_anchor - 1)
-        + .28 * (_v(getattr(away, "slg", None), slg_anchor) / slg_anchor - 1), -.10, .10))
+        + .28 * (_v(getattr(away, "slg", None), slg_anchor) / slg_anchor - 1), -.14, .14))
 
     home_starter = _effective_pitcher_era(home_pitcher, _v(home.era, league_avg))
     away_starter = _effective_pitcher_era(away_pitcher, _v(away.era, league_avg))
     home_share = _clip(_v(getattr(home_pitcher, "avg_start_innings", None), 5.0) / 9, .38, .72)
     away_share = _clip(_v(getattr(away_pitcher, "avg_start_innings", None), 5.0) / 9, .38, .72)
-    home_pitching = (_clip(home_starter / max(_v(home.era, league_avg), 1.5), .55, 1.65)) ** (home_share * .58)
-    away_pitching = (_clip(away_starter / max(_v(away.era, league_avg), 1.5), .55, 1.65)) ** (away_share * .58)
+    home_pitching = (_clip(home_starter / max(_v(home.era, league_avg), 1.5), .50, 1.80)) ** (home_share * .72)
+    away_pitching = (_clip(away_starter / max(_v(away.era, league_avg), 1.5), .50, 1.80)) ** (away_share * .72)
     home_team_whip = _v(getattr(home, "whip", None), 1.35)
     away_team_whip = _v(getattr(away, "whip", None), 1.35)
     home_season_whip = _v(getattr(home_pitcher, "whip", None), home_team_whip)
@@ -181,21 +194,21 @@ def expected_runs(home: Any, away: Any, home_pitcher: Any | None, away_pitcher: 
     away_split_weight = min(.50, _v(getattr(away_pitcher, "opponent_innings", None), 0.0) / (_v(getattr(away_pitcher, "opponent_innings", None), 0.0) + 45.0))
     home_whip = (1 - home_split_weight) * home_season_whip + home_split_weight * _v(getattr(home_pitcher, "opponent_whip", None), home_season_whip)
     away_whip = (1 - away_split_weight) * away_season_whip + away_split_weight * _v(getattr(away_pitcher, "opponent_whip", None), away_season_whip)
-    home_pitching *= math.exp(_clip(.15 * (home_whip - home_team_whip), -.08, .08))
-    away_pitching *= math.exp(_clip(.15 * (away_whip - away_team_whip), -.08, .08))
-    lineup_home = math.exp(max(-.08, min(.08, .06 * lineup_strength_diff)))
-    lineup_away = math.exp(max(-.08, min(.08, -.06 * lineup_strength_diff)))
+    home_pitching *= math.exp(_clip(.18 * (home_whip - home_team_whip), -.12, .12))
+    away_pitching *= math.exp(_clip(.18 * (away_whip - away_team_whip), -.12, .12))
+    lineup_home = math.exp(max(-.10, min(.10, .075 * lineup_strength_diff)))
+    lineup_away = math.exp(max(-.10, min(.10, -.075 * lineup_strength_diff)))
     advanced = advanced_features or {}
     recent_home_signal = .55 * (_v(advanced.get("home_recent_runs"), league_avg) - _v(home.runs_per_game, league_avg)) + .45 * (_v(advanced.get("away_recent_allowed"), league_avg) - _v(away.runs_allowed_per_game, league_avg))
     recent_away_signal = .55 * (_v(advanced.get("away_recent_runs"), league_avg) - _v(away.runs_per_game, league_avg)) + .45 * (_v(advanced.get("home_recent_allowed"), league_avg) - _v(home.runs_allowed_per_game, league_avg))
     recent_home_weight = _clip(_v(advanced.get("recent_home_games"), 0.0) / 10, 0, 1)
     recent_away_weight = _clip(_v(advanced.get("recent_away_games"), 0.0) / 10, 0, 1)
-    recent_home = math.exp(_clip(.065 * recent_home_signal * recent_home_weight, -.15, .15))
-    recent_away = math.exp(_clip(.065 * recent_away_signal * recent_away_weight, -.15, .15))
-    bullpen_home = math.exp(_clip(.012 * float(advanced.get("bullpen_proxy_diff", 0)), -.05, .05))
-    bullpen_away = math.exp(_clip(-.012 * float(advanced.get("bullpen_proxy_diff", 0)), -.05, .05))
-    matchup_home = math.exp(_clip(.025 * float(advanced.get("head_to_head_run_diff", 0)), -.08, .08))
-    matchup_away = math.exp(_clip(-.025 * float(advanced.get("head_to_head_run_diff", 0)), -.08, .08))
+    recent_home = math.exp(_clip(.08 * recent_home_signal * recent_home_weight, -.20, .20))
+    recent_away = math.exp(_clip(.08 * recent_away_signal * recent_away_weight, -.20, .20))
+    bullpen_home = math.exp(_clip(.015 * float(advanced.get("bullpen_proxy_diff", 0)), -.07, .07))
+    bullpen_away = math.exp(_clip(-.015 * float(advanced.get("bullpen_proxy_diff", 0)), -.07, .07))
+    matchup_home = math.exp(_clip(.03 * float(advanced.get("head_to_head_run_diff", 0)), -.10, .10))
+    matchup_away = math.exp(_clip(-.03 * float(advanced.get("head_to_head_run_diff", 0)), -.10, .10))
     home_expected = home_base * home_batting * away_pitching * park_factor * 1.035 * lineup_home * recent_home * bullpen_home * matchup_home
     away_expected = away_base * away_batting * home_pitching * park_factor * 0.985 * lineup_away * recent_away * bullpen_away * matchup_away
     return _clip(home_expected, .6, 10.0), _clip(away_expected, .6, 10.0), league_avg
@@ -209,7 +222,7 @@ def _clip(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def _shrunk_rate(value: Any, league_average: float, games: float, prior_games: float = 20.0) -> float:
+def _shrunk_rate(value: Any, league_average: float, games: float, prior_games: float = 12.0) -> float:
     sample = max(0.0, games)
     credibility = sample / (sample + prior_games)
     return credibility * _v(value, league_average) + (1 - credibility) * league_average

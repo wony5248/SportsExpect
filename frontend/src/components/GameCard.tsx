@@ -86,7 +86,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <Box className="probability-block">
           <Stack direction="row" justifyContent="space-between" alignItems="baseline">
             <Box><span className="probability">{pct(p.away_win_probability)}</span><small>{game.away.name}</small></Box>
-            <Typography className="metric-label">9이닝 동점 제외 승률</Typography>
+            <Typography className="metric-label">{p.extra_innings
+              ? game.league === 'MLB' ? '연장 승부치기 포함 승률' : '연장 11회 · 무승부 제외 승률'
+              : '9이닝 동점 제외 승률'}</Typography>
             <Box textAlign="right"><span className="probability accent">{pct(p.home_win_probability)}</span><small>{game.home.name}</small></Box>
           </Stack>
           <Box className="probability-track"><i style={{ width: pct(p.away_win_probability) }} /><b style={{ width: pct(p.home_win_probability) }} /></Box>
@@ -110,10 +112,14 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           </Stack>
         </Box> : null}
 
-        {p.team_quantiles && p.total_quantiles && p.game_shape ? <Box className="forecast-range">
+        {p.team_dense_intervals && p.total_dense_interval && p.game_shape ? <Box className="forecast-range">
+          <span>확률 집중 득점 구간 · 분포가 가장 몰린 최단 범위</span>
+          <b>{game.away.name} {p.team_dense_intervals.away.low}–{p.team_dense_intervals.away.high}점 ({pct(p.team_dense_intervals.away.mass)}) · {game.home.name} {p.team_dense_intervals.home.low}–{p.team_dense_intervals.home.high}점 ({pct(p.team_dense_intervals.home.mass)})</b>
+          <small>총점 집중 {p.total_dense_interval.low}–{p.total_dense_interval.high}점 ({pct(p.total_dense_interval.mass)}) · 최종 1점차 이내 {pct(p.game_shape.one_run_probability)} · 5점차 이상 {pct(p.game_shape.blowout_probability)}{p.extra_innings ? ` · 연장 진입 ${pct(p.extra_innings.probability)}` : ''}{p.extra_innings && game.league !== 'MLB' && p.tie_probability > 0 ? ` · 11회 무승부 ${pctFine(p.tie_probability)}` : ''}</small>
+        </Box> : p.team_quantiles && p.total_quantiles && p.game_shape ? <Box className="forecast-range">
           <span>시뮬레이션 중앙 80% 득점 구간</span>
           <b>{game.away.name} {stat(p.team_quantiles.away.p10, 0)}–{stat(p.team_quantiles.away.p90, 0)}점 · {game.home.name} {stat(p.team_quantiles.home.p10, 0)}–{stat(p.team_quantiles.home.p90, 0)}점</b>
-          <small>총점 중앙 80% {stat(p.total_quantiles.p10, 0)}–{stat(p.total_quantiles.p90, 0)}점 · 9이닝 종료 1점차 이내 {pct(p.game_shape.one_run_probability)} · 5점차 이상 {pct(p.game_shape.blowout_probability)}</small>
+          <small>총점 중앙 80% {stat(p.total_quantiles.p10, 0)}–{stat(p.total_quantiles.p90, 0)}점 · 최종 1점차 이내 {pct(p.game_shape.one_run_probability)} · 5점차 이상 {pct(p.game_shape.blowout_probability)}</small>
         </Box> : null}
 
         {predictedScore?.inning_line?.length ? <InningLine
@@ -169,7 +175,11 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
                 <small>{personalAnalysis.model} · {personalAnalysis.disclaimer}</small>
               </Box>}
             </Box>
-            <Typography className="source-note">화면의 평균 스코어는 시뮬레이션 분포의 평균, 최빈 스코어·총점·승패 결과는 같은 분포의 각 최빈값이며 최빈 5개 가중 스코어는 그 중간 추정치입니다. 분포 평균 총점 {stat(statisticalExpectedTotal, 2)}점 · 확률과 구간도 같은 시뮬레이션에서 계산하며 9이닝 동점 표본은 양자 승률 계산에서 제외합니다.</Typography>
+            <Typography className="source-note">화면의 평균 스코어는 시뮬레이션 분포의 평균, 최빈 스코어·총점·승패 결과는 같은 분포의 각 최빈값이며 최빈 5개 가중 스코어는 그 중간 추정치입니다. 분포 평균 총점 {stat(statisticalExpectedTotal, 2)}점 · 확률과 구간도 같은 시뮬레이션에서 계산합니다. {p.extra_innings
+              ? game.league === 'MLB'
+                ? '연장은 MLB 승부치기 룰(무사 2루 자동 주자)로 승패가 날 때까지 시뮬레이션하므로 무승부가 없습니다.'
+                : '연장은 KBO 룰대로 11회까지만 승부치기 없이 시뮬레이션하며 11회 후 동점은 무승부로 남기고 양자 승률에서 제외합니다.'
+              : '9이닝 동점 표본은 양자 승률 계산에서 제외합니다.'}</Typography>
             <Typography variant="subtitle2">최근 10경기</Typography>
             <Box className="comparison"><Compare team={game.away} /><Compare team={game.home} /></Box>
             <Typography variant="subtitle2">{lineupTitle(game)}</Typography>
@@ -309,7 +319,7 @@ function modeFrequency(mode: { count?: number; probability?: number | null } | n
 function outcomeLabel(outcome: 'HOME_WIN' | 'AWAY_WIN' | 'TIE', game: Game) {
   if (outcome === 'HOME_WIN') return `${game.home.name} 승`
   if (outcome === 'AWAY_WIN') return `${game.away.name} 승`
-  return '9이닝 동점'
+  return game.league === 'MLB' ? '동점' : '무승부 (연장 11회)'
 }
 
 function favoriteLabel(prediction: NonNullable<Game['prediction']>, game: Game) {

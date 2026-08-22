@@ -266,7 +266,7 @@ def test_simulation_is_reproducible_and_coherent():
     assert representative["rank"] == 1
     assert representative["count"] == max(score["count"] for score in first["top_scores"])
     assert representative["probability"] == round(representative["count"] / 20_000, 4)
-    assert len(representative["inning_line"]) == 9
+    assert len(representative["inning_line"]) >= 9
     assert sum(item["away"] for item in representative["inning_line"]) == representative["away"]
     assert sum(item["home"] for item in representative["inning_line"]) == representative["home"]
     assert 0 < representative["trajectory_probability_given_score"] <= 1
@@ -276,6 +276,48 @@ def test_simulation_is_reproducible_and_coherent():
     for mode in first["simulation_modes"].values():
         assert mode["count"] > 0
         assert mode["probability"] == round(mode["count"] / 20_000, 4)
+
+
+def test_dense_intervals_are_tighter_than_central_80_band():
+    result = simulate_scores(5.2, 4.1, 20_000, 42)
+    for interval, quantiles in (
+        (result["total_dense_interval"], result["total_quantiles"]),
+        (result["team_dense_intervals"]["away"], result["team_quantiles"]["away"]),
+        (result["team_dense_intervals"]["home"], result["team_quantiles"]["home"]),
+    ):
+        assert interval["low"] <= interval["high"]
+        assert interval["mass"] >= .60
+        assert interval["high"] - interval["low"] <= quantiles["p90"] - quantiles["p10"]
+    # The mode always sits inside its own highest-density interval.
+    mode_total = result["simulation_modes"]["total_runs"]["value"]
+    assert result["total_dense_interval"]["low"] <= mode_total <= result["total_dense_interval"]["high"]
+
+
+def test_mlb_extra_innings_always_decide_the_game():
+    result = simulate_scores(4.6, 4.4, 20_000, 7, league="MLB")
+    assert result["extra_innings"]["rule"] == "MLB_GHOST_RUNNER_UNTIL_DECIDED"
+    assert result["tie_probability"] == 0
+    assert abs(result["home_win_probability"] + result["away_win_probability"] - 1) < 1e-9
+    assert result["home_two_way_probability"] == result["home_win_probability"]
+    assert result["extra_innings"]["probability"] > 0
+    assert result["simulation_modes"]["outcome"]["value"] in ("HOME_WIN", "AWAY_WIN")
+    for score in result["top_scores"]:
+        assert score["home"] != score["away"]
+        assert sum(item["home"] for item in score["inning_line"]) == score["home"]
+        assert sum(item["away"] for item in score["inning_line"]) == score["away"]
+
+
+def test_kbo_plays_to_eleven_and_keeps_ties():
+    result = simulate_scores(5.2, 5.0, 20_000, 7, league="KBO")
+    assert result["extra_innings"]["rule"] == "KBO_MAX_11_TIES_STAND"
+    assert result["extra_innings"]["probability"] > 0
+    assert result["tie_probability"] > 0
+    # Ties that survive inning 11 are excluded from the two-way market, not split.
+    decided = result["home_win_probability"] + result["away_win_probability"]
+    assert abs(decided + result["tie_probability"] - 1) < 1e-9
+    assert abs(result["home_two_way_probability"] - result["home_win_probability"] / decided) < 1e-9
+    # No trajectory may exceed eleven innings without a tiebreaker.
+    assert all(len(score["inning_line"]) <= 11 for score in result["top_scores"])
 
 
 def test_representative_score_is_exact_simulation_mode():
@@ -346,7 +388,7 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     score = after["payload"]["display_expected_score"]
     assert after["expected_total"] == round(score["away"] + score["home"], 1)
     assert after["statistical_expected_total"] == round(after["home_expected_runs"] + after["away_expected_runs"], 2)
-    assert after["payload"]["summary_schema_version"] == 4
+    assert after["payload"]["summary_schema_version"] == 6
     assert after["payload"]["coherence_valid"] is True
     assert after["payload"]["primary_score"] == after["payload"]["top_scores"][0]
     estimates = after["payload"]["score_estimates"]

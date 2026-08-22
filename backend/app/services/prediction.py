@@ -10,14 +10,16 @@ from backend.app.services.model_lifecycle import predict_with_runtime
 from backend.app.services.simulation import simulate_scores
 
 
-MODEL_ALGORITHM = "dynamic league environment + matchup-strength means + validated overdispersed correlated gamma-Poisson score distribution"
+MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + validated overdispersed correlated "
+                   "gamma-Poisson score distribution + league-accurate extra innings "
+                   "(MLB ghost-runner tiebreaker until decided, KBO ties stand after inning 11)")
 
 
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,
                  lineups: list[Any] | None = None, game_context: dict[str, Any] | None = None,
                  model_runtime: dict[str, Any] | None = None) -> dict[str, Any]:
     model_name = (model_runtime or {}).get("model_name") or (
-        "KBO_MATCHUP_V11" if game.league == "KBO" else "MLB_MATCHUP_V10"
+        "KBO_MATCHUP_V12" if game.league == "KBO" else "MLB_MATCHUP_V11"
     )
     features = build_features(home, away, home_pitcher, away_pitcher, game.stadium, game.league, lineups,
                               getattr(game, "game_date", None), game_context)
@@ -46,7 +48,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     ]
     input_data = {
         "game": game.external_id,
-        "simulation_summary_schema": 4,
+        "simulation_summary_schema": 6,
         "features": features,
         "home_expected": round(base_home_runs, 6),
         "away_expected": round(base_away_runs, 6),
@@ -69,6 +71,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     team_variance = min(.24, team_variance)
     simulation = simulate_scores(
         home_runs, away_runs, settings.simulations, seed, environment_variance, team_variance,
+        league=game.league,
     )
     # Every headline score-distribution metric must describe the same population. The logistic
     # classifier remains an independent diagnostic, but win probability, expected score,
@@ -101,9 +104,13 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "statistical_expected_total": round(home_runs + away_runs, 2),
         "confidence": confidence,
         "payload": {
-            "summary_schema_version": 4,
+            "summary_schema_version": 6,
             "coherence_valid": True,
-            "probability_source": "9_inning_score_simulation_two_way_excluding_ties",
+            "probability_source": (
+                "extra_innings_simulation_mlb_tiebreaker_no_ties" if game.league == "MLB"
+                else "extra_innings_simulation_kbo_to_11_two_way_excluding_ties"
+            ),
+            "extra_innings": simulation["extra_innings"],
             "model": {
                 "name": model_name,
                 "algorithm": ("automatically trained run regressors + " + MODEL_ALGORITHM)
@@ -134,6 +141,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "simulation_modes": simulation["simulation_modes"],
             "total_quantiles": simulation["total_quantiles"],
             "team_quantiles": simulation["team_quantiles"],
+            "team_dense_intervals": simulation["team_dense_intervals"],
+            "total_dense_interval": simulation["total_dense_interval"],
             "game_shape": {key: round(value, 4) for key, value in simulation["game_shape"].items()},
             "reasons": reasons,
             "disclaimer": "통계 기반 추정치이며 경기 결과나 수익을 보장하지 않습니다.",

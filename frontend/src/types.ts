@@ -55,6 +55,7 @@ export type Prediction = {
   expected_total: number
   statistical_expected_total?: number
   display_expected_score?: { away: number; home: number }
+  extra_innings?: { rule: string; probability: number }
   score_estimates?: {
     headline: 'MEAN'
     mean: { away: number; home: number }
@@ -84,6 +85,11 @@ export type Prediction = {
     outcome: SimulationMode<'HOME_WIN' | 'AWAY_WIN' | 'TIE'>
   }
   total_quantiles?: { p10: number; p50: number; p90: number }
+  team_dense_intervals?: {
+    away: { low: number; high: number; mass: number }
+    home: { low: number; high: number; mass: number }
+  }
+  total_dense_interval?: { low: number; high: number; mass: number }
   team_quantiles?: {
     away: { p10: number; p50: number; p90: number }
     home: { p10: number; p50: number; p90: number }
