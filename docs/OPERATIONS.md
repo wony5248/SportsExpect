@@ -1,0 +1,78 @@
+# 자동 수집·변경 감지 운영 가이드
+
+## 핵심 흐름
+
+```text
+Supabase Cron
+  → KBO·MLB 전체 수집 API를 매시간 호출
+  → 전체 수집 사이 30분에 경기 임박 수집 API 호출
+  → 다음 날 일정을 KBO 13:10 / MLB 00:20 KST에 선취득
+  → 선발·라인업·팀 기록 수집(실패 시 최대 3회 backoff 재시도)
+  → 현재 상태 upsert
+  → 예측 입력 fingerprint와 이전 snapshot 비교
+  → 변경 입력이면 새 예측, 같은 입력이면 중복 방지
+  → 의미 있는 시점 snapshot과 변경 이유 저장
+  → 경기 후 결과 저장 및 경기 전 예측만 walk-forward 평가
+```
+
+당일 KBO·MLB 전체 갱신은 Supabase Cron으로 1시간마다 실행됩니다. 전체 갱신 사이의 30분 시점에는 경기 3시간 전부터 시작 30분 후까지의 경기만 집중 갱신합니다. 저장 시점에 따라 T-24h/T-3h/T-60m/T-15m 스냅샷 단계가 자동으로 결정됩니다.
+
+라인업 미발표 시 KBO는 최근 라인업, MLB는 팀 시즌 공격력을 사용하고 신뢰도를 낮춥니다. 실제 9명 타순이 확인되면 KBO WAR 또는 MLB season OPS를 작게 축소해 반영합니다.
+
+## 프로세스
+
+개발 환경은 API를 실행하고 수집 CLI를 필요할 때 호출합니다. 운영 자동화는 별도 상주 프로세스 없이 Supabase Cron이 인증된 Vercel API를 호출합니다.
+
+```bash
+source .venv/bin/activate
+uvicorn backend.app.main:app --port 8000
+python -m backend.app.cli refresh --league ALL
+```
+
+운영 환경은 Vercel API의 `ADMIN_TOKEN`과 Supabase Vault의 `dugout_admin_token`을 같은 값으로 설정합니다. Vercel 인스턴스가 겹쳐도 PostgreSQL transaction advisory lock이 같은 리그·날짜의 동시 수집을 차단합니다.
+
+## 상태 확인
+
+- `GET /health`: 프로세스와 DB 연결
+- `GET /ready`: 마지막 성공 수집이 기본 6시간 이내이고 최근 실패율이 과도하지 않은지 확인
+- `GET /api/v1/operations/status`: 최근 성공, 24시간 시도/실패율, 예정 경기, 예측 수, 변경 알림 수
+- 화면의 `최신/갱신 필요` 칩: 카드 입력의 마지막 갱신 시각 기준
+
+수집 스키마가 바뀌거나 HTTP 요청이 실패하면 `crawl_logs`에 최종 오류와 재시도 횟수가 남습니다. 한 소스 실패가 전체 갱신을 중단하지 않으며 마지막 정상 캐시를 유지합니다.
+
+## 백업과 복구
+
+Supabase 무료 플랜에는 자동 백업이 없으므로 중요한 예측 이력은 Dashboard의 CSV 내보내기 또는 `pg_dump`로 별도 보관합니다. 로컬 SQLite 모드에서만 `python -m backend.app.cli backup`이 파일 백업을 만듭니다.
+
+## 캐시와 호출량
+
+- KBO 팀 기록: 120분
+- MLB 30개 팀 기록: 720분, 최대 6개 동시 요청
+- 매시간 경기 일정·상태·선발을 재확인하고, KBO 라인업 및 경기 3시간 이내 MLB 라인업을 다시 확인
+- 매시간 예측을 재계산하되 입력 hash가 같으면 중복 예측을 저장하지 않음
+- MLB 라인업: 경기 3시간 전부터 또는 경기 대상 job에서 확인
+- 빈 라인업 응답은 기존 라인업을 지우지 않음
+- MLB 선발: FIP 추정, K-BB%, 최근 등판일, 최근 5일 투구 수를 공식 game log에서 계산
+
+## 예측 스냅샷과 알림
+
+- `lineups`, `pitcher_stats`: 현재 적용 입력
+- `predictions`: 입력 hash가 달라질 때만 append
+- `prediction_snapshots`: 시점, trigger, 전체 입력, 변경 사유를 불변 저장
+- `prediction_history`: 예측 수치의 간단한 감사 이력
+
+선발, 라인업, 최근 흐름, 공격력, 불펜 proxy, 휴식 조건의 변화는 `STARTER`, `LINEUP`, `STATS` 이벤트로 기록됩니다. 화면의 변경 알림 수와 경기별 타임라인은 이 이벤트를 사용하며 외부 문자/메신저 비용은 없습니다.
+
+## 평가 누수 방지
+
+- `game_results.finalized_at`은 결과를 처음 확인한 시각으로 고정
+- `prediction.created_at <= game.start_at`이고 결과 저장 전인 예측만 평가
+- 같은 경기에서는 요청한 stage의 마지막 예측 또는 전체 마지막 경기 전 예측 하나만 사용
+- walk-forward 확률 보정은 해당 경기보다 앞선 결과만 사용하며 최소 30경기 전에는 원 확률 유지
+- 현재 시즌 누적값을 과거 날짜에 역으로 붙이지 않음
+
+`python -m backend.app.cli backtest --league ALL`에서 Accuracy, Brier, Log Loss, 득점 MAE·RMSE, calibration error, 월·리그·모델별 결과와 expanding home-rate 기준 모델을 함께 확인합니다. 두 모델이 같은 경기를 예측한 경우에는 paired 차이와 bootstrap 95% 신뢰구간을 추가로 계산합니다. 200경기는 예비 판단선, 500경기는 권장 판단선이며 그 전에는 승격 결론을 내리지 않습니다.
+
+## 아직 선택적으로 남겨둔 데이터
+
+부상자, 실시간 날씨, 실제 불펜 엔트리 가용성, 타자 좌우 split, 이동 거리, 시장 배당은 현재 공식 무료 소스만으로 리그 간 동일 품질을 보장하기 어려워 모델 입력으로 가장하지 않습니다. 현재 불펜 값은 팀 ERA·선발 평균 이닝·최근 선발 투구 부담을 이용한 명시적 proxy입니다. 이 누락을 반영해 신뢰도 상한은 94입니다.

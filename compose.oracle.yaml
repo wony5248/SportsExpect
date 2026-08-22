@@ -1,0 +1,29 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    init: true
+    restart: unless-stopped
+    environment:
+      SPORTS_EXPECT_SITE_ADDRESS: ${SPORTS_EXPECT_SITE_ADDRESS:?Set a domain or http://PUBLIC_IP}
+      ACCESS_USER: ${ACCESS_USER:?Set the shared viewer username}
+      ACCESS_PASSWORD_HASH: ${ACCESS_PASSWORD_HASH:?Set a Caddy password hash}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  caddy_data:
+  caddy_config:

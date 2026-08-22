@@ -1,0 +1,47 @@
+name: dugout-lab
+
+x-log-policy: &log-policy
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  api:
+    build: .
+    init: true
+    restart: unless-stopped
+    environment:
+      BASEBALL_DATABASE_URL: sqlite:////app/data/baseball.db
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?ADMIN_TOKEN must be set before network use}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8000}
+      ODDS_API_KEY: ${ODDS_API_KEY:-}
+      ODDS_API_REGIONS: ${ODDS_API_REGIONS:-us}
+      ODDS_REFRESH_MINUTES: ${ODDS_REFRESH_MINUTES:-360}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_PREDICTION_ENABLED: ${CLAUDE_PREDICTION_ENABLED:-false}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-5}
+      CLAUDE_BLEND_WEIGHT: ${CLAUDE_BLEND_WEIGHT:-0.15}
+      CLAUDE_TIMEOUT_SECONDS: ${CLAUDE_TIMEOUT_SECONDS:-20}
+      CLAUDE_MAX_TOKENS: ${CLAUDE_MAX_TOKENS:-600}
+      CACHE_TTL_MINUTES: ${CACHE_TTL_MINUTES:-120}
+      MLB_STATS_TTL_MINUTES: ${MLB_STATS_TTL_MINUTES:-720}
+      LIVE_UPDATE_WINDOW_MINUTES: ${LIVE_UPDATE_WINDOW_MINUTES:-180}
+      MONTE_CARLO_SIMS: ${MONTE_CARLO_SIMS:-20000}
+      COLLECTOR_RETRY_ATTEMPTS: ${COLLECTOR_RETRY_ATTEMPTS:-3}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      STALE_AFTER_MINUTES: ${STALE_AFTER_MINUTES:-360}
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ${DATA_VOLUME:-dugout_data}:/app/data
+    logging: *log-policy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  dugout_data:
