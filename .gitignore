@@ -19,3 +19,4 @@ frontend/vite.config.d.ts
 .DS_Store
 .vercel
 .env*
+supabase/.temp/
