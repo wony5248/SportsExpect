@@ -17,3 +17,5 @@ frontend/vite.config.d.ts
 !frontend/.env.example
 .vercel/
 .DS_Store
+.vercel
+.env*

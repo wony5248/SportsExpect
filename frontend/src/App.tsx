@@ -6,7 +6,7 @@ import SportsBaseballRounded from '@mui/icons-material/SportsBaseballRounded'
 import LoginRounded from '@mui/icons-material/LoginRounded'
 import LogoutRounded from '@mui/icons-material/LogoutRounded'
 import { fetchBacktest, fetchGameDates, fetchGames, fetchOperations, kstToday } from './lib/api'
-import { loadAuthSession, signOut } from './lib/auth'
+import { loadAuthSession, onAuthStateChange, signOut } from './lib/auth'
 import type { AuthSession } from './lib/auth'
 import type { Backtest, Game, GameDate, OperationsStatus } from './types'
 import GameCard from './components/GameCard'
@@ -25,7 +25,7 @@ export default function App() {
   const [backtest, setBacktest] = useState<Backtest | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
-  const [session, setSession] = useState<AuthSession | null>(() => loadAuthSession())
+  const [session, setSession] = useState<AuthSession | null>(null)
   const [seasonDates, setSeasonDates] = useState<GameDate[]>([])
   const requestId = useRef(0)
   const seasonYear = Number(date.slice(0, 4))
@@ -55,6 +55,12 @@ export default function App() {
   }, [date, league])
 
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    let active = true
+    void loadAuthSession().then((next) => { if (active) setSession(next) }).catch(() => { if (active) setSession(null) })
+    const unsubscribe = onAuthStateChange((next) => { if (active) setSession(next) })
+    return () => { active = false; unsubscribe() }
+  }, [])
   useEffect(() => {
     void fetchGameDates(seasonYear, league).then(setSeasonDates).catch(() => setSeasonDates([]))
   }, [seasonYear, league])
@@ -162,7 +168,7 @@ export default function App() {
           <p>모든 확률은 통계적 추정치이며 경기 결과 또는 수익을 보장하지 않습니다.</p>
         </footer>
       </Container>
-      {session && <ClaudeSettingsDialog open={settingsOpen} email={session.user.email} onClose={() => setSettingsOpen(false)} />}
+      {session && <ClaudeSettingsDialog open={settingsOpen} email={session.user.email ?? null} onClose={() => setSettingsOpen(false)} />}
       <LoginDialog open={loginOpen} onClose={() => setLoginOpen(false)} onSignedIn={setSession} />
     </Box>
   )

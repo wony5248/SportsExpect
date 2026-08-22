@@ -27,10 +27,12 @@ from backend.app.repositories.repository import (
     upsert_team_stat,
 )
 from backend.app.services.prediction import predict_game
+from backend.app.services.model_lifecycle import load_champion_runtime
 
 
 def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None = None,
-                game_ids: set[str] | None = None, trigger: str = "manual") -> dict[str, Any]:
+                game_ids: set[str] | None = None, trigger: str = "manual",
+                checkpoint_stage: str | None = None) -> dict[str, Any]:
     init_db()
     own_client = client is None
     client = client or KboClient()
@@ -98,7 +100,7 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                             replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
 
         _refresh_market("KBO", errors)
-        predicted = _predict_games("KBO", target_date, game_ids, errors, trigger)
+        predicted = _predict_games("KBO", target_date, game_ids, errors, trigger, checkpoint_stage)
         return {"date": target_date.isoformat(), "games": len(fetched_games) or predicted, "predictions": predicted, "errors": errors, "used_cached_team_stats": fresh and not force}
     finally:
         if own_client:
@@ -106,7 +108,8 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
 
 
 def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None = None,
-                game_ids: set[str] | None = None, trigger: str = "manual") -> dict[str, Any]:
+                game_ids: set[str] | None = None, trigger: str = "manual",
+                checkpoint_stage: str | None = None) -> dict[str, Any]:
     init_db()
     own_client = client is None
     client = client or MlbClient()
@@ -165,7 +168,7 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
                         if game:
                             replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
         _refresh_market("MLB", errors)
-        predicted = _predict_games("MLB", target_date, game_ids, errors, trigger)
+        predicted = _predict_games("MLB", target_date, game_ids, errors, trigger, checkpoint_stage)
         return {"date": target_date.isoformat(), "league": "MLB", "games": len(fetched_games) or predicted,
                 "predictions": predicted, "errors": errors, "used_cached_team_stats": fresh and not force}
     finally:
@@ -181,7 +184,8 @@ def refresh_all(target_date: date, force: bool = False, trigger: str = "manual")
             "errors": kbo["errors"] + mlb["errors"]}
 
 
-def _predict_games(league: str, target_date: date, game_ids: set[str] | None, errors: list[str], trigger: str) -> int:
+def _predict_games(league: str, target_date: date, game_ids: set[str] | None, errors: list[str], trigger: str,
+                   checkpoint_stage: str | None = None) -> int:
     predicted = 0
     with session_scope() as session:
         query = select(Game).options(joinedload(Game.home_team), joinedload(Game.away_team)).where(
@@ -190,6 +194,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
         if game_ids:
             query = query.where(Game.external_id.in_(game_ids))
         games = session.scalars(query).all()
+        model_runtime = load_champion_runtime(session, league)
         all_day_games = session.scalars(select(Game).where(Game.game_date == target_date, Game.league == league)).all()
         team_ids = {team_id for day_game in all_day_games for team_id in (day_game.home_team_id, day_game.away_team_id)}
         stats_by_team = {team_id: latest_team_stat(session, team_id, target_date) for team_id in team_ids}
@@ -218,8 +223,15 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 "away_games_today": appearances[game.away_team_id],
                 "league_average_runs": league_average_runs,
             }
-            result = predict_game(game, home, away, by_side.get("home"), by_side.get("away"), lineups, context)
-            save_prediction(session, game, result, stage=_prediction_stage(game, datetime.now(KST)), trigger=trigger)
+            captured_at = datetime.now(KST)
+            result = predict_game(
+                game, home, away, by_side.get("home"), by_side.get("away"), lineups, context,
+                model_runtime=model_runtime,
+            )
+            save_prediction(
+                session, game, result, stage=checkpoint_stage or _prediction_stage(game, captured_at),
+                trigger=trigger, captured_at=captured_at,
+            )
             predicted += 1
     return predicted
 

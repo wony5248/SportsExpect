@@ -23,7 +23,7 @@ begin
   if refresh_league not in ('KBO', 'MLB') then
     raise exception 'Unsupported league: %', refresh_league;
   end if;
-  if refresh_scope not in ('full', 'nearby', 'tomorrow', 'market') then
+  if refresh_scope not in ('full', 'nearby', 'tomorrow', 'market', 'checkpoints', 'lifecycle') then
     raise exception 'Unsupported scope: %', refresh_scope;
   end if;
 
@@ -77,6 +77,13 @@ select cron.schedule('dugout-mlb-full', '19 * * * *',
 select cron.schedule('dugout-mlb-nearby', '49 * * * *',
   $$select public.invoke_dugout_refresh('MLB', 'nearby')$$);
 
+-- Per-game immutable checkpoints. The lightweight endpoint runs every minute,
+-- but calls official data providers only when a game enters a ±2.5 minute target window.
+select cron.schedule('dugout-kbo-checkpoints', '* * * * *',
+  $$select public.invoke_dugout_refresh('KBO', 'checkpoints')$$);
+select cron.schedule('dugout-mlb-checkpoints', '* * * * *',
+  $$select public.invoke_dugout_refresh('MLB', 'checkpoints')$$);
+
 -- One structured market request per league/day. UTC schedules correspond to
 -- 12:00 KST for KBO and 00:00 KST for MLB. Hourly refreshes provide catch-up
 -- if either exact-time request fails, while the application daily gate prevents duplicates.
@@ -90,6 +97,13 @@ select cron.schedule('dugout-kbo-tomorrow', '10 4 * * *',
   $$select public.invoke_dugout_refresh('KBO', 'tomorrow')$$);
 select cron.schedule('dugout-mlb-tomorrow', '20 15 * * *',
   $$select public.invoke_dugout_refresh('MLB', 'tomorrow')$$);
+
+-- Daily champion/challenger evaluation. Runs only after the result collectors
+-- have had time to finalize the previous slate (05:30 and 16:30 KST).
+select cron.schedule('dugout-kbo-model-lifecycle', '30 20 * * *',
+  $$select public.invoke_dugout_refresh('KBO', 'lifecycle')$$);
+select cron.schedule('dugout-mlb-model-lifecycle', '30 7 * * *',
+  $$select public.invoke_dugout_refresh('MLB', 'lifecycle')$$);
 
 -- Inspect runs and HTTP responses:
 -- select * from cron.job order by jobname;

@@ -18,6 +18,7 @@ from backend.app.repositories.repository import game_cards, game_dates, game_det
 from backend.app.services.operations import LockUnavailable, backup_database, operational_status
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services.jobs import run_cron_refresh, run_full_refresh
+from backend.app.services.model_lifecycle import lifecycle_status
 from backend.app.services.claude_advisor import clear_claude_cache
 from backend.app.services.personal_claude import analyze_game_for_user
 from backend.app.services.runtime_secrets import (public_user_claude_status, remove_user_claude_key,
@@ -134,6 +135,12 @@ def backtest(league: str = Query(default="ALL", pattern="^(ALL|KBO|MLB)$"),
     return walk_forward_backtest(session, league, stage)
 
 
+@app.get("/api/v1/model/lifecycle")
+def model_lifecycle(league: str = Query(default="KBO", pattern="^(KBO|MLB)$"),
+                    session: Session = Depends(get_session)):
+    return lifecycle_status(session, league)
+
+
 @app.post("/api/v1/admin/refresh", dependencies=[Depends(require_admin)])
 def refresh(target_date: date = Query(alias="date", default_factory=lambda: datetime.now(KST).date()),
             force: bool = False, league: str = Query(default="ALL", pattern="^(ALL|KBO|MLB)$")):
@@ -150,7 +157,7 @@ def refresh(target_date: date = Query(alias="date", default_factory=lambda: date
 @app.post("/api/v1/admin/cron/refresh", dependencies=[Depends(require_admin)])
 def cron_refresh(
     league: str = Query(pattern="^(KBO|MLB)$"),
-    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market)$"),
+    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle)$"),
 ):
     try:
         return run_cron_refresh(league, scope)

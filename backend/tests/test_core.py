@@ -24,7 +24,8 @@ from backend.app.services.refresh import (_market_event_date, _market_refresh_du
                                           _prediction_stage, _recent_by_team)
 from backend.app.services.simulation import simulate_scores
 from backend.app.services.prediction import predict_game, select_primary_score
-from backend.app.services.jobs import _missing_leagues_for_date
+from backend.app.services.jobs import _missing_leagues_for_date, checkpoint_stage_for_minutes
+from backend.app.services.model_lifecycle import _promotion_decision, predict_with_runtime
 from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
 
 
@@ -65,6 +66,37 @@ def test_market_refresh_slots_are_anchored_to_kst_once_per_day():
     assert not _market_refresh_due("MLB", mlb_latest, datetime(2026, 8, 22, 23, 59, tzinfo=KST))
     assert _market_refresh_due("MLB", mlb_latest, datetime(2026, 8, 23, 0, 0, tzinfo=KST))
     assert _market_event_date("2026-08-22T15:30:00Z") == date(2026, 8, 23)
+
+
+def test_exact_checkpoint_windows_do_not_use_broad_stage_buckets():
+    assert checkpoint_stage_for_minutes(1440) == "T_MINUS_24H"
+    assert checkpoint_stage_for_minutes(180) == "T_MINUS_3H"
+    assert checkpoint_stage_for_minutes(60) == "T_MINUS_60M"
+    assert checkpoint_stage_for_minutes(15) == "T_MINUS_15M"
+    assert checkpoint_stage_for_minutes(170) is None
+
+
+def test_candidate_promotion_requires_improvement_and_non_regression_guards():
+    comparator = {"brier": .240, "log_loss": .690, "run_mae": 2.40}
+    assert _promotion_decision(
+        {"brier": .230, "log_loss": .680, "run_mae": 2.39}, comparator,
+    )[0]
+    assert not _promotion_decision(
+        {"brier": .230, "log_loss": .680, "run_mae": 2.60}, comparator,
+    )[0]
+
+
+def test_trained_runtime_produces_bounded_probability_and_runs():
+    runtime = {
+        "feature_names": [], "feature_means": [], "feature_scales": [],
+        "win_intercept": 0.4, "win_coefficients": [],
+        "home_run_intercept": 12.0, "home_run_coefficients": [],
+        "away_run_intercept": -2.0, "away_run_coefficients": [],
+    }
+    probability, home_runs, away_runs = predict_with_runtime(runtime, {}, 5.0, 4.0)
+    assert .59 < probability < .61
+    assert home_runs == 10.0
+    assert away_runs == .6
 
 
 def test_supabase_database_url_selects_psycopg_driver(monkeypatch):
@@ -434,9 +466,9 @@ def test_walk_forward_backtest_excludes_post_start_prediction():
                            away_win_probability=.01, home_expected_runs=9, away_expected_runs=1, confidence=99,
                            payload={}, created_at=start + timedelta(minutes=5))
         session.add_all([before, after]); session.flush()
-        session.add(PredictionSnapshot(game_id=game.id, prediction_id=before.id, stage="T_MINUS_15M", trigger="test",
-                                       minutes_to_start=15, input_hash="before", input_payload={}, changes=[],
-                                       captured_at=start - timedelta(minutes=15)))
+        session.add(PredictionSnapshot(game_id=game.id, prediction_id=before.id, stage="T_MINUS_15M",
+                                       trigger="checkpoint_exact", minutes_to_start=15, input_hash="before",
+                                       input_payload={}, changes=[], captured_at=start - timedelta(minutes=15)))
         session.add(GameResult(game_id=game.id, away_score=3, home_score=5, finalized_at=start + timedelta(hours=3), source_url="test"))
         session.commit()
         report = walk_forward_backtest(session, "KBO", "T_MINUS_15M")

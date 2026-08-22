@@ -286,7 +286,11 @@ def save_prediction(session: Session, game: Game, result: dict[str, Any], *, sta
     previous = session.scalar(select(PredictionSnapshot).where(
         PredictionSnapshot.game_id == game.id,
     ).order_by(PredictionSnapshot.captured_at.desc()).limit(1))
-    duplicate_latest_snapshot = bool(previous and previous.stage == stage and previous.input_hash == result["input_hash"])
+    # A scheduled checkpoint remains auditable even when its inputs match the prior hourly snapshot.
+    duplicate_latest_snapshot = bool(
+        previous and previous.stage == stage and previous.trigger == trigger and
+        previous.input_hash == result["input_hash"]
+    )
     if not duplicate_latest_snapshot:
         minutes = None
         if game.start_at:

@@ -201,6 +201,68 @@ class ModelVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
+class ModelArtifact(Base):
+    """Immutable, database-backed parameters produced by an automatic training run."""
+
+    __tablename__ = "model_artifacts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    model_version_id: Mapped[int] = mapped_column(ForeignKey("model_versions.id"), unique=True, index=True)
+    league: Mapped[str] = mapped_column(String(8), index=True)
+    feature_names: Mapped[list[str]] = mapped_column(JSON)
+    feature_means: Mapped[list[float]] = mapped_column(JSON)
+    feature_scales: Mapped[list[float]] = mapped_column(JSON)
+    win_intercept: Mapped[float] = mapped_column(Float)
+    win_coefficients: Mapped[list[float]] = mapped_column(JSON)
+    home_run_intercept: Mapped[float] = mapped_column(Float)
+    home_run_coefficients: Mapped[list[float]] = mapped_column(JSON)
+    away_run_intercept: Mapped[float] = mapped_column(Float)
+    away_run_coefficients: Mapped[list[float]] = mapped_column(JSON)
+    training_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    training_sample_size: Mapped[int] = mapped_column(Integer)
+    validation_metrics: Mapped[dict[str, Any]] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+
+    model_version: Mapped[ModelVersion] = relationship()
+
+
+class ModelRegistry(Base):
+    """One atomic champion pointer per league; the previous pointer enables rollback."""
+
+    __tablename__ = "model_registry"
+
+    league: Mapped[str] = mapped_column(String(8), primary_key=True)
+    champion_model_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("model_versions.id"), nullable=True,
+    )
+    previous_model_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("model_versions.id"), nullable=True,
+    )
+    promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    policy: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
+class ModelLifecycleEvent(Base):
+    """Auditable training, promotion, rejection, and rollback decision."""
+
+    __tablename__ = "model_lifecycle_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    league: Mapped[str] = mapped_column(String(8), index=True)
+    event_type: Mapped[str] = mapped_column(String(24), index=True)
+    candidate_model_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("model_versions.id"), nullable=True,
+    )
+    champion_model_version_id: Mapped[int | None] = mapped_column(
+        ForeignKey("model_versions.id"), nullable=True,
+    )
+    sample_size: Mapped[int] = mapped_column(Integer, default=0)
+    metrics: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    reason: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+
+
 class Prediction(Base):
     __tablename__ = "predictions"
 

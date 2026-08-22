@@ -46,9 +46,13 @@ docker compose exec api python -m backend.app.cli refresh --date 2026-08-22 --le
 - KBO·MLB 전체 갱신: Supabase Cron으로 1시간마다
 - 다음 날 일정 선취득: MLB 00:20, KBO 13:10 KST
 - 경기 근처 3시간: 전체 갱신 사이 30분 시점에 해당 경기 집중 갱신
+- 정확 시점 수집: 매분 대상 경기만 확인해 시작 24시간·3시간·60분·15분 전 ±2.5분 안에 불변 스냅샷 저장
+- 모델 생명주기: KBO 05:30, MLB 16:30 KST에 날짜순 재학습·승격·롤백 평가
 - 중복 요청: PostgreSQL advisory lock으로 차단
 
 선발 ID, 전체 타순, 선수 생산력, 팀 기록이 달라지면 새 예측을 만들고 변경 이유를 저장합니다. 같은 입력은 예측을 중복 저장하지 않지만 `T-24h`, `T-3h`, `T-60m`, `T-15m` 시점 스냅샷은 남깁니다. 경기 시작 후 생성된 값은 평가에서 제외합니다.
+
+리그별 평가 가능 표본이 200경기에 도달하면 NumPy 기반 L2 로지스틱 승률 모델과 ridge 홈·원정 득점 모델을 자동 학습합니다. 마지막 20%(최소 40경기)는 날짜순 검증용으로 분리하며, 후보가 동일 경기의 현 운영 모델보다 개선되고 성능 하한을 모두 지날 때만 champion으로 승격합니다. 승격 뒤 새 50경기에서 이전 모델 대비 성능 하락 한도를 넘으면 이전 champion으로 자동 롤백합니다. 표본이 부족한 동안은 버전 관리된 기존 베이스라인이 계속 운영됩니다.
 
 ## 선택형 실제 시장 기준점
 
@@ -95,6 +99,7 @@ python -m backend.app.cli refresh --league KBO
 python -m backend.app.cli refresh --league MLB
 python -m backend.app.cli backtest --league ALL
 python -m backend.app.cli backtest --league MLB --stage T_MINUS_15M
+python -m backend.app.cli model-lifecycle --league KBO
 python -m backend.app.cli backup
 pytest backend/tests
 cd frontend && npm run build
@@ -103,6 +108,7 @@ cd frontend && npm run build
 - `/health`: 프로세스와 DB 연결 확인
 - `/ready`: 최근 수집 성공까지 포함한 준비 상태
 - `/api/v1/operations/status`: 오류율, 최근 성공, 변경 알림, 예측 수
+- `/api/v1/model/lifecycle?league=KBO`: 운영 모델, 학습 준비도, 최근 승격·롤백 결정
 - `/api/v1/model/backtest`: 누수 방지 walk-forward 평가
 - 화면의 `내 Claude 설정`: 로그인 사용자별 Claude API 키 확인·암호화 저장·교체
 - `/api/v1/games/{id}/claude-analysis`: 로그인 사용자 키로만 계산하는 비공개 Claude 보조 분석

@@ -1,79 +1,65 @@
-export type AuthSession = {
-  access_token: string
-  refresh_token: string
-  expires_at: number
-  user: { id: string; email: string | null }
-}
+import { createClient } from '@supabase/supabase-js'
+import type { AuthChangeEvent, Session } from '@supabase/supabase-js'
 
-const STORAGE_KEY = 'dugout.supabase.session'
+
+export type AuthSession = Session
+
 const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL ?? '').replace(/\/$/, '')
 const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ?? import.meta.env.VITE_SUPABASE_ANON_KEY ?? ''
+const supabase = SUPABASE_URL && SUPABASE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_KEY, {
+      auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
+    })
+  : null
 
 export function authConfigured(): boolean {
-  return Boolean(SUPABASE_URL && SUPABASE_KEY)
+  return Boolean(supabase)
 }
 
-export function loadAuthSession(): AuthSession | null {
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY)
-    return raw ? JSON.parse(raw) as AuthSession : null
-  } catch {
-    window.localStorage.removeItem(STORAGE_KEY)
-    return null
-  }
+function requireClient() {
+  if (!supabase) throw new Error('프런트엔드에 Supabase 로그인 환경변수가 설정되지 않았습니다.')
+  return supabase
 }
 
-function saveSession(payload: Record<string, unknown>): AuthSession {
-  const user = payload.user as { id?: string; email?: string | null } | undefined
-  const session: AuthSession = {
-    access_token: String(payload.access_token ?? ''),
-    refresh_token: String(payload.refresh_token ?? ''),
-    expires_at: Math.floor(Date.now() / 1000) + Number(payload.expires_in ?? 3600),
-    user: { id: String(user?.id ?? ''), email: user?.email ?? null },
-  }
-  if (!session.access_token || !session.refresh_token || !session.user.id) throw new Error('로그인 응답 형식이 올바르지 않습니다.')
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session))
-  return session
+export async function loadAuthSession(): Promise<AuthSession | null> {
+  if (!supabase) return null
+  const { data, error } = await supabase.auth.getSession()
+  if (error) throw error
+  return data.session
 }
 
-async function authRequest(path: string, body: Record<string, string>): Promise<Record<string, unknown>> {
-  if (!authConfigured()) throw new Error('프런트엔드에 Supabase 로그인 환경변수가 설정되지 않았습니다.')
-  const response = await fetch(`${SUPABASE_URL}${path}`, {
-    method: 'POST',
-    headers: { apikey: SUPABASE_KEY, 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  const payload = await response.json().catch(() => ({})) as Record<string, unknown>
-  if (!response.ok) throw new Error(String(payload.msg ?? payload.error_description ?? payload.message ?? '로그인 요청에 실패했습니다.'))
-  return payload
+export function onAuthStateChange(callback: (session: AuthSession | null, event: AuthChangeEvent) => void) {
+  if (!supabase) return () => undefined
+  const { data } = supabase.auth.onAuthStateChange((event, session) => callback(session, event))
+  return () => data.subscription.unsubscribe()
 }
 
 export async function signInWithPassword(email: string, password: string): Promise<AuthSession> {
-  return saveSession(await authRequest('/auth/v1/token?grant_type=password', { email, password }))
+  const { data, error } = await requireClient().auth.signInWithPassword({ email, password })
+  if (error) throw error
+  if (!data.session) throw new Error('로그인 세션을 만들지 못했습니다.')
+  return data.session
 }
 
-async function refreshSession(session: AuthSession): Promise<AuthSession> {
-  return saveSession(await authRequest('/auth/v1/token?grant_type=refresh_token', { refresh_token: session.refresh_token }))
+export async function sendMagicLink(email: string): Promise<void> {
+  const { error } = await requireClient().auth.signInWithOtp({
+    email,
+    options: {
+      shouldCreateUser: false,
+      emailRedirectTo: window.location.origin,
+    },
+  })
+  if (error) throw error
 }
 
 export async function getAccessToken(): Promise<string> {
-  const session = loadAuthSession()
-  if (!session) throw new Error('로그인이 필요합니다.')
-  if (session.expires_at > Math.floor(Date.now() / 1000) + 60) return session.access_token
-  try {
-    return (await refreshSession(session)).access_token
-  } catch (error) {
-    window.localStorage.removeItem(STORAGE_KEY)
-    throw error
-  }
+  const session = await loadAuthSession()
+  if (!session) throw new Error('로그인이 필요합니다. 이메일 로그인 링크를 다시 받아 주세요.')
+  return session.access_token
 }
 
 export async function signOut(): Promise<void> {
-  const session = loadAuthSession()
-  window.localStorage.removeItem(STORAGE_KEY)
-  if (!session || !authConfigured()) return
-  await fetch(`${SUPABASE_URL}/auth/v1/logout`, {
-    method: 'POST',
-    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${session.access_token}` },
-  }).catch(() => undefined)
+  if (!supabase) return
+  const { error } = await supabase.auth.signOut()
+  if (error) throw error
 }

@@ -97,8 +97,8 @@ curl -X POST \
 
 Supabase Dashboard에서 다음을 설정합니다.
 
-1. **Authentication → URL Configuration**의 Site URL을 프런트 운영 주소로 설정합니다.
-2. **Authentication → Users → Add user**에서 이용할 4명의 이메일 계정을 만들고 이메일을 확인 처리합니다.
+1. **Authentication → URL Configuration**의 Site URL과 Redirect URLs에 프런트 운영 주소를 등록합니다.
+2. **Authentication → Users → Add user**에서 이용할 4명의 이메일 계정을 초대합니다. 초대 사용자는 비밀번호 없이도 화면의 `이메일 로그인 링크 받기`로 다시 로그인할 수 있습니다.
 3. **Project Settings → API Keys**에서 Project URL과 publishable key를 복사해 위의 API·프런트 환경변수에 넣습니다. `service_role` 키는 사용하지 않습니다.
 4. 아래 마이그레이션을 최신까지 실행해 사용자별 암호화 키 테이블을 만듭니다.
 
@@ -122,8 +122,10 @@ select vault.create_secret('YOUR_ADMIN_TOKEN', 'dugout_admin_token');
 
 - KBO/MLB 전체 갱신: 각 1시간
 - 경기 임박 갱신: 전체 갱신 사이의 30분 시점
+- 경기별 정확 시점 스냅샷: 매분 확인, 실제 외부 수집은 24시간·3시간·60분·15분 창에 들어온 경기만 실행
 - 다음 날 경기 발견: KBO 13:10 KST, MLB 00:20 KST
 - 시장 배당: KBO 12:00 KST, MLB 00:00 KST에 리그당 하루 1회
+- 모델 재학습·승격·롤백: KBO 05:30 KST, MLB 16:30 KST
 
 중복 호출은 PostgreSQL advisory lock으로 차단되므로 같은 리그·날짜 수집이 동시에 DB를 갱신하지 않습니다.
 
@@ -142,7 +144,7 @@ select id, status_code, error_msg, created from net._http_response order by crea
 1. API `/health`가 `database: connected`를 반환합니다.
 2. 수동 KBO 및 MLB 갱신이 각각 `200`을 반환합니다.
 3. 프런트에서 오늘 날짜의 경기 카드가 나타납니다.
-4. `cron.job`에 8개 `dugout-*` 작업이 활성화되어 있습니다.
+4. `cron.job`에 12개 `dugout-*` 작업이 활성화되어 있습니다.
 5. 다음 정각 이후 `net._http_response`에서 응답 코드가 확인됩니다.
 6. 서로 다른 두 사용자로 로그인했을 때 Claude 키 상태와 개인 분석이 분리되는지 확인합니다.
 

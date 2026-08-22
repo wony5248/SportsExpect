@@ -6,6 +6,7 @@ from typing import Any
 
 from backend.app.config import settings
 from backend.app.services.feature_engineering import build_features, expected_runs, logistic_probability
+from backend.app.services.model_lifecycle import predict_with_runtime
 from backend.app.services.simulation import simulate_scores
 
 
@@ -13,8 +14,11 @@ MODEL_ALGORITHM = "dynamic league environment + matchup-strength means + validat
 
 
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,
-                 lineups: list[Any] | None = None, game_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    model_name = "KBO_MATCHUP_V11" if game.league == "KBO" else "MLB_MATCHUP_V10"
+                 lineups: list[Any] | None = None, game_context: dict[str, Any] | None = None,
+                 model_runtime: dict[str, Any] | None = None) -> dict[str, Any]:
+    model_name = (model_runtime or {}).get("model_name") or (
+        "KBO_MATCHUP_V11" if game.league == "KBO" else "MLB_MATCHUP_V10"
+    )
     features = build_features(home, away, home_pitcher, away_pitcher, game.stadium, game.league, lineups,
                               getattr(game, "game_date", None), game_context)
     base_logistic = logistic_probability(features)
@@ -22,6 +26,11 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         home, away, home_pitcher, away_pitcher, float(features["park_factor"]),
         float(features["lineup_strength_diff"]), features,
     )
+    logistic, home_runs, away_runs = base_logistic, base_home_runs, base_away_runs
+    if model_runtime:
+        logistic, home_runs, away_runs = predict_with_runtime(
+            model_runtime, features, base_home_runs, base_away_runs,
+        )
     lineup_fingerprint = [
         (getattr(item, "side", None), getattr(item, "batting_order", None), getattr(item, "player_id", None),
          getattr(item, "player_name", None), getattr(item, "position", None), getattr(item, "value", None),
@@ -41,12 +50,12 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "home_expected": round(base_home_runs, 6),
         "away_expected": round(base_away_runs, 6),
         "model": model_name,
+        "model_checksum": (model_runtime or {}).get("checksum"),
         "pitchers": [(getattr(away_pitcher, "player_id", None), getattr(away_pitcher, "name", None)),
                      (getattr(home_pitcher, "player_id", None), getattr(home_pitcher, "name", None))],
         "lineups": lineup_fingerprint,
     }
     input_hash = hashlib.sha256(json.dumps(input_data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    logistic, home_runs, away_runs = base_logistic, base_home_runs, base_away_runs
     seed = int(input_hash[:16], 16) % (2**32)
     combined_ops = float(features["home_ops"]) + float(features["away_ops"])
     combined_whip = float(getattr(home_pitcher, "whip", None) or 1.35) + float(getattr(away_pitcher, "whip", None) or 1.35)
@@ -88,7 +97,13 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "summary_schema_version": 2,
             "coherence_valid": True,
             "probability_source": "9_inning_score_simulation_two_way_excluding_ties",
-            "model": {"name": model_name, "algorithm": MODEL_ALGORITHM, "simulations": settings.simulations},
+            "model": {
+                "name": model_name,
+                "algorithm": ("automatically trained run regressors + " + MODEL_ALGORITHM)
+                if model_runtime else MODEL_ALGORITHM,
+                "simulations": settings.simulations,
+                "operating_mode": "AUTO_TRAINED_CHAMPION" if model_runtime else "VERSIONED_BASELINE",
+            },
             "confidence_label": confidence_label,
             "confidence_missing": missing,
             "logistic_home_probability": round(logistic, 4),

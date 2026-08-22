@@ -6,8 +6,9 @@ from datetime import date, datetime
 
 from backend.app.config import KST
 from backend.app.services.refresh import refresh_all, refresh_kbo, refresh_mlb
-from backend.app.database import SessionLocal, init_db
+from backend.app.database import SessionLocal, init_db, session_scope
 from backend.app.services.backtest import walk_forward_backtest
+from backend.app.services.model_lifecycle import run_model_lifecycle
 from backend.app.services.operations import backup_database
 
 
@@ -21,6 +22,8 @@ def main() -> None:
     backtest = sub.add_parser("backtest", help="evaluate stored pre-game predictions without future leakage")
     backtest.add_argument("--league", choices=("ALL", "KBO", "MLB"), default="ALL")
     backtest.add_argument("--stage", choices=("T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_15M"))
+    lifecycle = sub.add_parser("model-lifecycle", help="train, promote, or roll back a league model")
+    lifecycle.add_argument("--league", choices=("KBO", "MLB"), required=True)
     sub.add_parser("backup", help="create a consistent SQLite backup")
     args = parser.parse_args()
     if args.command == "refresh":
@@ -30,6 +33,10 @@ def main() -> None:
         init_db()
         with SessionLocal() as session:
             print(json.dumps(walk_forward_backtest(session, args.league, args.stage), ensure_ascii=False, indent=2))
+    elif args.command == "model-lifecycle":
+        init_db()
+        with session_scope() as session:
+            print(json.dumps(run_model_lifecycle(session, args.league), ensure_ascii=False, indent=2))
     elif args.command == "backup":
         print(json.dumps(backup_database(), ensure_ascii=False, indent=2))
 

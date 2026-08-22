@@ -5,6 +5,9 @@ from backend.app.models.entities import (
     LineupEntry,
     MarketConsensus,
     MarketSnapshot,
+    ModelArtifact,
+    ModelLifecycleEvent,
+    ModelRegistry,
     ModelVersion,
     PitcherStat,
     Prediction,
@@ -17,7 +20,8 @@ from backend.app.models.entities import (
 )
 
 __all__ = [
-    "CrawlLog", "Game", "GameResult", "LineupEntry", "MarketConsensus", "MarketSnapshot", "ModelVersion", "PitcherStat",
+    "CrawlLog", "Game", "GameResult", "LineupEntry", "MarketConsensus", "MarketSnapshot", "ModelArtifact",
+    "ModelLifecycleEvent", "ModelRegistry", "ModelVersion", "PitcherStat",
     "Prediction", "PredictionHistory", "PredictionSnapshot", "RuntimeSecret", "Team", "TeamStat",
     "UserClaudeSetting",
 ]

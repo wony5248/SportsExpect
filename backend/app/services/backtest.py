@@ -12,6 +12,9 @@ from sqlalchemy.orm import Session, joinedload
 from backend.app.models import Game, GameResult, MarketSnapshot, Prediction, PredictionSnapshot
 
 
+EXACT_CHECKPOINT_STAGES = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_15M"}
+
+
 def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | None = None) -> dict[str, Any]:
     query = select(Prediction, Game, GameResult).join(Game, Game.id == Prediction.game_id).join(
         GameResult, GameResult.game_id == Game.id,
@@ -36,7 +39,9 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
     model_candidates: dict[tuple[int, str], tuple[Prediction, Game, GameResult, PredictionSnapshot | None]] = {}
     for prediction, game, result in raw:
         prediction_snapshots = sorted(snapshots.get(prediction.id, []), key=lambda item: item.captured_at)
-        matching = [item for item in prediction_snapshots if stage is None or item.stage == stage]
+        matching = [item for item in prediction_snapshots if stage is None or (
+            item.stage == stage and (stage not in EXACT_CHECKPOINT_STAGES or item.trigger == "checkpoint_exact")
+        )]
         snapshot = matching[-1] if matching else None
         if stage and snapshot is None:
             continue
