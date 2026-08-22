@@ -112,6 +112,7 @@ export type Game = {
   id: string
   league: string
   date: string
+  venue_date: string
   time: string | null
   start_at: string | null
   stadium: string | null
@@ -181,6 +182,13 @@ export type Game = {
   }[]>
   sources: { name: string; url: string; collected_at: string }[]
   freshness: { last_updated_at: string; age_minutes: number; status: 'FRESH' | 'STALE' }
+}
+
+export type GameDate = {
+  date: string
+  games: number
+  kbo: number
+  mlb: number
 }
 
 export type OperationsStatus = {

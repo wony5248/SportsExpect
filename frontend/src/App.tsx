@@ -3,8 +3,8 @@ import { Alert, Box, Button, CircularProgress, Container, Stack, TextField, Togg
 import RefreshRounded from '@mui/icons-material/RefreshRounded'
 import SettingsRounded from '@mui/icons-material/SettingsRounded'
 import SportsBaseballRounded from '@mui/icons-material/SportsBaseballRounded'
-import { fetchBacktest, fetchGames, fetchOperations, kstToday } from './lib/api'
-import type { Backtest, Game, OperationsStatus } from './types'
+import { fetchBacktest, fetchGameDates, fetchGames, fetchOperations, kstToday } from './lib/api'
+import type { Backtest, Game, GameDate, OperationsStatus } from './types'
 import GameCard from './components/GameCard'
 import ClaudeSettingsDialog from './components/ClaudeSettingsDialog'
 
@@ -19,7 +19,9 @@ export default function App() {
   const [operations, setOperations] = useState<OperationsStatus | null>(null)
   const [backtest, setBacktest] = useState<Backtest | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [seasonDates, setSeasonDates] = useState<GameDate[]>([])
   const requestId = useRef(0)
+  const seasonYear = Number(date.slice(0, 4))
 
   const load = useCallback(async () => {
     const currentRequest = ++requestId.current
@@ -46,6 +48,9 @@ export default function App() {
   }, [date, league])
 
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    void fetchGameDates(seasonYear, league).then(setSeasonDates).catch(() => setSeasonDates([]))
+  }, [seasonYear, league])
   useEffect(() => {
     const query = new URLSearchParams({ date, league })
     window.history.replaceState(null, '', `${window.location.pathname}?${query}`)
@@ -75,6 +80,16 @@ export default function App() {
         </header>
 
         <main>
+          <Box className="season-nav">
+            <Box><b>{seasonYear} 시즌 경기 아카이브</b><span>한국 날짜 기준 · 저장된 경기일 {seasonDates.length}일</span></Box>
+            <select aria-label="저장된 시즌 경기일" value={seasonDates.some((item) => item.date === date) ? date : ''}
+              onChange={(event) => event.target.value && setDate(event.target.value)}>
+              <option value="">경기 있는 날짜 선택</option>
+              {seasonDates.map((item) => <option key={item.date} value={item.date}>
+                {item.date.replaceAll('-', '.')} · {item.games}경기{league === 'ALL' ? ` (KBO ${item.kbo} / MLB ${item.mlb})` : ''}
+              </option>)}
+            </select>
+          </Box>
           {operations && <Box className={`operations-banner ${operations.status}`}>
             <Box><b>{operations.status === 'ok' ? '자동 수집 정상' : '자동 수집 점검 필요'}</b>
               <span>{operations.last_success ? `최근 성공 ${new Date(operations.last_success.finished_at).toLocaleString('ko-KR')}` : '수집 성공 기록 없음'}</span></Box>
@@ -100,8 +115,8 @@ export default function App() {
           {!loading && !error && games.length === 0 && (
             <Box className="empty-state">
               <SportsBaseballRounded />
-              <Typography variant="h6">저장된 경기가 없습니다</Typography>
-              <Typography color="text.secondary">Supabase Cron의 첫 수집이 완료되지 않았거나 해당 날짜에 경기가 없습니다.</Typography>
+              <Typography variant="h6">{date}에 저장된 경기가 없습니다</Typography>
+              <Typography color="text.secondary">휴식일이거나 일정 수집 전입니다. 위 시즌 경기 아카이브에서 경기 있는 날짜를 선택해 주세요.</Typography>
             </Box>
           )}
           {!loading && backtest && <Box className="model-board">

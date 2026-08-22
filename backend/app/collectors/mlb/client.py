@@ -43,30 +43,22 @@ class MlbClient:
                     start_at = _parse_datetime(item["gameDate"])
                     if start_at.astimezone(KST).date() != service_date:
                         continue
-                    away = item["teams"]["away"]
-                    home = item["teams"]["home"]
-                    detailed = item["status"].get("detailedState", "")
-                    abstract = item["status"].get("abstractGameState", "Preview")
-                    status = "CANCELLED" if detailed in {"Cancelled", "Postponed", "Suspended"} else (
-                        "FINAL" if abstract == "Final" else ("LIVE" if abstract == "Live" else "SCHEDULED")
-                    )
                     game_pk = str(item["gamePk"])
-                    games[game_pk] = {
-                        "external_id": f"MLB-{game_pk}", "game_pk": game_pk, "game_date": service_date,
-                        "start_time": start_at.astimezone(KST).strftime("%H:%M"), "start_at": start_at,
-                        "away_code": str(away["team"]["id"]), "away_name": away["team"]["name"],
-                        "home_code": str(home["team"]["id"]), "home_name": home["team"]["name"],
-                        "stadium": item.get("venue", {}).get("name"), "status": status,
-                        "away_score": away.get("score") if status == "FINAL" else None,
-                        "home_score": home.get("score") if status == "FINAL" else None,
-                        "away_pitcher_id": _person_id(away.get("probablePitcher")),
-                        "away_pitcher_name": _person_name(away.get("probablePitcher")),
-                        "home_pitcher_id": _person_id(home.get("probablePitcher")),
-                        "home_pitcher_name": _person_name(home.get("probablePitcher")),
-                        "starter_confirmed": bool(away.get("probablePitcher") and home.get("probablePitcher")),
-                        "lineup_confirmed": False,
-                    }
+                    games[game_pk] = _schedule_game(item, service_date)
         return SourcePayload(list(games.values()), ", ".join(urls), collected)
+
+    def season_games(self, season: int) -> SourcePayload:
+        """Return the complete regular-season schedule grouped by KST date."""
+        payload = self._get_json("/api/v1/schedule", {
+            "sportId": 1, "startDate": date(season, 1, 1).isoformat(),
+            "endDate": date(season, 12, 31).isoformat(), "gameTypes": "R", "hydrate": "team,venue",
+        })
+        rows = []
+        for date_group in payload.data.get("dates", []):
+            for item in date_group.get("games", []):
+                start_at = _parse_datetime(item["gameDate"])
+                rows.append(_schedule_game(item, start_at.astimezone(KST).date()))
+        return SourcePayload(rows, payload.source_url, payload.collected_at)
 
     def recent_results(self, target_date: date, days: int = 40) -> SourcePayload:
         payload = self._get_json("/api/v1/schedule", {
@@ -261,6 +253,34 @@ def _person_id(value: dict[str, Any] | None) -> str | None:
 
 def _person_name(value: dict[str, Any] | None) -> str | None:
     return value.get("fullName") if value else None
+
+
+def _schedule_game(item: dict[str, Any], service_date: date) -> dict[str, Any]:
+    start_at = _parse_datetime(item["gameDate"])
+    away, home = item["teams"]["away"], item["teams"]["home"]
+    detailed = item["status"].get("detailedState", "")
+    abstract = item["status"].get("abstractGameState", "Preview")
+    status = "CANCELLED" if detailed in {"Cancelled", "Postponed", "Suspended"} else (
+        "FINAL" if abstract == "Final" else ("LIVE" if abstract == "Live" else "SCHEDULED")
+    )
+    official_date = date.fromisoformat(str(item.get("officialDate") or start_at.date()))
+    game_pk = str(item["gamePk"])
+    return {
+        "external_id": f"MLB-{game_pk}", "game_pk": game_pk, "game_date": service_date,
+        "venue_date": official_date,
+        "start_time": start_at.astimezone(KST).strftime("%H:%M"), "start_at": start_at,
+        "away_code": str(away["team"]["id"]), "away_name": away["team"]["name"],
+        "home_code": str(home["team"]["id"]), "home_name": home["team"]["name"],
+        "stadium": item.get("venue", {}).get("name"), "status": status,
+        "away_score": away.get("score") if status == "FINAL" else None,
+        "home_score": home.get("score") if status == "FINAL" else None,
+        "away_pitcher_id": _person_id(away.get("probablePitcher")),
+        "away_pitcher_name": _person_name(away.get("probablePitcher")),
+        "home_pitcher_id": _person_id(home.get("probablePitcher")),
+        "home_pitcher_name": _person_name(home.get("probablePitcher")),
+        "starter_confirmed": bool(away.get("probablePitcher") and home.get("probablePitcher")),
+        "lineup_confirmed": False,
+    }
 
 
 def _split_rate(record: dict[str, Any] | None) -> float | None:

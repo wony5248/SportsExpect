@@ -3,18 +3,20 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 import logging
 from types import SimpleNamespace
+import httpx
 import pytest
 from sqlalchemy import Text, create_engine, event
 from sqlalchemy.orm import Session
 from backend.app.config import KST, database_url_from_environment
 from backend.app.database.base import Base
 from backend.app.models import Game, GameResult, ModelVersion, Prediction, PredictionSnapshot, RuntimeSecret, Team
-from backend.app.repositories.repository import _prediction_changes, game_cards
+from backend.app.repositories.repository import _prediction_changes, game_cards, game_dates
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services import claude_advisor, runtime_secrets
 from backend.app.services.claude_advisor import blend_with_claude
-from backend.app.collectors.kbo.client import (_batter_pitcher_split, _data_id_table,
+from backend.app.collectors.kbo.client import (KboClient, _batter_pitcher_split, _data_id_table,
                                                _pitcher_opponent_split, _rank_table, _record_rate)
+from backend.app.collectors.mlb.client import MlbClient
 from backend.app.collectors.odds import _consensus_event
 from backend.app.services.feature_engineering import _effective_lineup_ops, _lineup_matchup_summary
 from backend.app.services.refresh import (_market_event_date, _market_refresh_due, _months_for_recent,
@@ -106,6 +108,77 @@ def test_game_cards_use_bounded_batch_queries():
         event.remove(engine, "before_cursor_execute", count_query)
         assert len(rows) == 6
         assert queries <= 8
+
+
+def test_mlb_games_are_grouped_by_kst_and_keep_official_us_date():
+    def handler(request: httpx.Request) -> httpx.Response:
+        games = []
+        if request.url.params.get("date") == "2026-08-21":
+            games = [{
+                "gamePk": 123, "gameDate": "2026-08-22T01:10:00Z", "officialDate": "2026-08-21",
+                "status": {"detailedState": "Scheduled", "abstractGameState": "Preview"},
+                "venue": {"name": "Test Park"},
+                "teams": {
+                    "away": {"team": {"id": 1, "name": "Away"}},
+                    "home": {"team": {"id": 2, "name": "Home"}},
+                },
+            }]
+        return httpx.Response(200, json={"dates": [{"games": games}] if games else []})
+
+    client = MlbClient(transport=httpx.MockTransport(handler))
+    try:
+        rows = client.games(date(2026, 8, 22)).data
+    finally:
+        client.close()
+    assert len(rows) == 1
+    assert rows[0]["game_date"] == date(2026, 8, 22)
+    assert rows[0]["venue_date"] == date(2026, 8, 21)
+    assert rows[0]["start_time"] == "10:10"
+
+
+def test_kbo_monthly_schedule_keeps_future_games_for_season_archive():
+    response = {
+        "rows": [{"row": [
+            {"Text": "09.01(화)", "Class": "day"},
+            {"Text": "<b>18:30</b>", "Class": "time"},
+            {"Text": "<span>LG</span><em><span>vs</span></em><span>두산</span>", "Class": "play"},
+            {"Text": "", "Class": "relay"},
+            {"Text": "", "Class": None}, {"Text": "", "Class": None},
+            {"Text": "", "Class": None}, {"Text": "잠실", "Class": None},
+            {"Text": "-", "Class": None},
+        ]}],
+    }
+    client = KboClient(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=response)))
+    try:
+        rows = client.monthly_schedule(2026, 9).data
+    finally:
+        client.close()
+    assert rows == [{
+        "external_id": "20260901LGOB0", "game_date": date(2026, 9, 1),
+        "venue_date": date(2026, 9, 1), "away_name": "LG", "away_code": "LG",
+        "home_name": "두산", "home_code": "OB", "away_score": None, "home_score": None,
+        "start_time": "18:30", "start_at": datetime(2026, 9, 1, 18, 30, tzinfo=KST),
+        "stadium": "잠실", "status": "SCHEDULED",
+    }]
+
+
+def test_game_date_archive_counts_leagues_by_kst_date():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        away = Team(league="MLB", code="1", name="Away")
+        home = Team(league="MLB", code="2", name="Home")
+        session.add_all([away, home]); session.flush()
+        session.add_all([
+            Game(external_id=f"DATE-{index}", league="MLB", game_date=date(2026, 8, 22),
+                 venue_date=date(2026, 8, 21), away_team_id=away.id, home_team_id=home.id,
+                 status="FINAL", source="test", source_url="test", collected_at=datetime.now())
+            for index in range(2)
+        ])
+        session.commit()
+        assert game_dates(session, 2026, "MLB") == [
+            {"date": "2026-08-22", "games": 2, "kbo": 0, "mlb": 2},
+        ]
 
 
 def test_simulation_is_reproducible_and_coherent():

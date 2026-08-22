@@ -46,7 +46,7 @@ def init_db() -> None:
     # Lightweight additive migration for existing local SQLite databases.
     if engine.url.get_backend_name() == "sqlite":
         additions = {
-            "games": {"start_at": "DATETIME"},
+            "games": {"start_at": "DATETIME", "venue_date": "DATE"},
             "pitcher_stats": {
                 "fip": "FLOAT", "k_bb_rate": "FLOAT", "rest_days": "INTEGER",
                 "recent_pitches": "INTEGER", "handedness": "VARCHAR(4)", "opponent_games": "INTEGER",
@@ -67,6 +67,11 @@ def init_db() -> None:
                 for column, sql_type in expected.items():
                     if column not in columns:
                         connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
+            connection.execute(text("""
+                UPDATE games
+                SET venue_date = CASE WHEN league = 'MLB' THEN date(game_date, '-1 day') ELSE game_date END
+                WHERE venue_date IS NULL
+            """))
 
 
 def database_datetime(value: datetime) -> datetime:

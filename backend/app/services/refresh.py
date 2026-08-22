@@ -20,6 +20,7 @@ from backend.app.repositories.repository import (
     save_prediction,
     team_stats_fresh,
     upsert_game,
+    upsert_games_bulk,
     upsert_market_consensus,
     upsert_pitcher,
     upsert_team,
@@ -47,16 +48,24 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
             fresh = team_stats_fresh(session, target_date, "KBO")
         if force or not fresh:
             stats_source = _tracked("kbo_team_stats", "/Record/Team", client.team_stats, errors)
-            result_sources = []
-            for year, month in _months_for_recent(target_date, days=80):
+            schedule_sources = []
+            for month in range(1, 13):
                 payload = _tracked(
-                    f"kbo_results_{year}{month:02d}", "/ws/Schedule.asmx/GetScheduleList",
-                    lambda y=year, m=month: client.monthly_results(y, m), errors,
+                    f"kbo_schedule_{target_date.year}{month:02d}", "/ws/Schedule.asmx/GetScheduleList",
+                    lambda m=month: client.monthly_schedule(target_date.year, m), errors,
                 )
                 if payload:
-                    result_sources.append(payload)
+                    schedule_sources.append(payload)
+            season_rows = [row for source in schedule_sources for row in source.data]
+            history_rows = [row for row in season_rows if row.get("away_score") is not None and row.get("home_score") is not None]
+            if season_rows:
+                with session_scope() as session:
+                    upsert_games_bulk(
+                        session, season_rows, ", ".join(source.source_url for source in schedule_sources),
+                        max(source.collected_at for source in schedule_sources), "KBO",
+                    )
             if stats_source:
-                recent = _recent_by_team([row for source in result_sources for row in source.data], target_date)
+                recent = _recent_by_team(history_rows, target_date)
                 with session_scope() as session:
                     for name, raw in stats_source.data.items():
                         team = upsert_team(session, "KBO", raw["code"], name)
@@ -114,9 +123,15 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
             fresh = team_stats_fresh(session, target_date, "MLB")
         if force or not fresh:
             stats_source = _tracked("mlb_team_stats", "/api/v1/standings + /teams/{id}/stats", lambda: client.team_stats(target_date.year), errors)
-            results_source = _tracked("mlb_recent_results", "/api/v1/schedule", lambda: client.recent_results(target_date), errors)
+            season_source = _tracked("mlb_season_schedule", "/api/v1/schedule", lambda: client.season_games(target_date.year), errors)
+            season_rows = season_source.data if season_source else []
+            if season_source:
+                with session_scope() as session:
+                    upsert_games_bulk(session, season_rows, season_source.source_url,
+                                      season_source.collected_at, "MLB")
             if stats_source:
-                recent = _recent_by_team(results_source.data, target_date) if results_source else {}
+                completed_rows = [row for row in season_rows if row.get("away_score") is not None and row.get("home_score") is not None]
+                recent = _recent_by_team(completed_rows, target_date)
                 with session_scope() as session:
                     for name, raw in stats_source.data.items():
                         team = upsert_team(session, "MLB", raw["code"], name)

@@ -1,4 +1,4 @@
-import type { Backtest, ClaudeKeyStatus, ClaudeModel, Game, OperationsStatus } from '../types'
+import type { Backtest, ClaudeKeyStatus, ClaudeModel, Game, GameDate, OperationsStatus } from '../types'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
@@ -41,6 +41,13 @@ export async function fetchGames(date: string, league = 'ALL'): Promise<Game[]> 
   const payload = await response.json() as { games: Game[] }
   if (!Array.isArray(payload.games)) throw new Error('경기 데이터 형식이 올바르지 않습니다.')
   return payload.games
+}
+
+export async function fetchGameDates(year: number, league = 'ALL'): Promise<GameDate[]> {
+  const response = await request(`/api/v1/game-dates?year=${year}&league=${encodeURIComponent(league)}`)
+  if (!response.ok) throw new Error(`API ${response.status}: 시즌 경기일을 불러오지 못했습니다.`)
+  const payload = await response.json() as { dates: GameDate[] }
+  return Array.isArray(payload.dates) ? payload.dates : []
 }
 
 export async function fetchOperations(): Promise<OperationsStatus> {

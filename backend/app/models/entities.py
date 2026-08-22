@@ -27,6 +27,9 @@ class Game(Base):
     external_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     league: Mapped[str] = mapped_column(String(8), index=True)
     game_date: Mapped[date] = mapped_column(Date, index=True)
+    # Service grouping date is always KST. For MLB, venue_date preserves the
+    # official US venue-local schedule date shown by MLB.
+    venue_date: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
     start_time: Mapped[time | None] = mapped_column(Time, nullable=True)
     start_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     away_team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"))

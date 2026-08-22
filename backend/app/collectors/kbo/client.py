@@ -74,6 +74,7 @@ class KboClient:
             games.append({
                 "external_id": item["G_ID"],
                 "game_date": game_date,
+                "venue_date": game_date,
                 "start_time": item.get("G_TM"),
                 "start_at": start_at,
                 "away_code": item["AWAY_ID"],
@@ -120,13 +121,15 @@ class KboClient:
                 })
         return SourcePayload(entries, raw.source_url, raw.collected_at)
 
-    def monthly_results(self, year: int, month: int) -> SourcePayload:
+    def monthly_schedule(self, year: int, month: int) -> SourcePayload:
+        """Return every published regular-season game, including future fixtures."""
         raw = self._post_json(
             "/ws/Schedule.asmx/GetScheduleList",
             {"leId": "1", "srIdList": "0,9,6", "seasonId": str(year), "gameMonth": f"{month:02d}", "teamId": ""},
         )
         current_day: int | None = None
-        results: list[dict[str, Any]] = []
+        games: list[dict[str, Any]] = []
+        matchup_sequences: dict[tuple[date, str, str], int] = {}
         for wrapper in raw.data.get("rows", []):
             cells = wrapper.get("row", [])
             day_cell = next((c for c in cells if c.get("Class") == "day"), None)
@@ -142,16 +145,38 @@ class KboClient:
                 continue
             away_name, home_name = direct[0].get_text(strip=True), direct[-1].get_text(strip=True)
             scores = [int(s.get_text(strip=True)) for s in soup.select("em span") if s.get_text(strip=True).isdigit()]
-            if len(scores) != 2:
-                continue
-            results.append({
-                "game_date": date(year, month, current_day),
+            game_date = date(year, month, current_day)
+            away_code, home_code = TEAM_CODES.get(away_name, away_name), TEAM_CODES.get(home_name, home_name)
+            key = (game_date, away_code, home_code)
+            sequence = matchup_sequences.get(key, 0)
+            matchup_sequences[key] = sequence + 1
+            time_cell = next((c for c in cells if c.get("Class") == "time"), None)
+            time_match = re.search(r"\d{1,2}:\d{2}", _text(time_cell.get("Text", ""))) if time_cell else None
+            start_time = time_match.group(0) if time_match else None
+            status_text = " ".join(_text(cell.get("Text", "")) for cell in cells)
+            status = "CANCELLED" if "취소" in status_text else ("FINAL" if len(scores) == 2 else "SCHEDULED")
+            stadium = _text(cells[-2].get("Text", "")) if len(cells) >= 2 else ""
+            games.append({
+                "external_id": f"{game_date:%Y%m%d}{away_code}{home_code}{sequence}",
+                "game_date": game_date, "venue_date": game_date,
                 "away_name": away_name,
-                "home_name": home_name,
-                "away_score": scores[0],
-                "home_score": scores[1],
+                "away_code": away_code, "home_name": home_name, "home_code": home_code,
+                "away_score": scores[0] if len(scores) == 2 else None,
+                "home_score": scores[1] if len(scores) == 2 else None,
+                "start_time": start_time,
+                "start_at": datetime.combine(game_date, time.fromisoformat(start_time), tzinfo=KST) if start_time else None,
+                "stadium": stadium or None,
+                "status": status,
             })
-        return SourcePayload(results, raw.source_url, raw.collected_at)
+        return SourcePayload(games, raw.source_url, raw.collected_at)
+
+    def monthly_results(self, year: int, month: int) -> SourcePayload:
+        schedule = self.monthly_schedule(year, month)
+        return SourcePayload(
+            [game for game in schedule.data if game["status"] == "FINAL"],
+            schedule.source_url,
+            schedule.collected_at,
+        )
 
     def team_stats(self) -> SourcePayload:
         rank_path = "/Record/TeamRank/TeamRank.aspx"

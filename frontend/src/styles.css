@@ -16,6 +16,9 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .controls .MuiToggleButton-root { padding: 7px 12px; color: #819a90; border-color: rgba(191,233,215,.2); }
 .controls .Mui-selected { color: #7ee7b8 !important; background: rgba(126,231,184,.12) !important; }
 .section-heading { margin: 44px 0 22px; }
+.season-nav { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin: 24px 0 0; padding: 13px 16px; border: 1px solid rgba(126,231,184,.14); border-radius: 12px; background: rgba(126,231,184,.045); }
+.season-nav > div { display: grid; gap: 3px; }.season-nav b { color: #bcd2c9; font-size: .75rem; }.season-nav span { color: #708a80; font-size: .64rem; }
+.season-nav select { min-width: 285px; height: 38px; padding: 0 34px 0 12px; color: #c8d9d2; border: 1px solid rgba(191,233,215,.2); border-radius: 9px; background: #0c231c; font: inherit; font-size: .72rem; }
 .operations-banner { display: grid; grid-template-columns: 1fr auto auto auto; gap: 28px; align-items: center; margin: 28px 0 0; padding: 16px 18px; border: 1px solid rgba(126,231,184,.16); border-radius: 14px; background: rgba(126,231,184,.06); }
 .operations-banner.degraded { border-color: rgba(246,200,107,.22); background: rgba(246,200,107,.07); }
 .operations-banner > div { display: grid; gap: 3px; }.operations-banner span { color: #7b958b; font-size: .68rem; }.operations-banner b { color: #cce1d8; }.operations-banner strong { color: #7ee7b8; text-align: right; }
@@ -123,6 +126,8 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .controls .MuiToggleButton-root { flex: 1; min-width: 0; }
   .controls .MuiButton-root { min-height: 40px; white-space: nowrap; }
   .section-heading { margin: 32px 0 18px; align-items: flex-end !important; gap: 12px; }
+  .season-nav { align-items: stretch; flex-direction: column; gap: 10px; }
+  .season-nav select { width: 100%; min-width: 0; }
   .section-heading h2 { font-size: 1.7rem; line-height: 1.08; }
   .game-count { flex: 0 0 auto; padding-bottom: 3px; }
   .game-grid { grid-template-columns: minmax(0, 1fr); }

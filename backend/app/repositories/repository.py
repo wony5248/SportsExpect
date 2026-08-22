@@ -34,7 +34,8 @@ def upsert_game(session: Session, raw: dict[str, Any], source_url: str, collecte
     start_at = raw.get("start_at")
     if start_at:
         start_at = database_datetime(start_at)
-    values = dict(league=league, game_date=raw["game_date"], start_time=start, start_at=start_at, away_team_id=away.id,
+    values = dict(league=league, game_date=raw["game_date"], venue_date=raw.get("venue_date") or raw["game_date"],
+                  start_time=start, start_at=start_at, away_team_id=away.id,
                   home_team_id=home.id, stadium=raw.get("stadium"), status=raw["status"],
                   source=f"{league} official game data", source_url=source_url, collected_at=collected_at)
     if game is None:
@@ -54,6 +55,76 @@ def upsert_game(session: Session, raw: dict[str, Any], source_url: str, collecte
             result.away_score, result.home_score = raw["away_score"], raw["home_score"]
             result.source_url = source_url
     return game
+
+
+def upsert_games_bulk(session: Session, rows: list[dict[str, Any]], source_url: str,
+                      collected_at: datetime, league: str) -> list[Game]:
+    """Upsert a season schedule without thousands of database round trips."""
+    if not rows:
+        return []
+    teams = {(team.code): team for team in session.scalars(select(Team).where(Team.league == league)).all()}
+    for raw in rows:
+        for side in ("away", "home"):
+            code, name = str(raw[f"{side}_code"]), str(raw[f"{side}_name"])
+            team = teams.get(code)
+            if team is None:
+                team = Team(league=league, code=code, name=name)
+                session.add(team); teams[code] = team
+            elif team.name != name:
+                team.name = name
+    session.flush()
+
+    external_ids = [str(row["external_id"]) for row in rows]
+    games: dict[str, Game] = {}
+    for offset in range(0, len(external_ids), 500):
+        chunk = external_ids[offset:offset + 500]
+        games.update({
+            game.external_id: game
+            for game in session.scalars(select(Game).where(Game.external_id.in_(chunk))).all()
+        })
+    output: list[Game] = []
+    for raw in rows:
+        start = time.fromisoformat(raw["start_time"]) if raw.get("start_time") else None
+        start_at = database_datetime(raw["start_at"]) if raw.get("start_at") else None
+        values = {
+            "league": league, "game_date": raw["game_date"],
+            "venue_date": raw.get("venue_date") or raw["game_date"], "start_time": start,
+            "start_at": start_at, "away_team_id": teams[str(raw["away_code"])].id,
+            "home_team_id": teams[str(raw["home_code"])].id, "stadium": raw.get("stadium"),
+            "status": raw["status"], "source": f"{league} official season schedule",
+            "source_url": source_url, "collected_at": collected_at,
+        }
+        game = games.get(str(raw["external_id"]))
+        if game is None:
+            game = Game(external_id=str(raw["external_id"]), **values)
+            session.add(game); games[game.external_id] = game
+        else:
+            for key, value in values.items():
+                setattr(game, key, value)
+        output.append(game)
+    session.flush()
+
+    results: dict[int, GameResult] = {}
+    game_ids = [game.id for game in output]
+    for offset in range(0, len(game_ids), 500):
+        chunk = game_ids[offset:offset + 500]
+        results.update({
+            result.game_id: result
+            for result in session.scalars(select(GameResult).where(GameResult.game_id.in_(chunk))).all()
+        })
+    for raw, game in zip(rows, output, strict=True):
+        if raw.get("away_score") is None or raw.get("home_score") is None:
+            continue
+        result = results.get(game.id)
+        if result is None:
+            result = GameResult(game_id=game.id, away_score=int(raw["away_score"]),
+                                home_score=int(raw["home_score"]), finalized_at=collected_at,
+                                source_url=source_url)
+            session.add(result); results[game.id] = result
+        else:
+            result.away_score, result.home_score = int(raw["away_score"]), int(raw["home_score"])
+            result.source_url = source_url
+    return output
 
 
 def upsert_team_stat(session: Session, team: Team, effective_date: date, raw: dict[str, Any], recent: dict[str, Any], source_url: str, collected_at: datetime) -> TeamStat:
@@ -270,6 +341,21 @@ def game_cards(session: Session, target_date: date, league: str | None = "KBO") 
     return [_serialize_game(game, context) for game in games]
 
 
+def game_dates(session: Session, year: int, league: str | None = "ALL") -> list[dict[str, Any]]:
+    start, end = date(year, 1, 1), date(year + 1, 1, 1)
+    query = select(Game.game_date, Game.league, func.count(Game.id)).where(
+        Game.game_date >= start, Game.game_date < end,
+    ).group_by(Game.game_date, Game.league).order_by(Game.game_date)
+    if league and league != "ALL":
+        query = query.where(Game.league == league)
+    grouped: dict[date, dict[str, int]] = {}
+    for game_date, game_league, count in session.execute(query):
+        row = grouped.setdefault(game_date, {"KBO": 0, "MLB": 0})
+        row[game_league] = int(count)
+    return [{"date": day.isoformat(), "games": values["KBO"] + values["MLB"],
+             "kbo": values["KBO"], "mlb": values["MLB"]} for day, values in grouped.items()]
+
+
 def game_detail(session: Session, external_id: str) -> dict[str, Any] | None:
     game = session.scalar(select(Game).options(joinedload(Game.away_team), joinedload(Game.home_team)).where(Game.external_id == external_id))
     return _serialize_game(game, _game_serialization_context(session, [game])) if game else None
@@ -361,6 +447,7 @@ def _serialize_game(game: Game, context: dict[str, Any]) -> dict[str, Any]:
     age_minutes = max(0, round((datetime.now(KST).replace(tzinfo=None) - _naive(latest_update)).total_seconds() / 60))
     return {
         "id": game.external_id, "league": game.league, "date": game.game_date.isoformat(),
+        "venue_date": game.venue_date.isoformat() if game.venue_date else game.game_date.isoformat(),
         "time": game.start_time.strftime("%H:%M") if game.start_time else None, "start_at": _iso(game.start_at) if game.start_at else None, "stadium": game.stadium,
         "status": game.status, "collected_at": _iso(game.collected_at),
         "away": _team_payload(game.away_team, away_stat, pitcher_map.get("away")),

@@ -29,7 +29,9 @@ export default function GameCard({ game }: { game: Game }) {
   return (
     <article className="game-card">
       <Stack direction="row" justifyContent="space-between" alignItems="center" className="card-meta">
-        <span>{game.time ?? '시간 미정'} KST · {game.stadium ?? '구장 미정'}</span>
+        <span>{game.league === 'MLB'
+          ? `한국 ${shortDate(game.date)} ${game.time ?? '시간 미정'} KST · 미국 현지 ${shortDate(game.venue_date)} · ${game.stadium ?? '구장 미정'}`
+          : `${game.time ?? '시간 미정'} KST · ${game.stadium ?? '구장 미정'}`}</span>
         <Stack direction="row" spacing={.7}><Chip size="small" label={game.freshness.status === 'FRESH' ? '최신' : '갱신 필요'} className={`freshness ${game.freshness.status.toLowerCase()}`} /><Chip size="small" label={game.status === 'SCHEDULED' ? '경기 예정' : game.status} className={`status ${game.status.toLowerCase()}`} /></Stack>
       </Stack>
       <Box className="matchup">
@@ -192,5 +194,15 @@ function completenessLabel(label: NonNullable<Game['prediction']>['confidence_la
 function predictionUnavailableMessage(game: Game, hasPrediction: boolean) {
   if (game.status === 'CANCELLED') return '취소된 경기로 예측 지표를 표시하지 않습니다.'
   if (hasPrediction) return '이전 예측 형식은 정합성 검증 후 다시 표시됩니다. 다음 데이터 갱신을 기다려 주세요.'
-  return game.status === 'SCHEDULED' ? '예측 입력 데이터가 아직 충분하지 않습니다.' : '경기 시작 전에 저장된 예측이 없습니다.'
+  if (game.status === 'SCHEDULED') {
+    return game.away.stats && game.home.stats
+      ? '경기와 팀 기록은 수집됐지만 예측 생성이 아직 완료되지 않았습니다. 다음 자동 갱신 후 표시됩니다.'
+      : '예측에 필요한 시즌 팀 기록이 아직 수집되지 않았습니다. 다음 자동 갱신 후 표시됩니다.'
+  }
+  return '경기 시작 전에 저장된 예측이 없습니다.'
+}
+
+function shortDate(value: string) {
+  const [, month, day] = value.split('-')
+  return `${month}.${day}`
 }

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import KST, settings
 from backend.app.database import SessionLocal, init_db
-from backend.app.repositories.repository import game_cards, game_detail, performance_metrics
+from backend.app.repositories.repository import game_cards, game_dates, game_detail, performance_metrics
 from backend.app.services.operations import LockUnavailable, backup_database, operational_status
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services.jobs import run_cron_refresh, run_full_refresh
@@ -99,6 +99,17 @@ def list_games(
     # round trip while keeping scheduled updates visible within one minute.
     response.headers["Cache-Control"] = "public, max-age=0, s-maxage=60, stale-while-revalidate=300"
     return {"date": target_date.isoformat(), "league": league, "games": game_cards(session, target_date, league)}
+
+
+@app.get("/api/v1/game-dates")
+def list_game_dates(
+    response: Response,
+    year: int = Query(default_factory=lambda: datetime.now(KST).year, ge=2020, le=2100),
+    league: str = Query(default="ALL", pattern="^(ALL|KBO|MLB)$"),
+    session: Session = Depends(get_session),
+):
+    response.headers["Cache-Control"] = "public, max-age=0, s-maxage=300, stale-while-revalidate=900"
+    return {"year": year, "league": league, "dates": game_dates(session, year, league)}
 
 
 @app.get("/api/v1/games/{external_id}")
