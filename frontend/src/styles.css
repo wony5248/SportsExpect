@@ -48,6 +48,14 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .result-score, .result-verdict { min-width: 0; padding: 9px 11px; border-radius: 9px; background: rgba(3,16,12,.26); }
 .result-score { display: grid; gap: 2px; }.result-score span, .result-verdict span { color: #8d8063; font-size: .61rem; }.result-score strong { color: #f6c86b; font-size: 1.12rem; }.result-score.predicted strong { color: #c7d8d1; }.result-score i { color: #826f49; font-style: normal; }.result-score small, .result-verdict small { color: #6f765f; font-size: .54rem; }
 .result-verdict { display: grid; align-content: center; gap: 3px; }.result-verdict b { font-size: .72rem; }.result-verdict.correct b { color: #7ee7b8; }.result-verdict.incorrect b { color: #f29b8e; }.result-verdict.neutral b, .result-verdict.unavailable b { color: #d0b879; }
+.market-verdicts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
+.market-verdict { display: grid; align-content: start; gap: 3px; padding: 9px 11px; border-radius: 9px; background: rgba(3,16,12,.26); border: 1px solid transparent; }
+.market-verdict span { color: #8d8063; font-size: .58rem; }
+.market-verdict b { font-size: .76rem; }
+.market-verdict.hit { border-color: rgba(126,231,184,.24); }.market-verdict.hit b { color: #7ee7b8; }
+.market-verdict.miss { border-color: rgba(242,155,142,.22); }.market-verdict.miss b { color: #f29b8e; }
+.market-verdict.neutral b { color: #d0b879; }
+.market-verdict small { color: #6f765f; font-size: .55rem; line-height: 1.4; }
 .probability { display: block; font-family: Georgia, serif; font-size: 2rem; line-height: 1; color: #d8e8e1; }
 .probability.accent { color: #7ee7b8; }
 .probability + small { display: block; margin-top: 6px; color: #799087; }
@@ -177,6 +185,7 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .score-row strong { font-size: .95rem; overflow-wrap: anywhere; }
   .result-comparison-grid { grid-template-columns: 1fr 1fr; }
   .result-verdict { grid-column: 1 / -1; }
+  .market-verdicts { grid-template-columns: 1fr; }
   .forecast-range b, .forecast-range small { line-height: 1.5; }
   .inning-heading { align-items: flex-start !important; }
   .market-row { display: grid !important; grid-template-columns: 1fr; gap: 8px !important; }

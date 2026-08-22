@@ -52,6 +52,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
     }
   }
   const resultComparison = completedGameComparison(game, expectedScore)
+  const verdicts = game.result && p && ranking ? marketVerdicts(p, game, ranking) : null
+  const judgedVerdicts = verdicts?.filter((verdict) => verdict.hit != null) ?? []
+  const verdictHits = judgedVerdicts.filter((verdict) => verdict.hit).length
   return (
     <article className="game-card">
       <Stack direction="row" justifyContent="space-between" alignItems="center" className="card-meta">
@@ -67,7 +70,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
       </Box>
       {game.result && <Box className="result-comparison">
         <Stack direction="row" justifyContent="space-between" alignItems="baseline" className="result-comparison-heading">
-          <b>실제 결과와 경기 전 예측</b>
+          <b>실제 결과와 경기 전 예측{judgedVerdicts.length ? ` · 마켓 ${verdictHits}/${judgedVerdicts.length} 적중` : ''}</b>
           <span>{resultComparison ? `저장 예측 · ${new Date(resultComparison.createdAt).toLocaleString('ko-KR')}` : '경기 전 저장 예측 없음'}</span>
         </Stack>
         <Box className="result-comparison-grid">
@@ -77,6 +80,13 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             <Box className={`result-verdict ${resultComparison.verdictClass}`}><b>{resultComparison.verdict}</b><span>{resultComparison.favorite}</span><small>최빈 점수 기준 팀당 오차 {stat(resultComparison.runsMae, 1)}점</small></Box>
           </> : <Box className="result-verdict unavailable"><b>비교할 예측 없음</b><span>경기 시작 전에 저장된 시뮬레이션 예측이 없습니다.</span></Box>}
         </Box>
+        {verdicts && verdicts.length > 0 && <Box className="market-verdicts">
+          {verdicts.map((verdict) => <Box key={verdict.market} className={`market-verdict ${verdict.hit == null ? 'neutral' : verdict.hit ? 'hit' : 'miss'}`}>
+            <span>{verdict.market}</span>
+            <b>{verdict.hit == null ? '판정 제외' : verdict.hit ? '적중' : '미적중'}</b>
+            <small>예측 {verdict.pick} ({pct(verdict.probability)}) · 실제 {verdict.actual}</small>
+          </Box>)}
+        </Box>}
       </Box>}
 
       {p && coherent ? <>
@@ -310,6 +320,51 @@ function completedGameComparison(game: Game, expectedScore: { away: number; home
 }
 
 type RankedOutcome = { label: string; probability: number; note?: string }
+
+type MarketVerdict = { market: string; pick: string; probability: number; actual: string; hit: boolean | null }
+
+function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
+                        ranking: ReturnType<typeof rankedOutcomes>): MarketVerdict[] {
+  const result = game.result
+  if (!result) return []
+  const margin = result.home_score - result.away_score
+  const total = result.home_score + result.away_score
+  const homeFavored = p.home_win_probability >= p.away_win_probability
+  const favorite = homeFavored ? game.home.name : game.away.name
+  const underdog = homeFavored ? game.away.name : game.home.name
+  const rows: MarketVerdict[] = [{
+    market: '승패',
+    pick: `${favorite} 승`,
+    probability: Math.max(p.home_win_probability, p.away_win_probability),
+    actual: margin === 0 ? '무승부' : `${margin > 0 ? game.home.name : game.away.name} 승`,
+    hit: margin === 0 ? null : (margin > 0) === homeFavored,
+  }]
+  const favoriteMinus = homeFavored ? p.handicap.home_minus_1_5 : p.handicap.away_minus_1_5
+  const underdogPlus = homeFavored ? p.handicap.away_plus_1_5 : p.handicap.home_plus_1_5
+  if (typeof favoriteMinus === 'number' && typeof underdogPlus === 'number') {
+    const favoriteCovered = (homeFavored ? margin : -margin) >= 2
+    const pickFavorite = favoriteMinus >= underdogPlus
+    rows.push({
+      market: '핸디캡 ±1.5',
+      pick: pickFavorite ? `${favorite} -1.5` : `${underdog} +1.5`,
+      probability: Math.max(favoriteMinus, underdogPlus),
+      actual: favoriteCovered ? `${favorite} -1.5 성공` : `${underdog} +1.5 성공`,
+      hit: pickFavorite === favoriteCovered,
+    })
+  }
+  const totals = ranking.line != null ? p.totals[String(ranking.line)] : undefined
+  if (ranking.line != null && totals) {
+    const pickOver = totals.over >= totals.under
+    rows.push({
+      market: `총점 ${ranking.line} (${ranking.lineSource})`,
+      pick: pickOver ? `오버 ${ranking.line}` : `언더 ${ranking.line}`,
+      probability: Math.max(totals.over, totals.under),
+      actual: total === ranking.line ? `동일 ${total}점` : `${total > ranking.line ? '오버' : '언더'} (${total}점)`,
+      hit: total === ranking.line ? null : (total > ranking.line) === pickOver,
+    })
+  }
+  return rows
+}
 
 function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game): {
   outcomes: RankedOutcome[]
