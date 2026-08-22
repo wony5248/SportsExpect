@@ -77,6 +77,20 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .inning-forecast th:first-child { width: 72px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; color: #9fb7ad; }
 .inning-forecast thead th { color: #617d72; font-size: .58rem; font-weight: 700; }.inning-forecast tbody td { color: #d4e4de; }
 .inning-forecast th:last-child, .inning-forecast td:last-child { color: #7ee7b8; border-right: 0; font-weight: 850; }
+.outcome-ranking { display: grid; gap: 8px; margin-bottom: 14px; padding: 13px 14px; border: 1px solid rgba(189,231,213,.1); border-radius: 12px; background: rgba(3,16,12,.25); }
+.ranking-heading b { color: #d7e5de; font-size: .8rem; }
+.outcome-ranking .ranking-note { color: #6f8980; font-size: .6rem; margin-top: -4px; }
+.outcome-row { display: grid; grid-template-columns: 16px minmax(0, 1.3fr) 1fr 42px; gap: 9px; align-items: center; }
+.outcome-row i { font-style: normal; color: #607a70; font-size: .64rem; font-weight: 700; }
+.outcome-label { display: grid; }
+.outcome-label span { color: #b7c8c1; font-size: .73rem; line-height: 1.25; }
+.outcome-label small { color: #668177; font-size: .57rem; line-height: 1.3; }
+.outcome-track { height: 6px; border-radius: 4px; background: rgba(119,155,140,.14); overflow: hidden; }
+.outcome-track b { display: block; height: 100%; border-radius: 4px; background: #4f907465; }
+.outcome-row strong { color: #cfe0d8; font-size: .74rem; text-align: right; font-variant-numeric: tabular-nums; }
+.outcome-row.top i, .outcome-row.top strong { color: #7ee7b8; }
+.outcome-row.top .outcome-label span { color: #e2f0ea; font-weight: 700; }
+.outcome-row.top .outcome-track b { background: #65dbaa; }
 .market-row { align-items: stretch; margin-bottom: 14px; }
 .market-row > .market-stat { flex: 1; display: grid; gap: 2px; padding: 10px 12px; border: 1px solid rgba(189,231,213,.1); border-radius: 10px; }
 .market-row b { color: #e8f1ed; }
@@ -166,6 +180,10 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .forecast-range b, .forecast-range small { line-height: 1.5; }
   .inning-heading { align-items: flex-start !important; }
   .market-row { display: grid !important; grid-template-columns: 1fr; gap: 8px !important; }
+  .outcome-ranking { padding: 12px; }
+  .outcome-row { grid-template-columns: 14px minmax(0, 1.5fr) .9fr 38px; gap: 7px; }
+  .outcome-label span { font-size: .69rem; }
+  .outcome-ranking .confidence { min-height: 34px; min-width: 96px; width: auto; }
   .confidence { width: 100%; min-height: 44px; }
   .lineup-grid, .market-comparison, .starter-grid, .personal-claude-result { grid-template-columns: 1fr; }
   .personal-claude-result ul, .personal-claude-result p, .personal-claude-result > small { grid-column: auto; }

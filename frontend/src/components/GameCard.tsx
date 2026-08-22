@@ -33,16 +33,13 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const weightedScore = p?.score_estimates?.top5_weighted
   const modeTotal = p?.simulation_modes?.total_runs
   const modeOutcome = p?.simulation_modes?.outcome
-  const marketLine = game.market?.total_line
-  const marketTotal = marketLine == null ? undefined : p?.totals[String(marketLine)]
   const statisticalExpectedTotal = p?.statistical_expected_total ?? (
     typeof p?.home_expected_runs === 'number' && typeof p?.away_expected_runs === 'number'
       ? p.home_expected_runs + p.away_expected_runs
       : undefined
   )
-  const favoriteHandicap = !p || !coherent ? undefined : p.home_win_probability >= p.away_win_probability
-    ? { team: game.home.name, probability: p.handicap.home_minus_1_5 }
-    : { team: game.away.name, probability: p.handicap.away_minus_1_5 }
+  const homeFavored = !p || p.home_win_probability >= p.away_win_probability
+  const ranking = p && coherent ? rankedOutcomes(p, game) : null
   const requestPersonalAnalysis = async () => {
     if (!signedIn) { onRequireLogin(); return }
     setPersonalBusy(true); setPersonalError(null)
@@ -85,11 +82,11 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
       {p && coherent ? <>
         <Box className="probability-block">
           <Stack direction="row" justifyContent="space-between" alignItems="baseline">
-            <Box><span className="probability">{pct(p.away_win_probability)}</span><small>{game.away.name}</small></Box>
+            <Box><span className={`probability${homeFavored ? '' : ' accent'}`}>{pct(p.away_win_probability)}</span><small>{game.away.name}{homeFavored ? '' : ' · 우세'}</small></Box>
             <Typography className="metric-label">{p.extra_innings
               ? game.league === 'MLB' ? '연장 승부치기 포함 승률' : '연장 11회 · 무승부 제외 승률'
               : '9이닝 동점 제외 승률'}</Typography>
-            <Box textAlign="right"><span className="probability accent">{pct(p.home_win_probability)}</span><small>{game.home.name}</small></Box>
+            <Box textAlign="right"><span className={`probability${homeFavored ? ' accent' : ''}`}>{pct(p.home_win_probability)}</span><small>{game.home.name}{homeFavored ? ' · 우세' : ''}</small></Box>
           </Stack>
           <Box className="probability-track"><i style={{ width: pct(p.away_win_probability) }} /><b style={{ width: pct(p.home_win_probability) }} /></Box>
         </Box>
@@ -128,17 +125,19 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           score={predictedScore}
         /> : null}
 
-        <Stack direction="row" spacing={1} className="market-row">
-          {favoriteHandicap && typeof favoriteHandicap.probability === 'number'
-            ? <Box className="market-stat"><span>{favoriteHandicap.team} 2점차 이상 승리</span><b>{pct(favoriteHandicap.probability)}</b><small>-1.5 핸디캡 기준</small></Box>
-            : <Box className="market-stat"><span>핸디캡 확률</span><b>미산출</b><small>검증된 값 없음</small></Box>}
-          {marketLine != null && marketTotal
-            ? <Box className="market-stat"><span>시장 총점 {marketLine}</span><b>초과 {pct(marketTotal.over)}</b><small>미만 {pct(marketTotal.under)}{marketTotal.push ? ` · 동일 ${pct(marketTotal.push)}` : ''}</small></Box>
-            : marketLine != null
-              ? <Box className="market-stat"><span>시장 총점 {marketLine}</span><b>비교 불가</b><small>모델 지원 기준점 범위 밖</small></Box>
-              : <Box className="market-stat"><span>시장 총점</span><b>미수집</b><small>임의 기준점은 표시하지 않음</small></Box>}
-          <Chip icon={<VerifiedRounded />} label={completenessLabel(p.confidence_label)} size="small" className={`confidence ${p.confidence_label.toLowerCase()}`} />
-        </Stack>
+        {ranking && <Box className="outcome-ranking">
+          <Stack direction="row" justifyContent="space-between" alignItems="center" className="ranking-heading">
+            <b>많이 나온 결과 순위</b>
+            <Chip icon={<VerifiedRounded />} label={completenessLabel(p.confidence_label)} size="small" className={`confidence ${p.confidence_label.toLowerCase()}`} />
+          </Stack>
+          <small className="ranking-note">승패 · 핸디캡 ±1.5 · 총점 {ranking.line != null ? `${ranking.line} (${ranking.lineSource} 기준점)` : '기준점 미수집'} · {p.model.simulations.toLocaleString()}회 시뮬레이션 빈도순</small>
+          {ranking.outcomes.map((outcome, index) => <Box key={outcome.label} className={`outcome-row${index === 0 ? ' top' : ''}`}>
+            <i>{index + 1}</i>
+            <Box className="outcome-label"><span>{outcome.label}</span>{outcome.note && <small>{outcome.note}</small>}</Box>
+            <Box className="outcome-track"><b style={{ width: pct(outcome.probability) }} /></Box>
+            <strong>{pct(outcome.probability)}</strong>
+          </Box>)}
+        </Box>}
         <Button fullWidth onClick={() => setOpen(!open)} endIcon={<ExpandMoreRounded className={open ? 'rotated' : ''} />} className="detail-button">{open ? '분석 접기' : '상세 분석 보기'}</Button>
         <Collapse in={open}>
           <Box className="details">
@@ -308,6 +307,49 @@ function completedGameComparison(game: Game, expectedScore: { away: number; home
     verdictClass: winnerCorrect == null ? 'neutral' : winnerCorrect ? 'correct' : 'incorrect',
     runsMae: (Math.abs(expectedScore.away - result.away_score) + Math.abs(expectedScore.home - result.home_score)) / 2,
   }
+}
+
+type RankedOutcome = { label: string; probability: number; note?: string }
+
+function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game): {
+  outcomes: RankedOutcome[]
+  line: number | null
+  lineSource: '시장' | '모델'
+} {
+  const homeFavored = p.home_win_probability >= p.away_win_probability
+  const favorite = homeFavored ? game.home.name : game.away.name
+  const underdog = homeFavored ? game.away.name : game.home.name
+  const outcomes: RankedOutcome[] = [
+    { label: `${game.home.name} 승`, probability: p.home_win_probability },
+    { label: `${game.away.name} 승`, probability: p.away_win_probability },
+  ]
+  const favoriteMinus = homeFavored ? p.handicap.home_minus_1_5 : p.handicap.away_minus_1_5
+  const underdogPlus = homeFavored ? p.handicap.away_plus_1_5 : p.handicap.home_plus_1_5
+  if (typeof favoriteMinus === 'number') outcomes.push({
+    label: `핸디 승 · ${favorite} -1.5`, probability: favoriteMinus, note: `${favorite} 2점차 이상 승리`,
+  })
+  if (typeof underdogPlus === 'number') outcomes.push({
+    label: `핸디 패 · ${underdog} +1.5`, probability: underdogPlus, note: `${favorite} 1점차 승부 또는 ${underdog} 승리`,
+  })
+  const marketLine = game.market?.total_line
+  let line: number | null = marketLine != null && p.totals[String(marketLine)] ? marketLine : null
+  let lineSource: '시장' | '모델' = '시장'
+  if (line == null) {
+    const target = p.total_quantiles?.p50 ?? p.statistical_expected_total ?? p.expected_total
+    const half = Math.min(12.5, Math.max(6.5, Math.round(target - .5) + .5))
+    if (p.totals[String(half)]) { line = half; lineSource = '모델' }
+  }
+  const totals = line != null ? p.totals[String(line)] : undefined
+  if (line != null && totals) {
+    const pushNote = totals.push ? ` · 동일 ${pct(totals.push)}` : ''
+    outcomes.push({ label: `오버 ${line}`, probability: totals.over, note: `총점 ${line} 초과${pushNote}` })
+    outcomes.push({ label: `언더 ${line}`, probability: totals.under, note: `총점 ${line} 미만${pushNote}` })
+  }
+  if (game.league !== 'MLB' && p.tie_probability > 0) {
+    outcomes.push({ label: '무승부', probability: p.tie_probability, note: '연장 11회 후 동점' })
+  }
+  outcomes.sort((a, b) => b.probability - a.probability)
+  return { outcomes, line, lineSource }
 }
 
 function modeFrequency(mode: { count?: number; probability?: number | null } | null | undefined) {
