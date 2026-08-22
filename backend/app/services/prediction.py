@@ -5,18 +5,16 @@ import json
 from typing import Any
 
 from backend.app.config import settings
-from backend.app.services.claude_advisor import blend_with_claude, claude_prediction_advice
 from backend.app.services.feature_engineering import build_features, expected_runs, logistic_probability
 from backend.app.services.simulation import simulate_scores
-from backend.app.services.runtime_secrets import claude_configuration
 
 
-MODEL_ALGORITHM = "dynamic league environment + matchup-strength means + bounded optional Claude run adjustment + validated overdispersed correlated gamma-Poisson score distribution"
+MODEL_ALGORITHM = "dynamic league environment + matchup-strength means + validated overdispersed correlated gamma-Poisson score distribution"
 
 
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,
                  lineups: list[Any] | None = None, game_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    model_name = "KBO_MATCHUP_V10" if game.league == "KBO" else "MLB_MATCHUP_V9"
+    model_name = "KBO_MATCHUP_V11" if game.league == "KBO" else "MLB_MATCHUP_V10"
     features = build_features(home, away, home_pitcher, away_pitcher, game.stadium, game.league, lineups,
                               getattr(game, "game_date", None), game_context)
     base_logistic = logistic_probability(features)
@@ -37,7 +35,6 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
          getattr(item, "matchup_slg", None), getattr(item, "matchup_ops", None))
         for item in (lineups or [])
     ]
-    ai_configuration = claude_configuration()
     input_data = {
         "game": game.external_id,
         "features": features,
@@ -47,52 +44,9 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "pitchers": [(getattr(away_pitcher, "player_id", None), getattr(away_pitcher, "name", None)),
                      (getattr(home_pitcher, "player_id", None), getattr(home_pitcher, "name", None))],
         "lineups": lineup_fingerprint,
-        "ai_config": {
-            "enabled": bool(ai_configuration["enabled"] and ai_configuration["api_key"]),
-            "model": ai_configuration["model"],
-            "blend_weight": settings.claude_blend_weight,
-            "key_source": ai_configuration["source"],
-            "key_fingerprint": ai_configuration["fingerprint"],
-        },
-    }
-    base_input_hash = hashlib.sha256(json.dumps(input_data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    advice_context = {
-        "game": {
-            "league": game.league,
-            "date": str(getattr(game, "game_date", "")),
-            "stadium": getattr(game, "stadium", None),
-            "away_team": away.team.name,
-            "home_team": home.team.name,
-        },
-        "baseline": {
-            "home_win_probability": round(base_logistic, 6),
-            "home_expected_runs": round(base_home_runs, 6),
-            "away_expected_runs": round(base_away_runs, 6),
-            "league_average_runs_per_team": round(league_avg, 6),
-        },
-        "features": features,
-    }
-    advice, ai_metadata = claude_prediction_advice(base_input_hash, advice_context, ai_configuration)
-    logistic, home_runs, away_runs, ai_weight = blend_with_claude(
-        base_logistic, base_home_runs, base_away_runs, advice,
-    )
-    ai_metadata["blend_weight"] = round(ai_weight, 4)
-    if advice is not None:
-        ai_metadata["forecast"] = {
-            "home_win_probability": round(float(advice["home_win_probability"]), 4),
-            "home_expected_runs": round(float(advice["home_expected_runs"]), 2),
-            "away_expected_runs": round(float(advice["away_expected_runs"]), 2),
-            "confidence": round(float(advice["confidence"]), 1),
-        }
-        ai_metadata["reasons"] = [str(reason)[:180] for reason in advice.get("reasons", [])[:3]]
-        ai_metadata["caution"] = str(advice.get("caution", ""))[:240]
-    input_data["ai_result"] = {
-        "status": "applied" if ai_metadata["used"] else ai_metadata["status"],
-        "model": ai_metadata.get("model"),
-        "blend_weight": ai_metadata["blend_weight"],
-        "forecast": ai_metadata.get("forecast"),
     }
     input_hash = hashlib.sha256(json.dumps(input_data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    logistic, home_runs, away_runs = base_logistic, base_home_runs, base_away_runs
     seed = int(input_hash[:16], 16) % (2**32)
     combined_ops = float(features["home_ops"]) + float(features["away_ops"])
     combined_whip = float(getattr(home_pitcher, "whip", None) or 1.35) + float(getattr(away_pitcher, "whip", None) or 1.35)
@@ -115,9 +69,6 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         simulation["top_scores"], home_runs, away_runs, home_probability,
     )
     disagreement = abs(logistic - simulation["home_two_way_probability"])
-    if advice is not None:
-        advice_probability = max(0.0, min(1.0, float(advice["home_win_probability"])))
-        disagreement = max(disagreement, abs(base_logistic - advice_probability))
     confidence, confidence_label, missing = _confidence(features, disagreement)
     reasons = _reasons(home, away, home_pitcher, away_pitcher, features)
     display_score = {"away": round(away_runs, 1), "home": round(home_runs, 1)}
@@ -149,7 +100,6 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "league_average_runs": round(league_avg, 3),
             "statistical_expected_total": round(home_runs + away_runs, 2),
             "display_expected_score": display_score,
-            "ai_assist": ai_metadata,
             "simulation_environment_variance": round(environment_variance, 4),
             "simulation_team_variance": round(team_variance, 4),
             "features": features,

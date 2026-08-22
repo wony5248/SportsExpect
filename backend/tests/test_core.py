@@ -5,14 +5,15 @@ import logging
 from types import SimpleNamespace
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import Text, create_engine, event
 from sqlalchemy.orm import Session
 from backend.app.config import KST, database_url_from_environment
 from backend.app.database.base import Base
-from backend.app.models import Game, GameResult, ModelVersion, Prediction, PredictionSnapshot, RuntimeSecret, Team
+from backend.app.models import Game, GameResult, ModelVersion, Prediction, PredictionSnapshot, Team, UserClaudeSetting
 from backend.app.repositories.repository import _prediction_changes, game_cards, game_dates
 from backend.app.services.backtest import walk_forward_backtest
-from backend.app.services import claude_advisor, runtime_secrets
+from backend.app.services import claude_advisor, personal_claude, runtime_secrets, user_auth
 from backend.app.services.claude_advisor import blend_with_claude
 from backend.app.collectors.kbo.client import (KboClient, _batter_pitcher_split, _data_id_table,
                                                _pitcher_opponent_split, _rank_table, _record_rate)
@@ -108,6 +109,41 @@ def test_game_cards_use_bounded_batch_queries():
         event.remove(engine, "before_cursor_execute", count_query)
         assert len(rows) == 6
         assert queries <= 8
+
+
+def test_final_game_card_uses_last_prediction_saved_before_game_start():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    target = date(2026, 8, 22)
+    start = datetime(2026, 8, 22, 18, 30)
+    with Session(engine) as session:
+        away = Team(league="KBO", code="AW", name="Away")
+        home = Team(league="KBO", code="HM", name="Home")
+        model = ModelVersion(name="CARD-TEST", algorithm="test", feature_schema={}, checksum="card-test")
+        session.add_all([away, home, model]); session.flush()
+        game = Game(external_id="FINAL-CARD", league="KBO", game_date=target, start_at=start,
+                    away_team_id=away.id, home_team_id=home.id, status="FINAL",
+                    source="test", source_url="test", collected_at=start + timedelta(hours=3))
+        session.add(game); session.flush()
+        session.add_all([
+            Prediction(game_id=game.id, model_version_id=model.id, input_hash="pregame",
+                       home_win_probability=.6, away_win_probability=.4,
+                       home_expected_runs=5.1, away_expected_runs=3.8, confidence=80,
+                       payload={}, created_at=start - timedelta(minutes=15)),
+            Prediction(game_id=game.id, model_version_id=model.id, input_hash="postgame",
+                       home_win_probability=.99, away_win_probability=.01,
+                       home_expected_runs=9, away_expected_runs=1, confidence=99,
+                       payload={}, created_at=start + timedelta(minutes=5)),
+        ])
+        session.add(GameResult(game_id=game.id, away_score=3, home_score=5,
+                               finalized_at=start + timedelta(hours=3), source_url="test"))
+        session.commit()
+
+        card = game_cards(session, target, "KBO")[0]
+        assert card["result"] == {"away_score": 3, "home_score": 5}
+        assert card["prediction"]["away_expected_runs"] == 3.8
+        assert card["prediction"]["home_expected_runs"] == 5.1
+        assert card["prediction"]["home_win_probability"] == .6
 
 
 def test_mlb_games_are_grouped_by_kst_and_keep_official_us_date():
@@ -228,11 +264,7 @@ def test_claude_advice_cannot_overpower_statistical_baseline():
     assert 3.9 <= away_runs <= 4.2
 
 
-def test_confirmed_lineup_change_creates_new_prediction_input(monkeypatch):
-    monkeypatch.setattr("backend.app.services.prediction.claude_configuration", lambda: {
-        "configured": False, "enabled": False, "source": "none", "fingerprint": None,
-        "updated_at": None, "model": "claude-sonnet-5", "api_key": None, "error": None,
-    })
+def test_confirmed_lineup_change_creates_new_prediction_input():
     home_team, away_team = SimpleNamespace(name="Home"), SimpleNamespace(name="Away")
     recent = {"10": {"games": 10, "win_rate": .5}}
     home = SimpleNamespace(team=home_team, recent=recent, win_rate=.55, home_win_rate=.58, runs_per_game=4.8,
@@ -269,20 +301,80 @@ def test_ui_registered_secret_is_encrypted_and_requires_same_master_key():
         decrypt_secret(encrypted, "different-test-master-secret")
 
 
-def test_ui_registered_claude_model_is_stored_with_key(monkeypatch):
+def test_user_claude_model_is_stored_per_user(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     monkeypatch.setattr(runtime_secrets, "encrypt_secret", lambda value: f"encrypted:{value}")
     monkeypatch.setattr(runtime_secrets, "decrypt_secret", lambda value: value.removeprefix("encrypted:"))
     with Session(engine) as session:
-        status = runtime_secrets.save_claude_key(
-            session, "sk-ant-test-key-that-is-long-enough", "claude-sonnet-5", enabled=True,
+        status = runtime_secrets.save_user_claude_key(
+            session, "user-1", "sk-ant-test-key-that-is-long-enough", "claude-sonnet-5", enabled=True,
         )
-        row = session.get(RuntimeSecret, runtime_secrets.CLAUDE_SECRET_NAME)
+        row = session.get(UserClaudeSetting, "user-1")
         assert row is not None
         assert row.model == "claude-sonnet-5"
         assert status["model"] == "claude-sonnet-5"
         assert "api_key" not in status
+        runtime_secrets.save_user_claude_key(
+            session, "user-2", "sk-ant-second-user-key-long-enough", "claude-opus-4", enabled=False,
+        )
+        assert session.get(UserClaudeSetting, "user-2").fingerprint != row.fingerprint
+        assert runtime_secrets.user_claude_configuration(session, "user-1")["api_key"] == "sk-ant-test-key-that-is-long-enough"
+        assert runtime_secrets.user_claude_configuration(session, "user-2")["api_key"] == "sk-ant-second-user-key-long-enough"
+
+
+def test_user_auth_resolves_identity_from_supabase(monkeypatch):
+    monkeypatch.setattr(user_auth, "settings", SimpleNamespace(
+        supabase_url="https://project.supabase.co", supabase_publishable_key="publishable-key",
+    ))
+
+    def fake_get(url, headers, timeout):
+        assert url == "https://project.supabase.co/auth/v1/user"
+        assert headers["Authorization"] == "Bearer access-token"
+        assert headers["apikey"] == "publishable-key"
+        assert timeout == 10.0
+        return httpx.Response(200, json={"id": "user-1", "email": "one@example.com"})
+
+    monkeypatch.setattr(user_auth.httpx, "get", fake_get)
+    assert user_auth.require_user("Bearer access-token").id == "user-1"
+    with pytest.raises(HTTPException) as exc_info:
+        user_auth.require_user(None)
+    assert exc_info.value.status_code == 401
+
+
+def test_personal_claude_analysis_never_mutates_shared_prediction(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        away = Team(league="KBO", code="AW", name="Away")
+        home = Team(league="KBO", code="HM", name="Home")
+        session.add_all([away, home]); session.flush()
+        game = Game(external_id="PRIVATE-1", league="KBO", game_date=date(2026, 8, 23),
+                    away_team_id=away.id, home_team_id=home.id, status="SCHEDULED",
+                    source="test", source_url="test", collected_at=datetime.now())
+        model = ModelVersion(name="SHARED", algorithm="baseline", feature_schema={}, checksum="shared")
+        session.add_all([game, model]); session.flush()
+        prediction = Prediction(
+            game_id=game.id, model_version_id=model.id, input_hash="shared-input", home_win_probability=.6,
+            away_win_probability=.4, home_expected_runs=5.2, away_expected_runs=4.1, confidence=80,
+            payload={"features": {"ops_diff": .05}, "league_average_runs": 4.8}, created_at=datetime.now(),
+        )
+        session.add(prediction); session.commit()
+
+        monkeypatch.setattr(personal_claude, "user_claude_configuration", lambda _session, user_id: {
+            "configured": True, "enabled": True, "source": "user", "fingerprint": user_id,
+            "updated_at": None, "model": "claude-test", "api_key": f"key-{user_id}", "error": None,
+        })
+        monkeypatch.setattr(personal_claude, "claude_prediction_advice", lambda _key, _context, _config: ({
+            "home_win_probability": .68, "home_expected_runs": 5.8, "away_expected_runs": 3.8,
+            "confidence": 80, "reasons": ["개인 분석"], "caution": "표본 주의",
+        }, {"model": "claude-test", "status": "applied", "usage": {"input_tokens": 10, "output_tokens": 5}}))
+
+        result = personal_claude.analyze_game_for_user(session, "user-1", "PRIVATE-1")
+        assert result["personalized"]["home_win_probability"] > prediction.home_win_probability
+        assert result["reasons"] == ["개인 분석"]
+        assert len(session.query(Prediction).all()) == 1
+        assert prediction.home_win_probability == .6
 
 
 def test_claude_advisor_uses_ui_runtime_key_without_exposing_it(monkeypatch):
@@ -298,12 +390,12 @@ def test_claude_advisor_uses_ui_runtime_key_without_exposing_it(monkeypatch):
     monkeypatch.setattr(claude_advisor, "_request_advice", fake_request)
     claude_advisor.clear_claude_cache()
     advice, metadata = claude_advisor.claude_prediction_advice("ui-key-test", {}, {
-        "configured": True, "enabled": True, "source": "admin_ui", "fingerprint": "abcdef123456",
+        "configured": True, "enabled": True, "source": "user", "fingerprint": "abcdef123456",
         "updated_at": None, "model": "claude-sonnet-5", "api_key": "sk-ant-runtime-secret", "error": None,
     })
     assert advice is not None
     assert observed == {"api_key": "sk-ant-runtime-secret", "model": "claude-sonnet-5"}
-    assert metadata["key_source"] == "admin_ui"
+    assert metadata["key_source"] == "user"
     assert "api_key" not in metadata
 
 

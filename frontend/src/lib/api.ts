@@ -1,4 +1,4 @@
-import type { Backtest, ClaudeKeyStatus, ClaudeModel, Game, GameDate, OperationsStatus } from '../types'
+import type { Backtest, ClaudeKeyStatus, ClaudeModel, Game, GameDate, OperationsStatus, PersonalClaudeAnalysis } from '../types'
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
@@ -62,29 +62,29 @@ export async function fetchBacktest(league = 'ALL'): Promise<Backtest> {
   return response.json() as Promise<Backtest>
 }
 
-async function adminRequest(path: string, adminToken: string, init?: RequestInit) {
+async function userRequest(path: string, accessToken: string, init?: RequestInit, timeoutMs = 25_000) {
   const response = await request(path, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
-      'X-Admin-Token': adminToken,
+      Authorization: `Bearer ${accessToken}`,
       ...init?.headers,
     },
-  }, 25_000)
+  }, timeoutMs)
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as { detail?: string }
-    throw new Error(payload.detail ?? `API ${response.status}: 관리자 요청에 실패했습니다.`)
+    throw new Error(payload.detail ?? `API ${response.status}: 사용자 요청에 실패했습니다.`)
   }
   return response
 }
 
-export async function fetchClaudeKeyStatus(adminToken: string): Promise<ClaudeKeyStatus> {
-  const response = await adminRequest('/api/v1/admin/claude-key', adminToken)
+export async function fetchClaudeKeyStatus(accessToken: string): Promise<ClaudeKeyStatus> {
+  const response = await userRequest('/api/v1/me/claude-key', accessToken)
   return response.json() as Promise<ClaudeKeyStatus>
 }
 
-export async function fetchClaudeModels(adminToken: string, apiKey?: string): Promise<ClaudeModel[]> {
-  const response = await adminRequest('/api/v1/admin/claude-key/models', adminToken, {
+export async function fetchClaudeModels(accessToken: string, apiKey?: string): Promise<ClaudeModel[]> {
+  const response = await userRequest('/api/v1/me/claude-key/models', accessToken, {
     method: 'POST', body: JSON.stringify({ api_key: apiKey || null }),
   })
   const payload = await response.json() as { models: ClaudeModel[] }
@@ -92,20 +92,27 @@ export async function fetchClaudeModels(adminToken: string, apiKey?: string): Pr
 }
 
 export async function registerClaudeKey(
-  adminToken: string,
+  accessToken: string,
   apiKey: string | null,
   model: string,
   enabled: boolean,
 ): Promise<ClaudeKeyStatus> {
-  const response = await adminRequest('/api/v1/admin/claude-key', adminToken, {
+  const response = await userRequest('/api/v1/me/claude-key', accessToken, {
     method: 'POST', body: JSON.stringify({ api_key: apiKey || null, model, enabled }),
   })
   return response.json() as Promise<ClaudeKeyStatus>
 }
 
-export async function removeClaudeKey(adminToken: string): Promise<ClaudeKeyStatus> {
-  const response = await adminRequest('/api/v1/admin/claude-key/remove', adminToken, { method: 'POST' })
+export async function removeClaudeKey(accessToken: string): Promise<ClaudeKeyStatus> {
+  const response = await userRequest('/api/v1/me/claude-key/remove', accessToken, { method: 'POST' })
   return response.json() as Promise<ClaudeKeyStatus>
+}
+
+export async function fetchPersonalClaudeAnalysis(externalId: string, accessToken: string): Promise<PersonalClaudeAnalysis> {
+  const response = await userRequest(
+    `/api/v1/games/${encodeURIComponent(externalId)}/claude-analysis`, accessToken, { method: 'POST' }, 35_000,
+  )
+  return response.json() as Promise<PersonalClaudeAnalysis>
 }
 
 export function kstToday(): string {

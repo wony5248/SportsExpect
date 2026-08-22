@@ -13,9 +13,11 @@ from backend.app.models.entities import (
     RuntimeSecret,
     Team,
     TeamStat,
+    UserClaudeSetting,
 )
 
 __all__ = [
     "CrawlLog", "Game", "GameResult", "LineupEntry", "MarketConsensus", "MarketSnapshot", "ModelVersion", "PitcherStat",
     "Prediction", "PredictionHistory", "PredictionSnapshot", "RuntimeSecret", "Team", "TeamStat",
+    "UserClaudeSetting",
 ]

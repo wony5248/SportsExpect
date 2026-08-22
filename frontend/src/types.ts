@@ -204,7 +204,7 @@ export type OperationsStatus = {
 export type ClaudeKeyStatus = {
   configured: boolean
   enabled: boolean
-  source: 'admin_ui' | 'environment' | 'none'
+  source: 'user' | 'none'
   fingerprint: string | null
   updated_at: string | null
   model: string
@@ -216,6 +216,32 @@ export type ClaudeKeyStatus = {
 export type ClaudeModel = {
   id: string
   display_name: string
+}
+
+export type PersonalClaudeAnalysis = {
+  game_id: string
+  created_from_prediction_at: string
+  model: string
+  cached: boolean
+  blend_weight: number
+  baseline: {
+    home_win_probability: number
+    away_win_probability: number
+    home_expected_runs: number
+    away_expected_runs: number
+  }
+  personalized: {
+    home_win_probability: number
+    away_win_probability: number
+    home_expected_runs: number
+    away_expected_runs: number
+    expected_total: number
+    confidence: number
+  }
+  reasons: string[]
+  caution: string
+  usage?: { input_tokens: number; output_tokens: number }
+  disclaimer: string
 }
 
 export type Backtest = {

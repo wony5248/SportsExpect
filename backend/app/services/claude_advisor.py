@@ -8,7 +8,6 @@ from typing import Any
 import httpx
 
 from backend.app.config import settings
-from backend.app.services.runtime_secrets import claude_configuration
 
 
 _OUTPUT_SCHEMA = {
@@ -46,15 +45,15 @@ def clear_claude_cache() -> None:
 
 
 def claude_prediction_advice(cache_key: str, context: dict[str, Any],
-                             configuration: dict[str, Any] | None = None) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+                             configuration: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Return optional structured Claude advice and non-sensitive execution metadata."""
-    runtime = configuration or claude_configuration()
+    runtime = configuration
     api_key = runtime.get("api_key")
     enabled = bool(runtime.get("enabled") and api_key)
     metadata: dict[str, Any] = {
         "enabled": enabled,
         "used": False,
-        "model": settings.claude_model if enabled else None,
+        "model": str(runtime.get("model") or settings.claude_model) if enabled else None,
         "key_source": runtime.get("source"),
         "key_fingerprint": runtime.get("fingerprint"),
     }

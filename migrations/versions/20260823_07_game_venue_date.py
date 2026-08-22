@@ -16,8 +16,13 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("games", sa.Column("venue_date", sa.Date(), nullable=True))
-    op.create_index("ix_games_venue_date", "games", ["venue_date"], unique=False)
+    inspector = sa.inspect(op.get_bind())
+    columns = {column["name"] for column in inspector.get_columns("games")}
+    if "venue_date" not in columns:
+        op.add_column("games", sa.Column("venue_date", sa.Date(), nullable=True))
+    indexes = {index["name"] for index in sa.inspect(op.get_bind()).get_indexes("games")}
+    if "ix_games_venue_date" not in indexes:
+        op.create_index("ix_games_venue_date", "games", ["venue_date"], unique=False)
     if op.get_bind().dialect.name == "sqlite":
         op.execute("""
             update games

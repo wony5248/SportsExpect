@@ -16,20 +16,26 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.alter_column(
-        "model_versions",
-        "algorithm",
-        existing_type=sa.String(length=120),
-        type_=sa.Text(),
-        existing_nullable=False,
+    algorithm = next(
+        column for column in sa.inspect(op.get_bind()).get_columns("model_versions")
+        if column["name"] == "algorithm"
     )
+    if isinstance(algorithm["type"], sa.Text) and getattr(algorithm["type"], "length", None) is None:
+        return
+    with op.batch_alter_table("model_versions") as batch_op:
+        batch_op.alter_column(
+            "algorithm",
+            existing_type=sa.String(length=120),
+            type_=sa.Text(),
+            existing_nullable=False,
+        )
 
 
 def downgrade() -> None:
-    op.alter_column(
-        "model_versions",
-        "algorithm",
-        existing_type=sa.Text(),
-        type_=sa.String(length=120),
-        existing_nullable=False,
-    )
+    with op.batch_alter_table("model_versions") as batch_op:
+        batch_op.alter_column(
+            "algorithm",
+            existing_type=sa.Text(),
+            type_=sa.String(length=120),
+            existing_nullable=False,
+        )

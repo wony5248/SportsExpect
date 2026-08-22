@@ -35,6 +35,10 @@ def database_url_from_environment() -> str:
 class Settings:
     database_url: str = database_url_from_environment()
     admin_token: str | None = os.getenv("ADMIN_TOKEN")
+    supabase_url: str | None = os.getenv("SUPABASE_URL")
+    supabase_publishable_key: str | None = (
+        os.getenv("SUPABASE_PUBLISHABLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
+    )
     auto_create_schema: bool = os.getenv("AUTO_CREATE_SCHEMA", "false").lower() in {"1", "true", "yes", "on"}
     kbo_base_url: str = "https://www.koreabaseball.com"
     cache_ttl_minutes: int = int(os.getenv("CACHE_TTL_MINUTES", "120"))
@@ -47,12 +51,9 @@ class Settings:
     stale_after_minutes: int = int(os.getenv("STALE_AFTER_MINUTES", "360"))
     odds_api_key: str | None = os.getenv("ODDS_API_KEY")
     odds_api_regions: str = os.getenv("ODDS_API_REGIONS", "us")
-    claude_api_key: str | None = os.getenv("ANTHROPIC_API_KEY")
-    # Used to encrypt UI-registered provider keys. ADMIN_TOKEN is the fallback for small installs.
+    # Used exclusively to encrypt user-owned provider keys at rest.
     secret_encryption_key: str | None = os.getenv("SECRET_ENCRYPTION_KEY")
-    # Claude runtime safety limits are application policy, not deployment knobs. The administrator
-    # UI controls enablement and model selection after authenticating the provider key.
-    claude_prediction_enabled: bool = False
+    # Claude runtime safety limits are application policy, not deployment knobs.
     claude_model: str = "claude-sonnet-5"
     claude_blend_weight: float = 0.15
     claude_timeout_seconds: float = 20.0

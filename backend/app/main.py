@@ -19,8 +19,11 @@ from backend.app.services.operations import LockUnavailable, backup_database, op
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services.jobs import run_cron_refresh, run_full_refresh
 from backend.app.services.claude_advisor import clear_claude_cache
-from backend.app.services.runtime_secrets import (claude_configuration, public_claude_status,
-                                                  remove_claude_key, save_claude_key, verify_claude_key)
+from backend.app.services.personal_claude import analyze_game_for_user
+from backend.app.services.runtime_secrets import (public_user_claude_status, remove_user_claude_key,
+                                                  save_user_claude_key, user_claude_configuration,
+                                                  verify_claude_key)
+from backend.app.services.user_auth import CurrentUser, require_user
 
 
 class ClaudeKeyAccess(BaseModel):
@@ -41,7 +44,7 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="Dugout Lab API",
     version="0.1.0",
-    description="KBO/MLB official data + statistical prediction API with an optional bounded Claude ensemble advisor.",
+    description="KBO/MLB official data + shared statistical forecasts + private per-user Claude analysis.",
     lifespan=lifespan,
 )
 app.add_middleware(
@@ -164,15 +167,16 @@ def backup():
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@app.get("/api/v1/admin/claude-key", dependencies=[Depends(require_admin)])
-def claude_key_status(session: Session = Depends(get_session)):
-    return public_claude_status(session)
+@app.get("/api/v1/me/claude-key")
+def claude_key_status(user: CurrentUser = Depends(require_user), session: Session = Depends(get_session)):
+    return public_user_claude_status(session, user.id)
 
 
-@app.post("/api/v1/admin/claude-key/models", dependencies=[Depends(require_admin)])
-def claude_models(access: ClaudeKeyAccess, session: Session = Depends(get_session)):
+@app.post("/api/v1/me/claude-key/models")
+def claude_models(access: ClaudeKeyAccess, user: CurrentUser = Depends(require_user),
+                  session: Session = Depends(get_session)):
     try:
-        api_key = access.api_key.get_secret_value() if access.api_key else claude_configuration(session).get("api_key")
+        api_key = access.api_key.get_secret_value() if access.api_key else user_claude_configuration(session, user.id).get("api_key")
         if not api_key:
             raise ValueError("Register or enter a Claude API key first")
         return {"models": verify_claude_key(str(api_key))}
@@ -182,16 +186,17 @@ def claude_models(access: ClaudeKeyAccess, session: Session = Depends(get_sessio
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/api/v1/admin/claude-key", dependencies=[Depends(require_admin)])
-def register_claude_key(registration: ClaudeKeyRegistration, session: Session = Depends(get_session)):
+@app.post("/api/v1/me/claude-key")
+def register_claude_key(registration: ClaudeKeyRegistration, user: CurrentUser = Depends(require_user),
+                        session: Session = Depends(get_session)):
     try:
-        api_key = registration.api_key.get_secret_value() if registration.api_key else claude_configuration(session).get("api_key")
+        api_key = registration.api_key.get_secret_value() if registration.api_key else user_claude_configuration(session, user.id).get("api_key")
         if not api_key:
             raise ValueError("Register or enter a Claude API key first")
         available_models = verify_claude_key(api_key)
         if registration.model not in {item["id"] for item in available_models}:
             raise ValueError("The selected Claude model is not available for this API key")
-        status = save_claude_key(session, api_key, registration.model, registration.enabled)
+        status = save_user_claude_key(session, user.id, api_key, registration.model, registration.enabled)
         session.commit()
         clear_claude_cache()
         return {
@@ -207,15 +212,28 @@ def register_claude_key(registration: ClaudeKeyRegistration, session: Session = 
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/api/v1/admin/claude-key/remove", dependencies=[Depends(require_admin)])
-def delete_claude_key(session: Session = Depends(get_session)):
+@app.post("/api/v1/me/claude-key/remove")
+def delete_claude_key(user: CurrentUser = Depends(require_user), session: Session = Depends(get_session)):
     try:
-        status = remove_claude_key(session)
+        status = remove_user_claude_key(session, user.id)
         session.commit()
         clear_claude_cache()
         return status
     except RuntimeError as exc:
         session.rollback()
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/games/{external_id}/claude-analysis")
+def personal_claude_analysis(external_id: str, user: CurrentUser = Depends(require_user),
+                             session: Session = Depends(get_session)):
+    try:
+        return analyze_game_for_user(session, user.id, external_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 

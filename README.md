@@ -104,7 +104,8 @@ cd frontend && npm run build
 - `/ready`: 최근 수집 성공까지 포함한 준비 상태
 - `/api/v1/operations/status`: 오류율, 최근 성공, 변경 알림, 예측 수
 - `/api/v1/model/backtest`: 누수 방지 walk-forward 평가
-- 화면의 `Claude 설정`: 관리자 토큰으로 Claude API 키 연결 확인·암호화 저장·교체
+- 화면의 `내 Claude 설정`: 로그인 사용자별 Claude API 키 확인·암호화 저장·교체
+- `/api/v1/games/{id}/claude-analysis`: 로그인 사용자 키로만 계산하는 비공개 Claude 보조 분석
 - `/api/v1/games`: KBO/MLB 카드·신선도·변화 타임라인
 - `/api/v1/game-dates`: 한국 날짜 기준 연도별 저장 경기일과 리그별 경기 수
 - `/api/v1/admin/refresh`, `/api/v1/admin/backup`: `ADMIN_TOKEN` 설정 시 `X-Admin-Token` 필요
@@ -132,6 +133,8 @@ cd frontend && npm run build
 
 ```text
 ADMIN_TOKEN=network-use-secret
+SUPABASE_URL=https://PROJECT_REF.supabase.co
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_REPLACE_ME
 CACHE_TTL_MINUTES=120
 MLB_STATS_TTL_MINUTES=720
 LIVE_UPDATE_WINDOW_MINUTES=180

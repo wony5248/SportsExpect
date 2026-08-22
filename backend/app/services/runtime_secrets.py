@@ -7,15 +7,10 @@ from typing import Any
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from backend.app.config import settings
-from backend.app.database import SessionLocal
-from backend.app.models import RuntimeSecret
-
-
-CLAUDE_SECRET_NAME = "anthropic_api_key"
+from backend.app.models import UserClaudeSetting
 
 
 def _fingerprint(value: str) -> str:
@@ -23,9 +18,9 @@ def _fingerprint(value: str) -> str:
 
 
 def _fernet(master_secret: str | None = None) -> Fernet:
-    secret = master_secret or settings.secret_encryption_key or settings.admin_token
+    secret = master_secret or settings.secret_encryption_key
     if not secret or len(secret) < 16:
-        raise RuntimeError("SECRET_ENCRYPTION_KEY or a sufficiently long ADMIN_TOKEN is required")
+        raise RuntimeError("SECRET_ENCRYPTION_KEY must be configured with at least 16 characters")
     key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
     return Fernet(key)
 
@@ -41,11 +36,12 @@ def decrypt_secret(value: str, master_secret: str | None = None) -> str:
         raise RuntimeError("Stored API key cannot be decrypted; register it again") from exc
 
 
-def save_claude_key(session: Session, api_key: str, model: str, enabled: bool = True) -> dict[str, Any]:
+def save_user_claude_key(session: Session, user_id: str, api_key: str, model: str,
+                         enabled: bool = True) -> dict[str, Any]:
     normalized = api_key.strip()
     if len(normalized) < 20:
         raise ValueError("Claude API key is too short")
-    row = session.get(RuntimeSecret, CLAUDE_SECRET_NAME)
+    row = session.get(UserClaudeSetting, user_id)
     values = {
         "ciphertext": encrypt_secret(normalized),
         "fingerprint": _fingerprint(normalized),
@@ -54,72 +50,59 @@ def save_claude_key(session: Session, api_key: str, model: str, enabled: bool = 
         "updated_at": datetime.now(UTC),
     }
     if row is None:
-        row = RuntimeSecret(name=CLAUDE_SECRET_NAME, **values)
+        row = UserClaudeSetting(user_id=user_id, **values)
         session.add(row)
     else:
         for key, value in values.items():
             setattr(row, key, value)
     session.flush()
-    return public_claude_status(session)
+    return public_user_claude_status(session, user_id)
 
 
-def remove_claude_key(session: Session) -> dict[str, Any]:
-    row = session.get(RuntimeSecret, CLAUDE_SECRET_NAME)
+def remove_user_claude_key(session: Session, user_id: str) -> dict[str, Any]:
+    row = session.get(UserClaudeSetting, user_id)
     if row is not None:
         session.delete(row)
         session.flush()
-    return public_claude_status(session)
+    return public_user_claude_status(session, user_id)
 
 
-def claude_configuration(session: Session | None = None) -> dict[str, Any]:
-    owns_session = session is None
-    active_session = session or SessionLocal()
+def user_claude_configuration(session: Session, user_id: str) -> dict[str, Any]:
+    row = session.get(UserClaudeSetting, user_id)
+    if row is None:
+        return _empty_configuration()
     try:
-        try:
-            row = active_session.get(RuntimeSecret, CLAUDE_SECRET_NAME)
-        except SQLAlchemyError:
-            # Forecasting remains available while a hosted database is waiting for its migration.
-            configuration = _environment_configuration()
-            configuration["error"] = "runtime_secret_store_unavailable"
-            return configuration
-        if row is not None:
-            try:
-                api_key = decrypt_secret(row.ciphertext)
-                error = None
-            except RuntimeError:
-                api_key = None
-                error = "decrypt_error"
-            return {
-                "configured": bool(api_key),
-                "enabled": bool(row.enabled and api_key),
-                "source": "admin_ui",
-                "fingerprint": row.fingerprint,
-                "updated_at": row.updated_at,
-                "model": row.model or settings.claude_model,
-                "api_key": api_key,
-                "error": error,
-            }
-        return _environment_configuration()
-    finally:
-        if owns_session:
-            active_session.close()
+        api_key = decrypt_secret(row.ciphertext)
+        error = None
+    except RuntimeError:
+        api_key = None
+        error = "decrypt_error"
+    return {
+        "configured": bool(api_key),
+        "enabled": bool(row.enabled and api_key),
+        "source": "user",
+        "fingerprint": row.fingerprint,
+        "updated_at": row.updated_at,
+        "model": row.model or settings.claude_model,
+        "api_key": api_key,
+        "error": error,
+    }
 
 
-def public_claude_status(session: Session) -> dict[str, Any]:
-    configuration = claude_configuration(session)
+def public_user_claude_status(session: Session, user_id: str) -> dict[str, Any]:
+    configuration = user_claude_configuration(session, user_id)
     return {key: value for key, value in configuration.items() if key != "api_key"}
 
 
-def _environment_configuration() -> dict[str, Any]:
-    env_key = (settings.claude_api_key or "").strip() or None
+def _empty_configuration() -> dict[str, Any]:
     return {
-        "configured": bool(env_key),
-        "enabled": bool(settings.claude_prediction_enabled and env_key),
-        "source": "environment" if env_key else "none",
-        "fingerprint": _fingerprint(env_key) if env_key else None,
+        "configured": False,
+        "enabled": False,
+        "source": "none",
+        "fingerprint": None,
         "updated_at": None,
         "model": settings.claude_model,
-        "api_key": env_key,
+        "api_key": None,
         "error": None,
     }
 

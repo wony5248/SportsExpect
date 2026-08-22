@@ -1,15 +1,25 @@
 import { useState } from 'react'
-import { Box, Button, Chip, Collapse, Divider, LinearProgress, Stack, Typography } from '@mui/material'
+import { Alert, Box, Button, Chip, CircularProgress, Collapse, Divider, LinearProgress, Stack, Typography } from '@mui/material'
 import ExpandMoreRounded from '@mui/icons-material/ExpandMoreRounded'
 import VerifiedRounded from '@mui/icons-material/VerifiedRounded'
-import type { Game, Team } from '../types'
+import AutoAwesomeRounded from '@mui/icons-material/AutoAwesomeRounded'
+import { fetchPersonalClaudeAnalysis } from '../lib/api'
+import { getAccessToken } from '../lib/auth'
+import type { Game, PersonalClaudeAnalysis, Team } from '../types'
 
 const pct = (value: number) => `${Math.round(value * 100)}%`
 const stat = (value: number | null | undefined, digits = 2) =>
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
 
-export default function GameCard({ game }: { game: Game }) {
+export default function GameCard({ game, signedIn, onRequireLogin }: {
+  game: Game
+  signedIn: boolean
+  onRequireLogin: () => void
+}) {
   const [open, setOpen] = useState(false)
+  const [personalAnalysis, setPersonalAnalysis] = useState<PersonalClaudeAnalysis | null>(null)
+  const [personalBusy, setPersonalBusy] = useState(false)
+  const [personalError, setPersonalError] = useState<string | null>(null)
   const p = game.prediction
   const coherent = p?.summary_schema_version === 2 && p.coherence_valid === true
   const predictedScore = p?.primary_score ?? p?.top_scores?.[0]
@@ -26,6 +36,18 @@ export default function GameCard({ game }: { game: Game }) {
   const favoriteHandicap = !p || !coherent ? undefined : p.home_win_probability >= p.away_win_probability
     ? { team: game.home.name, probability: p.handicap.home_minus_1_5 }
     : { team: game.away.name, probability: p.handicap.away_minus_1_5 }
+  const requestPersonalAnalysis = async () => {
+    if (!signedIn) { onRequireLogin(); return }
+    setPersonalBusy(true); setPersonalError(null)
+    try {
+      setPersonalAnalysis(await fetchPersonalClaudeAnalysis(game.id, await getAccessToken()))
+    } catch (error) {
+      setPersonalError(error instanceof Error ? error.message : 'Claude 개인 분석을 불러오지 못했습니다.')
+    } finally {
+      setPersonalBusy(false)
+    }
+  }
+  const resultComparison = completedGameComparison(game, expectedScore)
   return (
     <article className="game-card">
       <Stack direction="row" justifyContent="space-between" alignItems="center" className="card-meta">
@@ -39,7 +61,19 @@ export default function GameCard({ game }: { game: Game }) {
         <Box className="versus"><span>VS</span><small>{game.league}</small></Box>
         <TeamName team={game.home} side="HOME" />
       </Box>
-      {game.result && <Box className="final-score"><span>최종 스코어</span><strong>{game.result.away_score} <i>:</i> {game.result.home_score}</strong></Box>}
+      {game.result && <Box className="result-comparison">
+        <Stack direction="row" justifyContent="space-between" alignItems="baseline" className="result-comparison-heading">
+          <b>실제 결과와 경기 전 예측</b>
+          <span>{resultComparison ? `저장 예측 · ${new Date(resultComparison.createdAt).toLocaleString('ko-KR')}` : '경기 전 저장 예측 없음'}</span>
+        </Stack>
+        <Box className="result-comparison-grid">
+          <Box className="result-score actual"><span>실제 최종</span><strong>{game.result.away_score} <i>:</i> {game.result.home_score}</strong><small>{game.away.name} : {game.home.name}</small></Box>
+          {resultComparison ? <>
+            <Box className="result-score predicted"><span>시뮬레이션 평균</span><strong>{stat(resultComparison.awayExpected, 1)} <i>:</i> {stat(resultComparison.homeExpected, 1)}</strong><small>{game.away.name} : {game.home.name}</small></Box>
+            <Box className={`result-verdict ${resultComparison.verdictClass}`}><b>{resultComparison.verdict}</b><span>{resultComparison.favorite}</span><small>팀당 평균 점수 오차 {stat(resultComparison.runsMae, 1)}점</small></Box>
+          </> : <Box className="result-verdict unavailable"><b>비교할 예측 없음</b><span>경기 시작 전에 저장된 시뮬레이션 예측이 없습니다.</span></Box>}
+        </Box>
+      </Box>}
 
       {p && coherent ? <>
         <Box className="probability-block">
@@ -100,6 +134,24 @@ export default function GameCard({ game }: { game: Game }) {
             </>}
             <Typography variant="subtitle2">주요 근거</Typography>
             <ul>{p.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+            <Box className="personal-claude-panel">
+              <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
+                <Box><Typography variant="subtitle2">내 Claude 보조 분석</Typography><small>공용 예측은 바꾸지 않고 내 화면에만 표시됩니다.</small></Box>
+                <Button variant="outlined" size="small" startIcon={personalBusy ? <CircularProgress size={14} /> : <AutoAwesomeRounded />}
+                  onClick={() => void requestPersonalAnalysis()} disabled={personalBusy}>
+                  {signedIn ? personalAnalysis ? '다시 분석' : '개인 분석 실행' : '로그인 후 사용'}
+                </Button>
+              </Stack>
+              {personalError && <Alert severity="error" sx={{ mt: 1.5 }}>{personalError}</Alert>}
+              {personalAnalysis && <Box className="personal-claude-result">
+                <Box><span>{game.away.name}</span><strong>{pct(personalAnalysis.personalized.away_win_probability)}</strong><small>{stat(personalAnalysis.personalized.away_expected_runs, 1)}점</small></Box>
+                <Box><span>개인 보정 예상</span><strong>{stat(personalAnalysis.personalized.away_expected_runs, 1)} : {stat(personalAnalysis.personalized.home_expected_runs, 1)}</strong><small>가중치 {stat(personalAnalysis.blend_weight * 100, 1)}%</small></Box>
+                <Box><span>{game.home.name}</span><strong>{pct(personalAnalysis.personalized.home_win_probability)}</strong><small>{stat(personalAnalysis.personalized.home_expected_runs, 1)}점</small></Box>
+                <ul>{personalAnalysis.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
+                {personalAnalysis.caution && <p>{personalAnalysis.caution}</p>}
+                <small>{personalAnalysis.model} · {personalAnalysis.disclaimer}</small>
+              </Box>}
+            </Box>
             <Typography className="source-note">득점 분포 평균 {stat(statisticalExpectedTotal, 2)}점 · 승률·득점·구간·핸디캡·총점 확률은 같은 시뮬레이션 분포에서 계산됩니다. 9이닝 동점 표본은 승률 계산에서 제외합니다.</Typography>
             <Typography variant="subtitle2">최근 10경기</Typography>
             <Box className="comparison"><Compare team={game.away} /><Compare team={game.home} /></Box>
@@ -123,7 +175,6 @@ export default function GameCard({ game }: { game: Game }) {
             </Stack>
             <Divider sx={{ my: 2 }} />
             <Typography className="source-note">모델 {p.model.name} · {p.model.simulations.toLocaleString()}회 시뮬레이션 · {new Date(p.created_at).toLocaleString('ko-KR')}</Typography>
-            {p.ai_assist && <Typography className="source-note">Claude 보조 {p.ai_assist.used ? `${p.ai_assist.model ?? 'AI'} 적용 · ${p.ai_assist.blend_weight == null ? '가중치 정보 없음' : `가중치 ${stat(p.ai_assist.blend_weight * 100, 1)}%`}` : '미사용'} · 통계 모델 실패 시 자동 대체</Typography>}
             <Typography className="source-note">최근 데이터 갱신 {new Date(game.freshness.last_updated_at).toLocaleString('ko-KR')} · {p.disclaimer}</Typography>
           </Box>
         </Collapse>
@@ -156,7 +207,13 @@ function InningLine({ away, home, score }: {
 }
 
 function TeamName({ team, side }: { team: Team; side: string }) {
-  return <Box className="team"><small>{side}</small><Typography variant="h5">{team.name}</Typography><span>{team.stats ? `${team.stats.wins}승 ${team.stats.losses}패` : '기록 수집 전'}</span></Box>
+  const pitcher = team.starter
+  return <Box className="team">
+    <small>{side}</small>
+    <Typography variant="h5">{team.name}</Typography>
+    <span>{team.stats ? `${team.stats.wins}승 ${team.stats.losses}패` : '기록 수집 전'}</span>
+    <span className="team-starter"><b>선발 {pitcher?.name ?? '미정'}</b><i>{pitcher ? `${pitcher.confirmed ? '확정' : '예상'} · ERA ${stat(pitcher.era)}` : '정보 수집 전'}</i></span>
+  </Box>
 }
 
 function Starter({ team }: { team: Team }) {
@@ -193,6 +250,7 @@ function completenessLabel(label: NonNullable<Game['prediction']>['confidence_la
 
 function predictionUnavailableMessage(game: Game, hasPrediction: boolean) {
   if (game.status === 'CANCELLED') return '취소된 경기로 예측 지표를 표시하지 않습니다.'
+  if (hasPrediction && game.result) return '이전 형식의 저장 예측은 위 핵심 비교만 표시합니다. 상세 지표는 현재 예측 형식에서 제공합니다.'
   if (hasPrediction) return '이전 예측 형식은 정합성 검증 후 다시 표시됩니다. 다음 데이터 갱신을 기다려 주세요.'
   if (game.status === 'SCHEDULED') {
     return game.away.stats && game.home.stats
@@ -200,6 +258,29 @@ function predictionUnavailableMessage(game: Game, hasPrediction: boolean) {
       : '예측에 필요한 시즌 팀 기록이 아직 수집되지 않았습니다. 다음 자동 갱신 후 표시됩니다.'
   }
   return '경기 시작 전에 저장된 예측이 없습니다.'
+}
+
+function completedGameComparison(game: Game, expectedScore: { away: number; home: number } | undefined) {
+  const result = game.result
+  const prediction = game.prediction
+  if (!result || !prediction || !expectedScore) return null
+  const predictedHome = prediction.home_win_probability >= prediction.away_win_probability
+  const actualWinner = result.home_score === result.away_score
+    ? 'TIE'
+    : result.home_score > result.away_score ? 'HOME' : 'AWAY'
+  const predictedWinner = predictedHome ? 'HOME' : 'AWAY'
+  const favoriteTeam = predictedHome ? game.home.name : game.away.name
+  const favoriteProbability = predictedHome ? prediction.home_win_probability : prediction.away_win_probability
+  const winnerCorrect = actualWinner === 'TIE' ? null : actualWinner === predictedWinner
+  return {
+    awayExpected: expectedScore.away,
+    homeExpected: expectedScore.home,
+    createdAt: prediction.created_at,
+    favorite: `${favoriteTeam} 우세 ${pct(favoriteProbability)}`,
+    verdict: winnerCorrect == null ? '무승부 · 승패 비교 제외' : winnerCorrect ? '우세팀 적중' : '우세팀 미적중',
+    verdictClass: winnerCorrect == null ? 'neutral' : winnerCorrect ? 'correct' : 'incorrect',
+    runsMae: (Math.abs(expectedScore.away - result.away_score) + Math.abs(expectedScore.home - result.home_score)) / 2,
+  }
 }
 
 function shortDate(value: string) {

@@ -308,8 +308,6 @@ def _prediction_changes(previous: dict[str, Any] | None, current: dict[str, Any]
     changes: list[dict[str, Any]] = []
     if previous.get("pitchers") != current.get("pitchers"):
         changes.append({"type": "STARTER", "label": "선발투수 정보가 변경되었습니다."})
-    if previous.get("ai_result") != current.get("ai_result"):
-        changes.append({"type": "AI_ASSIST", "label": "Claude 보조 분석 결과 또는 사용 상태가 변경되었습니다."})
     old_lineups, new_lineups = previous.get("lineups", []), current.get("lineups", [])
     if old_lineups != new_lineups:
         old_confirmed = sum(bool(row[7] if len(row) > 7 else row[-1]) for row in old_lineups)
@@ -419,8 +417,16 @@ def _game_serialization_context(session: Session, games: list[Game]) -> dict[str
         if len(snapshots_by_game[row.game_id]) < 20:
             snapshots_by_game[row.game_id].append(row)
 
+    display_predictions = {
+        game.id: prediction
+        for game in games
+        if (prediction := _display_prediction(
+            game, predictions_by_game.get(game.id, []), results.get(game.id),
+        )) is not None
+    }
+
     return {
-        "predictions": {game_id: rows[0] for game_id, rows in predictions_by_game.items()},
+        "predictions": display_predictions,
         "prediction_history": {game_id: rows[:10] for game_id, rows in predictions_by_game.items()},
         "predictions_by_id": predictions_by_id,
         "pitchers": pitchers_by_game,
@@ -430,6 +436,16 @@ def _game_serialization_context(session: Session, games: list[Game]) -> dict[str
         "markets": markets,
         "snapshots": snapshots_by_game,
     }
+
+
+def _display_prediction(game: Game, predictions: list[Prediction], result: GameResult | None) -> Prediction | None:
+    """Use the last genuinely pre-game prediction when comparing a final result."""
+    if not predictions:
+        return None
+    if result is None:
+        return predictions[0]
+    cutoff = game.start_at or result.finalized_at
+    return next((row for row in predictions if _naive(row.created_at) <= _naive(cutoff)), None)
 
 
 def _serialize_game(game: Game, context: dict[str, Any]) -> dict[str, Any]:

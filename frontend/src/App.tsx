@@ -3,10 +3,15 @@ import { Alert, Box, Button, CircularProgress, Container, Stack, TextField, Togg
 import RefreshRounded from '@mui/icons-material/RefreshRounded'
 import SettingsRounded from '@mui/icons-material/SettingsRounded'
 import SportsBaseballRounded from '@mui/icons-material/SportsBaseballRounded'
+import LoginRounded from '@mui/icons-material/LoginRounded'
+import LogoutRounded from '@mui/icons-material/LogoutRounded'
 import { fetchBacktest, fetchGameDates, fetchGames, fetchOperations, kstToday } from './lib/api'
+import { loadAuthSession, signOut } from './lib/auth'
+import type { AuthSession } from './lib/auth'
 import type { Backtest, Game, GameDate, OperationsStatus } from './types'
 import GameCard from './components/GameCard'
 import ClaudeSettingsDialog from './components/ClaudeSettingsDialog'
+import LoginDialog from './components/LoginDialog'
 
 export default function App() {
   const initialQuery = new URLSearchParams(window.location.search)
@@ -19,6 +24,8 @@ export default function App() {
   const [operations, setOperations] = useState<OperationsStatus | null>(null)
   const [backtest, setBacktest] = useState<Backtest | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [loginOpen, setLoginOpen] = useState(false)
+  const [session, setSession] = useState<AuthSession | null>(() => loadAuthSession())
   const [seasonDates, setSeasonDates] = useState<GameDate[]>([])
   const requestId = useRef(0)
   const seasonYear = Number(date.slice(0, 4))
@@ -56,6 +63,17 @@ export default function App() {
     window.history.replaceState(null, '', `${window.location.pathname}?${query}`)
   }, [date, league])
 
+  const openClaudeSettings = () => {
+    if (!session) { setLoginOpen(true); return }
+    setSettingsOpen(true)
+  }
+
+  const logout = async () => {
+    await signOut()
+    setSession(null)
+    setSettingsOpen(false)
+  }
+
   return (
     <Box className="app-shell">
       <Container maxWidth="lg" className="page">
@@ -75,7 +93,10 @@ export default function App() {
             </ToggleButtonGroup>
             <TextField type="date" value={date} onChange={(event) => setDate(event.target.value)} size="small" inputProps={{ 'aria-label': '경기 날짜' }} />
             <Button variant="outlined" startIcon={<RefreshRounded />} onClick={() => void load()} disabled={loading}>다시 불러오기</Button>
-            <Button variant="outlined" startIcon={<SettingsRounded />} onClick={() => setSettingsOpen(true)}>Claude 설정</Button>
+            {session ? <>
+              <Button variant="outlined" startIcon={<SettingsRounded />} onClick={openClaudeSettings}>내 Claude 설정</Button>
+              <Button variant="text" startIcon={<LogoutRounded />} onClick={() => void logout()}>{session.user.email ?? '로그아웃'}</Button>
+            </> : <Button variant="outlined" startIcon={<LoginRounded />} onClick={() => setLoginOpen(true)}>로그인</Button>}
           </Stack>
         </header>
 
@@ -108,7 +129,7 @@ export default function App() {
           {error && <Alert severity="error" sx={{ mb: 3 }} action={<Button color="inherit" size="small" onClick={() => void load()}>재시도</Button>}>{error}</Alert>}
           {loading && games.length === 0 ? <Box className="loading"><CircularProgress size={28} /><Box><b>예측 보드를 불러오는 중</b><span>최대 20초 안에 결과 또는 오류를 표시합니다.</span></Box></Box> : (
             <Box className="game-grid">
-              {games.map((game) => <GameCard key={game.id} game={game} />)}
+              {games.map((game) => <GameCard key={game.id} game={game} signedIn={Boolean(session)} onRequireLogin={() => setLoginOpen(true)} />)}
             </Box>
           )}
           {loading && games.length > 0 && <Box className="refreshing"><CircularProgress size={16} /><span>최신 데이터 확인 중</span></Box>}
@@ -141,7 +162,8 @@ export default function App() {
           <p>모든 확률은 통계적 추정치이며 경기 결과 또는 수익을 보장하지 않습니다.</p>
         </footer>
       </Container>
-      <ClaudeSettingsDialog open={settingsOpen} onClose={() => setSettingsOpen(false)} />
+      {session && <ClaudeSettingsDialog open={settingsOpen} email={session.user.email} onClose={() => setSettingsOpen(false)} />}
+      <LoginDialog open={loginOpen} onClose={() => setLoginOpen(false)} onSignedIn={setSession} />
     </Box>
   )
 }

@@ -7,7 +7,7 @@
 - Supabase 프로젝트 1개
 - Vercel 프로젝트 2개: `dugout-api`, `dugout-web`
 - 32바이트 이상의 임의 `ADMIN_TOKEN`
-- 선택 사항: `ODDS_API_KEY` (Claude 키는 배포 후 관리자 UI에서 등록)
+- 선택 사항: `ODDS_API_KEY` (Claude 키는 각 사용자가 로그인 후 자기 화면에서 등록)
 
 토큰은 아래처럼 생성할 수 있습니다.
 
@@ -61,11 +61,13 @@ Git 저장소를 Vercel에서 가져오고 첫 번째 프로젝트를 다음처�
 | `ADMIN_TOKEN` | 위에서 생성한 토큰 |
 | `AUTO_CREATE_SCHEMA` | `false` |
 | `CORS_ORIGINS` | 프런트 URL 확정 전에는 로컬 URL, 확정 후 Vercel 프런트 URL |
-| `SECRET_ENCRYPTION_KEY` | UI에서 등록한 Claude 키를 암호화할 별도 장기 비밀값 |
+| `SECRET_ENCRYPTION_KEY` | 사용자별 Claude 키를 암호화할 별도 장기 비밀값(필수) |
+| `SUPABASE_URL` | Supabase Project URL |
+| `SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key (`sb_publishable_...`) |
 | `ODDS_API_KEY` | 보유한 경우만 등록 |
 | `ODDS_API_REGIONS` | `us` (한 지역만 조회해 크레딧 제한) |
 
-Claude API 키·모델·활성 여부는 배포 후 웹의 `Claude 설정`에서 관리합니다. 혼합 비율, 타임아웃, 최대 출력 토큰은 코드 정책이므로 Vercel 환경변수로 등록하지 않습니다.
+`ADMIN_TOKEN`은 Cron 전용 서버 비밀값이며 프런트에 등록하지 않습니다. Claude API 키·모델·활성 여부는 각 사용자가 로그인 후 `내 Claude 설정`에서 관리합니다.
 
 배포 후 API 주소를 기록하고 확인합니다.
 
@@ -86,10 +88,28 @@ curl -X POST \
 - Root Directory: `frontend`
 - Framework Preset: Vite
 - 환경변수 `VITE_API_BASE_URL`: `https://YOUR-API.vercel.app`
+- 환경변수 `VITE_SUPABASE_URL`: Supabase Project URL
+- 환경변수 `VITE_SUPABASE_PUBLISHABLE_KEY`: Supabase publishable key
 
 배포 후 프런트 주소가 `https://YOUR-WEB.vercel.app`이라면 API 프로젝트의 `CORS_ORIGINS`를 이 주소로 바꾸고 API를 재배포합니다. 여러 고정 주소가 필요하면 쉼표로 구분합니다. 와일드카드 대신 실제 주소만 등록하는 편이 안전합니다.
 
-## 5. Supabase Vault와 Cron 설정
+## 5. 사용자 로그인 준비
+
+Supabase Dashboard에서 다음을 설정합니다.
+
+1. **Authentication → URL Configuration**의 Site URL을 프런트 운영 주소로 설정합니다.
+2. **Authentication → Users → Add user**에서 이용할 4명의 이메일 계정을 만들고 이메일을 확인 처리합니다.
+3. **Project Settings → API Keys**에서 Project URL과 publishable key를 복사해 위의 API·프런트 환경변수에 넣습니다. `service_role` 키는 사용하지 않습니다.
+4. 아래 마이그레이션을 최신까지 실행해 사용자별 암호화 키 테이블을 만듭니다.
+
+```bash
+export BASEBALL_DATABASE_URL='SESSION_POOLER_OR_DIRECT_URI'
+alembic upgrade head
+```
+
+API와 프런트를 모두 재배포한 뒤 각 계정으로 로그인해 자기 Claude 키를 등록합니다.
+
+## 6. Supabase Vault와 Cron 설정
 
 Supabase SQL Editor에서 먼저 두 비밀값을 저장합니다.
 
@@ -117,14 +137,14 @@ select id, status_code, error_msg, created from net._http_response order by crea
 
 정상 응답은 `200`, 이미 같은 수집이 실행 중이면 `409`입니다. `401`은 Vault 토큰과 Vercel `ADMIN_TOKEN`이 다른 경우이고, `503`은 Vercel에 `ADMIN_TOKEN`이 빠진 경우입니다.
 
-## 6. 최종 확인
+## 7. 최종 확인
 
 1. API `/health`가 `database: connected`를 반환합니다.
 2. 수동 KBO 및 MLB 갱신이 각각 `200`을 반환합니다.
 3. 프런트에서 오늘 날짜의 경기 카드가 나타납니다.
 4. `cron.job`에 8개 `dugout-*` 작업이 활성화되어 있습니다.
 5. 다음 정각 이후 `net._http_response`에서 응답 코드가 확인됩니다.
-6. Claude를 켰다면 Vercel 로그에서 모델 ID 오류나 시간 초과가 없는지 확인합니다.
+6. 서로 다른 두 사용자로 로그인했을 때 Claude 키 상태와 개인 분석이 분리되는지 확인합니다.
 
 ## 운영상 제한
 
