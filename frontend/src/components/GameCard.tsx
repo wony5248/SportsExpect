@@ -11,6 +11,7 @@ const stat = (value: number | null | undefined, digits = 2) =>
 export default function GameCard({ game }: { game: Game }) {
   const [open, setOpen] = useState(false)
   const p = game.prediction
+  const coherent = p?.summary_schema_version === 2 && p.coherence_valid === true
   const predictedScore = p?.primary_score ?? p?.top_scores?.[0]
   const expectedScore = p?.display_expected_score ?? (p ? {
     away: Number(p.away_expected_runs.toFixed(1)), home: Number(p.home_expected_runs.toFixed(1)),
@@ -22,6 +23,9 @@ export default function GameCard({ game }: { game: Game }) {
       ? p.home_expected_runs + p.away_expected_runs
       : undefined
   )
+  const favoriteHandicap = !p || !coherent ? undefined : p.home_win_probability >= p.away_win_probability
+    ? { team: game.home.name, probability: p.handicap.home_minus_1_5 }
+    : { team: game.away.name, probability: p.handicap.away_minus_1_5 }
   return (
     <article className="game-card">
       <Stack direction="row" justifyContent="space-between" alignItems="center" className="card-meta">
@@ -35,11 +39,11 @@ export default function GameCard({ game }: { game: Game }) {
       </Box>
       {game.result && <Box className="final-score"><span>최종 스코어</span><strong>{game.result.away_score} <i>:</i> {game.result.home_score}</strong></Box>}
 
-      {p ? <>
+      {p && coherent ? <>
         <Box className="probability-block">
           <Stack direction="row" justifyContent="space-between" alignItems="baseline">
             <Box><span className="probability">{pct(p.away_win_probability)}</span><small>{game.away.name}</small></Box>
-            <Typography className="metric-label">승리 확률</Typography>
+            <Typography className="metric-label">9이닝 동점 제외 승률</Typography>
             <Box textAlign="right"><span className="probability accent">{pct(p.home_win_probability)}</span><small>{game.home.name}</small></Box>
           </Stack>
           <Box className="probability-track"><i style={{ width: pct(p.away_win_probability) }} /><b style={{ width: pct(p.home_win_probability) }} /></Box>
@@ -50,14 +54,14 @@ export default function GameCard({ game }: { game: Game }) {
           <Divider orientation="vertical" flexItem />
           <Box><span>예상 총점</span><strong>{stat(p.expected_total, 1)}</strong></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>신뢰도</span><strong>{p.confidence}<small>/100</small></strong></Box>
+          <Box><span>입력 데이터 완성도</span><strong>{p.confidence}<small>/100</small></strong></Box>
         </Box>
 
-        <Box className="forecast-range">
-          <span>80% 예상 범위</span>
-          <b>{game.away.name} {p.team_quantiles ? `${p.team_quantiles.away.p10}–${p.team_quantiles.away.p90}` : '—'} · {game.home.name} {p.team_quantiles ? `${p.team_quantiles.home.p10}–${p.team_quantiles.home.p90}` : '—'}</b>
-          <small>총점 {p.total_quantiles ? `${p.total_quantiles.p10}–${p.total_quantiles.p90}` : '—'} · 5점차 이상 {p.game_shape ? pct(p.game_shape.blowout_probability) : '—'}</small>
-        </Box>
+        {p.team_quantiles && p.total_quantiles && p.game_shape ? <Box className="forecast-range">
+          <span>시뮬레이션 중앙 80% 득점 구간</span>
+          <b>{game.away.name} {stat(p.team_quantiles.away.p10, 0)}–{stat(p.team_quantiles.away.p90, 0)}점 · {game.home.name} {stat(p.team_quantiles.home.p10, 0)}–{stat(p.team_quantiles.home.p90, 0)}점</b>
+          <small>총점 중앙 80% {stat(p.total_quantiles.p10, 0)}–{stat(p.total_quantiles.p90, 0)}점 · 9이닝 종료 1점차 이내 {pct(p.game_shape.one_run_probability)} · 5점차 이상 {pct(p.game_shape.blowout_probability)}</small>
+        </Box> : null}
 
         {predictedScore?.inning_line?.length ? <InningLine
           away={game.away.name}
@@ -66,9 +70,15 @@ export default function GameCard({ game }: { game: Game }) {
         /> : null}
 
         <Stack direction="row" spacing={1} className="market-row">
-          <Box className="market-stat"><span>{game.home.name} -1.5</span><b>{pct(p.handicap.home_minus_1_5)}</b></Box>
-          <Box className="market-stat"><span>{marketLine != null ? `시장 O ${marketLine}` : '모델 O 8.5'}</span><b>{pct(marketTotal?.over ?? p.totals['8.5'].over)}</b></Box>
-          <Chip icon={<VerifiedRounded />} label={p.confidence_label} size="small" className={`confidence ${p.confidence_label.toLowerCase()}`} />
+          {favoriteHandicap && typeof favoriteHandicap.probability === 'number'
+            ? <Box className="market-stat"><span>{favoriteHandicap.team} 2점차 이상 승리</span><b>{pct(favoriteHandicap.probability)}</b><small>-1.5 핸디캡 기준</small></Box>
+            : <Box className="market-stat"><span>핸디캡 확률</span><b>미산출</b><small>검증된 값 없음</small></Box>}
+          {marketLine != null && marketTotal
+            ? <Box className="market-stat"><span>시장 총점 {marketLine}</span><b>초과 {pct(marketTotal.over)}</b><small>미만 {pct(marketTotal.under)}{marketTotal.push ? ` · 동일 ${pct(marketTotal.push)}` : ''}</small></Box>
+            : marketLine != null
+              ? <Box className="market-stat"><span>시장 총점 {marketLine}</span><b>비교 불가</b><small>모델 지원 기준점 범위 밖</small></Box>
+              : <Box className="market-stat"><span>시장 총점</span><b>미수집</b><small>임의 기준점은 표시하지 않음</small></Box>}
+          <Chip icon={<VerifiedRounded />} label={completenessLabel(p.confidence_label)} size="small" className={`confidence ${p.confidence_label.toLowerCase()}`} />
         </Stack>
         <Button fullWidth onClick={() => setOpen(!open)} endIcon={<ExpandMoreRounded className={open ? 'rotated' : ''} />} className="detail-button">{open ? '분석 접기' : '상세 분석 보기'}</Button>
         <Collapse in={open}>
@@ -88,7 +98,7 @@ export default function GameCard({ game }: { game: Game }) {
             </>}
             <Typography variant="subtitle2">주요 근거</Typography>
             <ul>{p.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
-            <Typography className="source-note">득점 분포 평균 {stat(statisticalExpectedTotal, 2)}점 · 평균 예상 스코어와 예상 총점은 같은 기대값에서 계산됩니다.</Typography>
+            <Typography className="source-note">득점 분포 평균 {stat(statisticalExpectedTotal, 2)}점 · 승률·득점·구간·핸디캡·총점 확률은 같은 시뮬레이션 분포에서 계산됩니다. 9이닝 동점 표본은 승률 계산에서 제외합니다.</Typography>
             <Typography variant="subtitle2">최근 10경기</Typography>
             <Box className="comparison"><Compare team={game.away} /><Compare team={game.home} /></Box>
             <Typography variant="subtitle2">{lineupTitle(game)}</Typography>
@@ -115,7 +125,7 @@ export default function GameCard({ game }: { game: Game }) {
             <Typography className="source-note">최근 데이터 갱신 {new Date(game.freshness.last_updated_at).toLocaleString('ko-KR')} · {p.disclaimer}</Typography>
           </Box>
         </Collapse>
-      </> : <Box className="no-prediction">{game.status === 'SCHEDULED' ? '예측 입력 데이터가 아직 충분하지 않습니다.' : '경기 시작 전에 저장된 예측이 없습니다.'}</Box>}
+      </> : <Box className="no-prediction">{predictionUnavailableMessage(game, Boolean(p))}</Box>}
     </article>
   )
 }
@@ -128,8 +138,8 @@ function InningLine({ away, home, score }: {
   const innings = score.inning_line ?? []
   return <Box className="inning-forecast">
     <Stack direction="row" justifyContent="space-between" alignItems="baseline" className="inning-heading">
-      <b>대표 이닝별 예상</b>
-      <small>대표 최종점수 조건에서 가장 자주 나온 흐름</small>
+      <b>대표 이닝 흐름</b>
+      <small>대표 최종 스코어에 해당하는 한 가지 시뮬레이션 표본</small>
     </Stack>
     <Box className="inning-scroll">
       <table>
@@ -173,4 +183,14 @@ function Lineup({ team, entries }: { team: string; entries: Game['lineups']['awa
 
 function stageLabel(stage: string) {
   return ({ T_MINUS_24H: '전날', T_MINUS_3H: '3시간 전', T_MINUS_60M: '60분 전', T_MINUS_15M: '15분 전', TIME_UNCONFIRMED: '시간 미정' } as Record<string, string>)[stage] ?? stage
+}
+
+function completenessLabel(label: NonNullable<Game['prediction']>['confidence_label']) {
+  return ({ HIGH: '정보 충분', MEDIUM: '정보 보통', LOW: '정보 부족' } as const)[label]
+}
+
+function predictionUnavailableMessage(game: Game, hasPrediction: boolean) {
+  if (game.status === 'CANCELLED') return '취소된 경기로 예측 지표를 표시하지 않습니다.'
+  if (hasPrediction) return '이전 예측 형식은 정합성 검증 후 다시 표시됩니다. 다음 데이터 갱신을 기다려 주세요.'
+  return game.status === 'SCHEDULED' ? '예측 입력 데이터가 아직 충분하지 않습니다.' : '경기 시작 전에 저장된 예측이 없습니다.'
 }

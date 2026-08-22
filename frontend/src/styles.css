@@ -65,7 +65,8 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .market-row { align-items: stretch; margin-bottom: 14px; }
 .market-row > .market-stat { flex: 1; display: grid; gap: 2px; padding: 10px 12px; border: 1px solid rgba(189,231,213,.1); border-radius: 10px; }
 .market-row b { color: #e8f1ed; }
-.confidence { align-self: stretch; min-width: 104px; height: auto !important; justify-content: center; border: 1px solid rgba(126,231,184,.18) !important; border-radius: 10px !important; font-weight: 850 !important; letter-spacing: .07em; }
+.market-row .market-stat small { color: #607a70; font-size: .58rem; line-height: 1.35; }
+.confidence { align-self: stretch; min-width: 112px; height: auto !important; justify-content: center; border: 1px solid rgba(126,231,184,.18) !important; border-radius: 10px !important; font-weight: 850 !important; }
 .confidence .MuiChip-icon { margin: 0 6px 0 0 !important; }
 .confidence .MuiChip-label { padding: 0 !important; line-height: 1; }
 .confidence.high { color: #7ee7b8 !important; background: rgba(126,231,184,.12) !important; }

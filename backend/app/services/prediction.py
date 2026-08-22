@@ -10,12 +10,12 @@ from backend.app.services.feature_engineering import build_features, expected_ru
 from backend.app.services.simulation import simulate_scores
 
 
-MODEL_ALGORITHM = "dynamic league environment + matchup-strength means + bounded optional Claude advisor + overdispersed correlated gamma-Poisson Monte Carlo"
+MODEL_ALGORITHM = "dynamic league environment + matchup-strength means + bounded optional Claude run adjustment + validated overdispersed correlated gamma-Poisson score distribution"
 
 
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,
                  lineups: list[Any] | None = None, game_context: dict[str, Any] | None = None) -> dict[str, Any]:
-    model_name = "KBO_MATCHUP_V9" if game.league == "KBO" else "MLB_MATCHUP_V8"
+    model_name = "KBO_MATCHUP_V10" if game.league == "KBO" else "MLB_MATCHUP_V9"
     features = build_features(home, away, home_pitcher, away_pitcher, game.stadium, game.league, lineups,
                               getattr(game, "game_date", None), game_context)
     base_logistic = logistic_probability(features)
@@ -102,8 +102,11 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     simulation = simulate_scores(
         home_runs, away_runs, settings.simulations, seed, environment_variance, team_variance,
     )
-    home_probability = .42 * logistic + .58 * simulation["home_two_way_probability"]
-    away_probability = 1 - home_probability
+    # Every headline score-distribution metric must describe the same population. The logistic
+    # classifier remains an independent diagnostic, but win probability, expected score,
+    # intervals, handicaps and totals now all come from this single simulation distribution.
+    home_probability = simulation["home_two_way_probability"]
+    away_probability = simulation["away_two_way_probability"]
     primary_score = select_primary_score(
         simulation["top_scores"], home_runs, away_runs, home_probability,
     )
@@ -127,10 +130,15 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "statistical_expected_total": round(home_runs + away_runs, 2),
         "confidence": confidence,
         "payload": {
+            "summary_schema_version": 2,
+            "coherence_valid": True,
+            "probability_source": "9_inning_score_simulation_two_way_excluding_ties",
             "model": {"name": model_name, "algorithm": MODEL_ALGORITHM, "simulations": settings.simulations},
             "confidence_label": confidence_label,
             "confidence_missing": missing,
             "logistic_home_probability": round(logistic, 4),
+            "classification_home_probability": round(logistic, 4),
+            "simulation_home_probability": round(simulation["home_two_way_probability"], 4),
             "base_logistic_home_probability": round(base_logistic, 4),
             "base_home_expected_runs": round(base_home_runs, 2),
             "base_away_expected_runs": round(base_away_runs, 2),
@@ -141,7 +149,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "simulation_environment_variance": round(environment_variance, 4),
             "simulation_team_variance": round(team_variance, 4),
             "features": features,
-            "handicap": {"home_minus_1_5": round(simulation["home_minus_1_5"], 4), "away_plus_1_5": round(simulation["away_plus_1_5"], 4)},
+            "handicap": {key: round(value, 4) for key, value in simulation["handicap"].items()},
             "totals": simulation["totals"],
             "tie_probability": round(simulation["tie_probability"], 4),
             "top_scores": simulation["top_scores"],

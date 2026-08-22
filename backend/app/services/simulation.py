@@ -6,6 +6,46 @@ from typing import Any
 import numpy as np
 
 
+def validate_simulation_summary(summary: dict[str, Any]) -> None:
+    """Reject a simulation summary when probabilities or intervals are internally inconsistent."""
+    tolerance = 1e-9
+
+    def probability(name: str, value: Any) -> float:
+        number = float(value)
+        if not np.isfinite(number) or not 0 <= number <= 1:
+            raise ValueError(f"invalid probability {name}: {value}")
+        return number
+
+    home_win = probability("home_win_probability", summary["home_win_probability"])
+    away_win = probability("away_win_probability", summary["away_win_probability"])
+    tie = probability("tie_probability", summary["tie_probability"])
+    home_two_way = probability("home_two_way_probability", summary["home_two_way_probability"])
+    away_two_way = probability("away_two_way_probability", summary["away_two_way_probability"])
+    if abs(home_win + away_win + tie - 1) > tolerance:
+        raise ValueError("9-inning win/loss/tie probabilities must sum to 1")
+    if abs(home_two_way + away_two_way - 1) > tolerance:
+        raise ValueError("two-way win probabilities must sum to 1")
+
+    handicap = summary["handicap"]
+    for name, value in handicap.items():
+        probability(f"handicap.{name}", value)
+    if abs(handicap["home_minus_1_5"] + handicap["away_plus_1_5"] - 1) > tolerance:
+        raise ValueError("home -1.5 and away +1.5 probabilities must be complements")
+    if abs(handicap["away_minus_1_5"] + handicap["home_plus_1_5"] - 1) > tolerance:
+        raise ValueError("away -1.5 and home +1.5 probabilities must be complements")
+
+    for line, values in summary["totals"].items():
+        over = probability(f"totals.{line}.over", values["over"])
+        under = probability(f"totals.{line}.under", values["under"])
+        push = probability(f"totals.{line}.push", values["push"])
+        if abs(over + under + push - 1) > tolerance:
+            raise ValueError(f"total probabilities at {line} must sum to 1")
+
+    quantile_groups = [summary["total_quantiles"], *summary["team_quantiles"].values()]
+    if any(group["p10"] > group["p50"] or group["p50"] > group["p90"] for group in quantile_groups):
+        raise ValueError("simulation quantiles must be ordered p10 <= p50 <= p90")
+
+
 def simulate_scores(home_expected: float, away_expected: float, simulations: int, seed: int,
                     environment_variance: float = .08, team_variance: float = .12) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
@@ -31,8 +71,14 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     home = home_innings.sum(axis=1)
     away = away_innings.sum(axis=1)
     total = home + away
+    home_win_probability = float(np.mean(home > away))
+    away_win_probability = float(np.mean(away > home))
     tie_probability = float(np.mean(home == away))
-    home_two_way = float(np.mean(home > away) + tie_probability / 2)
+    decided_probability = home_win_probability + away_win_probability
+    # Extra innings are not simulated. Normalize the decided 9-inning outcomes instead of
+    # arbitrarily splitting ties, so the displayed two-way market is explicit and reproducible.
+    home_two_way = home_win_probability / decided_probability if decided_probability else .5
+    away_two_way = away_win_probability / decided_probability if decided_probability else .5
     score_counts = Counter(zip(home.tolist(), away.tolist(), strict=False))
     top_scores = []
     # Keep enough candidates for the representative-score selector to honor both winner and total.
@@ -57,16 +103,31 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
             "inning_line": inning_line,
             "trajectory_probability_given_score": round(trajectory_count / count, 4),
         })
-    return {
+    handicap = {
+        "home_minus_1_5": float(np.mean(home - away >= 2)),
+        "away_minus_1_5": float(np.mean(away - home >= 2)),
+        "home_plus_1_5": float(np.mean(home - away >= -1)),
+        "away_plus_1_5": float(np.mean(away - home >= -1)),
+    }
+    totals = {
+        str(line): {
+            "over": float(np.mean(total > line)),
+            "under": float(np.mean(total < line)),
+            "push": float(np.mean(total == line)),
+        }
+        for line in (6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13)
+    }
+    result = {
+        "home_win_probability": home_win_probability,
+        "away_win_probability": away_win_probability,
         "home_two_way_probability": home_two_way,
-        "away_two_way_probability": 1 - home_two_way,
+        "away_two_way_probability": away_two_way,
         "tie_probability": tie_probability,
-        "home_minus_1_5": float(np.mean(home - away > 1.5)),
-        "away_plus_1_5": float(np.mean(away - home + 1.5 > 0)),
-        "totals": {
-            str(line): {"over": float(np.mean(total > line)), "under": float(np.mean(total < line))}
-            for line in (6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13)
-        },
+        "handicap": handicap,
+        # Preserve the two legacy keys for callers that have not migrated to the handicap object.
+        "home_minus_1_5": handicap["home_minus_1_5"],
+        "away_plus_1_5": handicap["away_plus_1_5"],
+        "totals": totals,
         "top_scores": top_scores,
         "total_quantiles": {
             "p10": float(np.quantile(total, .10)), "p50": float(np.quantile(total, .50)), "p90": float(np.quantile(total, .90)),
@@ -81,3 +142,5 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
             "either_shutout_probability": float(np.mean((home == 0) | (away == 0))),
         },
     }
+    validate_simulation_summary(result)
+    return result

@@ -18,7 +18,9 @@ openssl rand -hex 32
 ## 2. Supabase 프로젝트와 테이블 생성
 
 1. Supabase에서 새 프로젝트를 만들고 데이터베이스 비밀번호를 안전하게 보관합니다.
-2. **Connect > Transaction pooler**에서 URI를 복사합니다. 포트가 `6543`인지 확인합니다.
+2. **Connect**에서 URI를 두 개 복사합니다.
+   - **Transaction pooler (`6543`)**: Vercel의 `BASEBALL_DATABASE_URL`로 사용
+   - **Session pooler (`5432`)**: 최초 Alembic 마이그레이션과 SQLite 이관에 사용. Direct connection이 가능한 IPv6 환경이면 Direct URI를 대신 사용해도 됩니다.
 3. 프로젝트 폴더에서 Python 환경을 준비합니다.
 
 ```bash
@@ -27,10 +29,10 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-4. 복사한 URI를 사용해 Alembic 스키마를 생성합니다. 비밀번호에 특수문자가 있다면 URL 인코딩된 URI를 사용합니다.
+4. Session pooler 또는 Direct URI를 사용해 Alembic 스키마를 생성합니다. 비밀번호에 특수문자가 있다면 URL 인코딩된 URI를 사용합니다.
 
 ```bash
-export BASEBALL_DATABASE_URL='postgresql://postgres.PROJECT_REF:PASSWORD@POOLER_HOST:6543/postgres?sslmode=require'
+export BASEBALL_DATABASE_URL='postgresql://postgres.PROJECT_REF:PASSWORD@POOLER_HOST:5432/postgres?sslmode=require'
 alembic upgrade head
 ```
 
@@ -55,7 +57,7 @@ Git 저장소를 Vercel에서 가져오고 첫 번째 프로젝트를 다음처�
 
 | 이름 | 값 |
 |---|---|
-| `BASEBALL_DATABASE_URL` | Supabase Transaction pooler URI |
+| `BASEBALL_DATABASE_URL` | Supabase Transaction pooler URI, 포트 `6543` |
 | `ADMIN_TOKEN` | 위에서 생성한 토큰 |
 | `AUTO_CREATE_SCHEMA` | `false` |
 | `CORS_ORIGINS` | 프런트 URL 확정 전에는 로컬 URL, 확정 후 Vercel 프런트 URL |

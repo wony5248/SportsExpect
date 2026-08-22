@@ -61,8 +61,14 @@ def test_simulation_is_reproducible_and_coherent():
     second = simulate_scores(5.2, 4.1, 20_000, 42)
     assert first == second
     assert abs(first["home_two_way_probability"] + first["away_two_way_probability"] - 1) < 1e-9
+    assert abs(first["home_win_probability"] + first["away_win_probability"] + first["tie_probability"] - 1) < 1e-9
     assert first["totals"]["7.5"]["over"] >= first["totals"]["9.5"]["over"]
-    assert first["home_minus_1_5"] <= first["home_two_way_probability"] + first["tie_probability"] / 2
+    assert abs(sum(first["totals"]["8"].values()) - 1) < 1e-9
+    assert first["totals"]["8"]["push"] > 0
+    assert first["totals"]["8.5"]["push"] == 0
+    assert abs(first["handicap"]["home_minus_1_5"] + first["handicap"]["away_plus_1_5"] - 1) < 1e-9
+    assert abs(first["handicap"]["away_minus_1_5"] + first["handicap"]["home_plus_1_5"] - 1) < 1e-9
+    assert first["home_minus_1_5"] <= first["home_two_way_probability"]
     representative = first["top_scores"][0]
     assert len(representative["inning_line"]) == 9
     assert sum(item["away"] for item in representative["inning_line"]) == representative["away"]
@@ -119,6 +125,10 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     score = after["payload"]["display_expected_score"]
     assert after["expected_total"] == round(score["away"] + score["home"], 1)
     assert after["statistical_expected_total"] == round(after["home_expected_runs"] + after["away_expected_runs"], 2)
+    assert after["payload"]["summary_schema_version"] == 2
+    assert after["payload"]["coherence_valid"] is True
+    assert after["home_win_probability"] == after["payload"]["simulation_home_probability"]
+    assert after["away_win_probability"] == round(1 - after["home_win_probability"], 4)
 
 
 def test_prediction_stage_and_change_reason_are_explicit():

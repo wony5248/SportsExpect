@@ -45,6 +45,9 @@ export type Team = {
 }
 
 export type Prediction = {
+  summary_schema_version?: number
+  coherence_valid?: boolean
+  probability_source?: string
   home_win_probability: number
   away_win_probability: number
   home_expected_runs: number
@@ -55,8 +58,15 @@ export type Prediction = {
   confidence: number
   confidence_label: 'HIGH' | 'MEDIUM' | 'LOW'
   confidence_missing: string[]
-  handicap: { home_minus_1_5: number; away_plus_1_5: number }
-  totals: Record<string, { over: number; under: number }>
+  classification_home_probability?: number
+  simulation_home_probability?: number
+  handicap: {
+    home_minus_1_5: number
+    away_plus_1_5: number
+    away_minus_1_5?: number
+    home_plus_1_5?: number
+  }
+  totals: Record<string, { over: number; under: number; push?: number }>
   tie_probability: number
   top_scores: SimulatedScore[]
   primary_score?: SimulatedScore
