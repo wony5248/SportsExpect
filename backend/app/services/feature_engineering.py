@@ -39,9 +39,17 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
     residual = context.get("team_residuals") or {}
     residual_home = residual.get("home") or {}
     residual_away = residual.get("away") or {}
+    pregame = context.get("pregame") or {}
+    bullpen = pregame.get("bullpen") or {}
+    schedule = pregame.get("schedule") or {}
+    home_bullpen_fatigue = _v((bullpen.get("home") or {}).get("fatigue_index"), 0.0)
+    away_bullpen_fatigue = _v((bullpen.get("away") or {}).get("fatigue_index"), 0.0)
+    home_schedule_fatigue = _v((schedule.get("home") or {}).get("fatigue_index"), 0.0)
+    away_schedule_fatigue = _v((schedule.get("away") or {}).get("fatigue_index"), 0.0)
     (lineup_diff, home_lineup_index, away_lineup_index, home_lineup_confirmed, away_lineup_confirmed,
      home_bvp_adjustment, away_bvp_adjustment, home_bvp_coverage, away_bvp_coverage,
      home_bvp_pa, away_bvp_pa) = _lineup_feature(lineups or [])
+    platoon_diff, home_platoon, away_platoon, home_platoon_coverage, away_platoon_coverage = _platoon_feature(lineups or [])
     park_factors = MLB_PARK_FACTORS if league == "MLB" else KBO_PARK_FACTORS
     opponent_name = getattr(getattr(away, "team", None), "name", None)
     matchup = _matchup(home, opponent_name)
@@ -78,8 +86,15 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         "quality_start_rate_diff": _quality_start_rate(home_pitcher) - _quality_start_rate(away_pitcher),
         "starter_rest_days_diff": _clip(_v(getattr(home_pitcher, "rest_days", None), 5.0), 2, 8) - _clip(_v(getattr(away_pitcher, "rest_days", None), 5.0), 2, 8),
         "bullpen_proxy_diff": _bullpen_proxy(home, home_pitcher) - _bullpen_proxy(away, away_pitcher),
+        "bullpen_fatigue_edge": away_bullpen_fatigue - home_bullpen_fatigue,
+        "home_bullpen_fatigue": home_bullpen_fatigue,
+        "away_bullpen_fatigue": away_bullpen_fatigue,
+        "bullpen_workload_available": bool((pregame.get("availability") or {}).get("bullpen")),
         "recent_pitch_burden_diff": _v(getattr(away_pitcher, "recent_pitches", None), 0.0) - _v(getattr(home_pitcher, "recent_pitches", None), 0.0),
         "rest_days_diff": _team_rest_days(home, game_date) - _team_rest_days(away, game_date),
+        "schedule_fatigue_edge": away_schedule_fatigue - home_schedule_fatigue,
+        "home_schedule_fatigue": home_schedule_fatigue,
+        "away_schedule_fatigue": away_schedule_fatigue,
         "doubleheader_diff": float(context.get("away_games_today", 1) - context.get("home_games_today", 1)),
         "head_to_head_diff": matchup[0],
         "head_to_head_run_diff": matchup[1],
@@ -97,9 +112,12 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         # is relative to the club's own staff, so it shapes when runs score, not how many.
         "home_starter_multiplier": _starter_multiplier(home_pitcher, home, league),
         "away_starter_multiplier": _starter_multiplier(away_pitcher, away, league),
-        "home_starter_innings": _clip(_v(getattr(home_pitcher, "avg_start_innings", None), 5.3), 3.0, 7.5),
-        "away_starter_innings": _clip(_v(getattr(away_pitcher, "avg_start_innings", None), 5.3), 3.0, 7.5),
-        "park_factor": park_factors.get(stadium or "", 1.0),
+        "home_starter_innings": _projected_starter_innings(home_pitcher),
+        "away_starter_innings": _projected_starter_innings(away_pitcher),
+        "static_park_factor": park_factors.get(stadium or "", 1.0),
+        "weather_run_multiplier": _v((pregame.get("weather") or {}).get("run_multiplier"), 1.0),
+        "weather_available": bool((pregame.get("weather") or {}).get("available")),
+        "park_factor": park_factors.get(stadium or "", 1.0) * _v((pregame.get("weather") or {}).get("run_multiplier"), 1.0),
         "lineup_strength_diff": lineup_diff,
         "home_lineup_index": home_lineup_index,
         "away_lineup_index": away_lineup_index,
@@ -108,6 +126,25 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         "away_lineup_bvp_coverage": away_bvp_coverage,
         "home_lineup_bvp_pa": home_bvp_pa,
         "away_lineup_bvp_pa": away_bvp_pa,
+        "lineup_platoon_diff": platoon_diff,
+        "home_lineup_platoon_index": home_platoon,
+        "away_lineup_platoon_index": away_platoon,
+        "home_lineup_platoon_coverage": home_platoon_coverage,
+        "away_lineup_platoon_coverage": away_platoon_coverage,
+        "starter_recent_era_diff": _recent_pitcher_value(away_pitcher, "era", _v(getattr(away_pitcher, "era", None), 4.5)) - _recent_pitcher_value(home_pitcher, "era", _v(getattr(home_pitcher, "era", None), 4.5)),
+        "starter_recent_k_bb_diff": _recent_pitcher_value(home_pitcher, "k_bb_rate", _v(getattr(home_pitcher, "k_bb_rate", None), 0.0)) - _recent_pitcher_value(away_pitcher, "k_bb_rate", _v(getattr(away_pitcher, "k_bb_rate", None), 0.0)),
+        "starter_recent_form_available": bool((getattr(home_pitcher, "recent", None) or {}).get("available") and (getattr(away_pitcher, "recent", None) or {}).get("available")),
+        "fielding_edge": _fielding_index(home) - _fielding_index(away),
+        "baserunning_edge": _baserunning_index(home) - _baserunning_index(away),
+        "catcher_control_edge": _catcher_index(home) - _catcher_index(away),
+        "baserunning_data_available": _advanced_pair_available(home, away, "stolen_bases"),
+        "fielding_data_available": _advanced_pair_available(home, away, "fielding_percentage"),
+        "catcher_data_available": _advanced_pair_available(home, away, "opponent_stolen_base_percentage"),
+        "advanced_team_data_available": all((
+            _advanced_pair_available(home, away, "stolen_bases"),
+            _advanced_pair_available(home, away, "fielding_percentage"),
+            _advanced_pair_available(home, away, "opponent_stolen_base_percentage"),
+        )),
         "home_advantage": 1.0,
         "home_starter_confirmed": bool(home_pitcher and home_pitcher.confirmed and home_pitcher.era is not None),
         "away_starter_confirmed": bool(away_pitcher and away_pitcher.confirmed and away_pitcher.era is not None),
@@ -135,6 +172,10 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         "away_venue_residual_games": int(residual_away.get("venue_games") or 0),
         "home_matchup_residual_games": int(residual_home.get("matchup_games") or 0),
         "away_matchup_residual_games": int(residual_away.get("matchup_games") or 0),
+        "home_structure_residual_games": int(residual_home.get("structure_games") or 0),
+        "away_structure_residual_games": int(residual_away.get("structure_games") or 0),
+        "home_structure_residual": float(residual_home.get("structure") or 0.0),
+        "away_structure_residual": float(residual_away.get("structure") or 0.0),
     }
 
 
@@ -163,14 +204,22 @@ def logistic_probability(features: dict[str, float | bool]) -> float:
     z += starter_reliability * 0.035 * float(features["starter_durability_diff"])
     z += starter_reliability * 0.10 * float(features["quality_start_rate_diff"])
     z += 0.018 * float(features["bullpen_proxy_diff"])
+    z += 0.11 * float(features["bullpen_fatigue_edge"])
     z += 0.004 * float(features["starter_rest_days_diff"])
     z += 0.0008 * float(features["recent_pitch_burden_diff"])
     z += 0.012 * float(features["rest_days_diff"])
+    z += 0.08 * float(features["schedule_fatigue_edge"])
     z += 0.018 * float(features["doubleheader_diff"])
     z += matchup_reliability * 0.10 * float(features["head_to_head_diff"])
     z += matchup_reliability * 0.025 * float(features["head_to_head_run_diff"])
     z += 0.045 * float(features["starter_opponent_era_diff"])
     z += lineup_reliability * 0.18 * float(features["lineup_strength_diff"])
+    z += lineup_reliability * 0.12 * float(features["lineup_platoon_diff"])
+    z += starter_reliability * 0.025 * float(features["starter_recent_era_diff"])
+    z += starter_reliability * 0.14 * float(features["starter_recent_k_bb_diff"])
+    z += 0.025 * float(features["fielding_edge"])
+    z += 0.035 * float(features["baserunning_edge"])
+    z += 0.020 * float(features["catcher_control_edge"])
     return 1 / (1 + math.exp(-max(-4.0, min(4.0, z))))
 
 
@@ -238,8 +287,24 @@ def expected_runs(home: Any, away: Any, home_pitcher: Any | None, away_pitcher: 
     bullpen_away = math.exp(_clip(-.015 * float(advanced.get("bullpen_proxy_diff", 0)), -.07, .07))
     matchup_home = math.exp(_clip(.03 * float(advanced.get("head_to_head_run_diff", 0)), -.10, .10))
     matchup_away = math.exp(_clip(-.03 * float(advanced.get("head_to_head_run_diff", 0)), -.10, .10))
-    home_expected = home_base * home_batting * away_pitching * park_factor * 1.035 * lineup_home * recent_home * bullpen_home * matchup_home
-    away_expected = away_base * away_batting * home_pitching * park_factor * 0.985 * lineup_away * recent_away * bullpen_away * matchup_away
+    home_context = math.exp(_clip(
+        .08 * float(advanced.get("away_bullpen_fatigue", 0))
+        - .04 * float(advanced.get("home_schedule_fatigue", 0))
+        + .03 * float(advanced.get("away_schedule_fatigue", 0))
+        + .06 * float(advanced.get("home_lineup_platoon_index", 0))
+        + .025 * float(advanced.get("baserunning_edge", 0))
+        + .018 * float(advanced.get("fielding_edge", 0))
+        + .012 * float(advanced.get("catcher_control_edge", 0)), -.12, .12))
+    away_context = math.exp(_clip(
+        .08 * float(advanced.get("home_bullpen_fatigue", 0))
+        - .04 * float(advanced.get("away_schedule_fatigue", 0))
+        + .03 * float(advanced.get("home_schedule_fatigue", 0))
+        + .06 * float(advanced.get("away_lineup_platoon_index", 0))
+        - .025 * float(advanced.get("baserunning_edge", 0))
+        - .018 * float(advanced.get("fielding_edge", 0))
+        - .012 * float(advanced.get("catcher_control_edge", 0)), -.12, .12))
+    home_expected = home_base * home_batting * away_pitching * park_factor * 1.035 * lineup_home * recent_home * bullpen_home * matchup_home * home_context
+    away_expected = away_base * away_batting * home_pitching * park_factor * 0.985 * lineup_away * recent_away * bullpen_away * matchup_away * away_context
     return _clip(home_expected, .6, 10.0), _clip(away_expected, .6, 10.0), league_avg
 
 
@@ -322,6 +387,22 @@ def _effective_lineup_ops(item: Any) -> float:
     return (1 - weight) * season_ops + weight * _clip(float(matchup_ops), .250, 1.400)
 
 
+def _platoon_feature(lineups: list[Any]) -> tuple[float, float, float, int, int]:
+    values: dict[str, list[float]] = {"home": [], "away": []}
+    for item in lineups:
+        side = getattr(item, "side", None)
+        ops = getattr(item, "platoon_ops", None)
+        pa = int(_v(getattr(item, "platoon_plate_appearances", None), 0.0))
+        if side not in values or ops is None or pa <= 0:
+            continue
+        season = _v(getattr(item, "value", None), .720)
+        weight = min(.65, pa / (pa + 100.0))
+        values[side].append((_clip(float(ops), .300, 1.300) - season) * weight * 3)
+    home = sum(values["home"]) / max(9, len(values["home"]))
+    away = sum(values["away"]) / max(9, len(values["away"]))
+    return _clip(home - away, -.8, .8), _clip(home, -.5, .5), _clip(away, -.5, .5), len(values["home"]), len(values["away"])
+
+
 def _quality_start_rate(pitcher: Any | None) -> float:
     starts = _v(getattr(pitcher, "games", None), 0.0)
     quality = _v(getattr(pitcher, "quality_starts", None), 0.0)
@@ -345,6 +426,12 @@ def _effective_pitcher_era(pitcher: Any | None, team_era: float) -> float:
     era, _ = _opponent_pitcher_era(pitcher)
     fip = _v(getattr(pitcher, "fip", None), era)
     skill_estimate = .58 * era + .42 * fip
+    recent = getattr(pitcher, "recent", None) or {}
+    recent_era = recent.get("era") if recent.get("available") else None
+    recent_starts = int(recent.get("starts") or 0)
+    if recent_era is not None and recent_starts:
+        recent_weight = min(.18, recent_starts / (recent_starts + 15.0))
+        skill_estimate = (1 - recent_weight) * skill_estimate + recent_weight * _clip(float(recent_era), 1.0, 9.0)
     games = _v(getattr(pitcher, "games", None), 0.0)
     sample_credibility = games / (games + 8.0)
     confirmation_factor = 1.0 if bool(getattr(pitcher, "confirmed", False)) else .35
@@ -359,12 +446,58 @@ def _starter_multiplier(pitcher: Any | None, team: Any, league: str) -> float:
     return _clip(_effective_pitcher_era(pitcher, team_era) / team_era, .55, 1.70)
 
 
+def _projected_starter_innings(pitcher: Any | None) -> float:
+    innings = _clip(_v(getattr(pitcher, "avg_start_innings", None), 5.3), 3.0, 7.5)
+    recent = getattr(pitcher, "recent", None) or {}
+    limit = recent.get("derived_pitch_limit") if recent.get("available") else None
+    if limit is None:
+        return innings
+    # A workload-derived ceiling only nudges duration; it never masquerades as a manager quote.
+    return _clip(innings * _clip(float(limit) / 95.0, .85, 1.10), 3.0, 7.5)
+
+
 def _bullpen_proxy(team: Any, pitcher: Any | None) -> float:
     # Official team ERA plus expected bullpen innings: a transparent availability proxy, not a true bullpen roster model.
     team_era = _v(getattr(team, "era", None), 4.5)
     starter_innings = _v(getattr(pitcher, "avg_start_innings", None), 5.0)
     recent_burden = _v(getattr(pitcher, "recent_pitches", None), 0.0) / 100
     return -team_era - max(0.0, 5.5 - starter_innings) * .35 - recent_burden * .08
+
+
+def _recent_pitcher_value(pitcher: Any | None, field: str, fallback: float) -> float:
+    recent = getattr(pitcher, "recent", None) or {}
+    value = recent.get(field) if recent.get("available") else None
+    return fallback if value is None else float(value)
+
+
+def _fielding_index(stat: Any) -> float:
+    advanced = getattr(stat, "advanced", None) or {}
+    games = max(1, int(_v(getattr(stat, "games", None), 1)))
+    percentage = _v(advanced.get("fielding_percentage"), .982)
+    errors_per_game = _v(advanced.get("errors"), .55 * games) / games
+    return _clip((percentage - .982) / .01 - .35 * (errors_per_game - .55), -1.5, 1.5)
+
+
+def _baserunning_index(stat: Any) -> float:
+    advanced = getattr(stat, "advanced", None) or {}
+    games = max(1, int(_v(getattr(stat, "games", None), 1)))
+    value = (.20 * _v(advanced.get("stolen_bases"), 0.0) -
+             .40 * _v(advanced.get("caught_stealing"), 0.0)) / games
+    return _clip(value, -.25, .25)
+
+
+def _catcher_index(stat: Any) -> float:
+    advanced = getattr(stat, "advanced", None) or {}
+    allowed = advanced.get("opponent_stolen_base_percentage")
+    games = max(1, int(_v(getattr(stat, "games", None), 1)))
+    passed = _v(advanced.get("passed_balls"), 0.0) / games
+    if allowed is None:
+        return 0.0
+    return _clip((.72 - float(allowed)) * 2 - passed * .5, -.5, .5)
+
+
+def _advanced_pair_available(home: Any, away: Any, field: str) -> bool:
+    return all((getattr(stat, "advanced", None) or {}).get(field) is not None for stat in (home, away))
 
 
 def _team_rest_days(team: Any, target: date | None) -> float:

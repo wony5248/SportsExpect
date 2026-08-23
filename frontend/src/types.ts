@@ -36,6 +36,7 @@ export type Team = {
     k_bb_rate: number | null
     rest_days: number | null
     recent_pitches: number | null
+    recent?: { available?: boolean; starts?: number; era?: number | null; whip?: number | null; k_bb_rate?: number | null; avg_pitches?: number | null; derived_pitch_limit?: number | null; reason?: string }
     handedness: string | null
     opponent_games: number | null
     opponent_innings: number | null
@@ -76,6 +77,12 @@ export type Prediction = {
   extra_innings?: { rule: string; probability: number }
   engine?: 'PLATE_APPEARANCE' | 'INNING_RATE'
   split_coverage?: { home: number; away: number } | null
+  pregame_context?: {
+    weather?: { available?: boolean; temperature_f?: number | null; condition?: string; wind?: string; run_multiplier?: number; reason?: string }
+    bullpen?: Record<'home' | 'away', { available?: boolean; fatigue_index?: number; pitches?: Record<string, number>; high_load_arms?: string[]; confirmed_unavailable_arms?: string[]; reason?: string }>
+    schedule?: Record<'home' | 'away', { games_last_3d?: number; consecutive_days?: number; travel_km?: number | null; fatigue_index?: number }>
+    availability?: { weather?: boolean; bullpen?: boolean; schedule?: boolean }
+  }
   bullpen_usage?: Record<'home' | 'away', {
     starter_innings: number
     starter_share: number
@@ -243,6 +250,10 @@ export type Game = {
     matchup_obp: number | null
     matchup_slg: number | null
     matchup_ops: number | null
+    batting_side: string | null
+    platoon_opponent_hand: string | null
+    platoon_plate_appearances: number | null
+    platoon_ops: number | null
     collected_at: string
   }[]>
   sources: { name: string; url: string; collected_at: string }[]

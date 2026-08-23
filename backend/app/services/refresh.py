@@ -36,6 +36,7 @@ from backend.app.services.bullpen import load_profiles, seed_league
 from backend.app.services.model_lifecycle import load_champion_runtime
 from backend.app.services.prediction_evaluation import evaluate_pending_predictions
 from backend.app.services.team_residuals import TeamResidualHistory
+from backend.app.services.pregame_context import prediction_context
 
 
 def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None = None,
@@ -143,6 +144,18 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
             with session_scope() as session:
                 for raw in fetched_games:
                     upsert_game(session, raw, games_source.source_url, games_source.collected_at, "MLB")
+            scheduled = [row for row in fetched_games if row.get("status") == "SCHEDULED"]
+            context_source = _tracked(
+                "mlb_pregame_context", "/api/v1.1/game/{gamePk}/feed/live + prior box scores",
+                lambda: client.slate_context(target_date, scheduled), errors,
+            ) if scheduled else None
+            if context_source:
+                with session_scope() as session:
+                    for external_id, context in context_source.data.items():
+                        stored_game = session.scalar(select(Game).where(Game.external_id == external_id))
+                        if stored_game:
+                            stored_game.pregame_context = context
+                            stored_game.context_collected_at = context_source.collected_at
         with session_scope() as session:
             fresh = team_stats_fresh(session, target_date, "MLB")
         if force or not fresh:
@@ -186,6 +199,7 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
                 )
                 if lineup_source and lineup_source.data:
                     _enrich_batter_matchups(client, raw, lineup_source.data, errors, "MLB")
+                    _enrich_mlb_platoon(client, raw, lineup_source.data, errors)
                     _collect_batter_splits(client, lineup_source.data, target_date.year, "MLB", errors, split_budget)
                     with session_scope() as session:
                         game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
@@ -252,11 +266,25 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
             pitchers = session.scalars(select(PitcherStat).where(PitcherStat.game_id == game.id)).all()
             lineups = session.scalars(select(LineupEntry).where(LineupEntry.game_id == game.id).order_by(LineupEntry.side, LineupEntry.batting_order)).all()
             by_side = {p.side: p for p in pitchers}
+            lineup_table_data = _optional(
+                lambda: _lineup_split_tables(session, game, league, target_date.year, lineups),
+                {}, "batter splits", errors)
+            lineups_confirmed = len(lineups) >= 18 and all(item.confirmed for item in lineups)
+            scoring_seed = sum(float(value or league_average_runs) for value in (
+                home.runs_per_game, away.runs_per_game, home.runs_allowed_per_game, away.runs_allowed_per_game,
+            )) / 2
+            regime = {
+                "engine": "PLATE_APPEARANCE" if lineup_table_data.get("home") is not None and lineup_table_data.get("away") is not None else "INNING_RATE",
+                "confirmation": "CONFIRMED" if lineups_confirmed and len(pitchers) >= 2 and all(p.confirmed for p in pitchers) else "PARTIAL",
+                "scoring_band": "LOW" if scoring_seed < 8.5 else ("HIGH" if scoring_seed > 10.5 else "MID"),
+                "season_phase": "EARLY" if target_date.month <= 5 else ("LATE" if target_date.month >= 8 else "MID"),
+            }
             context = {
                 "home_games_today": appearances[game.home_team_id],
                 "away_games_today": appearances[game.away_team_id],
                 "league_average_runs": league_average_runs,
-                "team_residuals": residual_history.context_for(game),
+                "team_residuals": residual_history.context_for(game, regime),
+                "pregame": prediction_context(session, game),
             }
             captured_at = datetime.now(KST)
             result = predict_game(
@@ -264,9 +292,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 model_runtime=model_runtime,
                 bullpens={"home": bullpen_profiles.get(game.home_team_id),
                           "away": bullpen_profiles.get(game.away_team_id)},
-                lineup_tables=_optional(
-                    lambda: _lineup_split_tables(session, game, league, target_date.year, lineups),
-                    {}, "batter splits", errors),
+                lineup_tables=lineup_table_data,
             )
             save_prediction(
                 session, game, result, stage=checkpoint_stage or _prediction_stage(game, captured_at),
@@ -731,6 +757,23 @@ def _enrich_batter_matchups(client: KboClient | MlbClient, game: dict[str, Any],
         if stats:
             entry.update(stats)
             entry["matchup_source_url"] = source.source_url
+
+
+def _enrich_mlb_platoon(client: MlbClient, game: dict[str, Any], entries: list[dict[str, Any]],
+                        errors: list[str]) -> None:
+    """Attach only official, current-season batter splits versus the probable starter hand."""
+    source = _tracked(
+        f"mlb_platoon_{game['external_id']}", "/api/v1/people/{id}/stats?stats=statSplits&sitCodes=vl,vr",
+        lambda: client.batter_platoon(entries, game), errors,
+    )
+    if not source:
+        return
+    for entry in entries:
+        stats = source.data.get(str(entry.get("player_id")))
+        if stats:
+            entry.update(stats)
+            existing = entry.get("matchup_source_url")
+            entry["matchup_source_url"] = f"{existing}, {source.source_url}" if existing else source.source_url
 
 
 def _recent_by_team(results: list[dict[str, Any]], target: date) -> dict[str, dict[str, Any]]:

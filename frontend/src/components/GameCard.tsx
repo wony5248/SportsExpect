@@ -257,6 +257,14 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
                 ? `타자 한 명 한 명이 타석에 들어서는 방식으로 계산했습니다. 타자별 주자 상황 기록(득점권 포함)을 반영했고, 라인업 9명 중 ${p.split_coverage ? `${game.away.name} ${p.split_coverage.away}명 · ${game.home.name} ${p.split_coverage.home}명` : '일부'}은 본인 기록을 그대로 썼습니다.`
                 : '이번 예측은 이닝 단위로 계산했습니다. 라인업이 발표되고 타자별 기록이 모이면 타석 단위 계산으로 자동 전환됩니다.'}</Typography>
             </>}
+            {p.pregame_context && <>
+              <Typography variant="subtitle2">당일 경기 컨텍스트</Typography>
+              <Box className="market-comparison">
+                <ContextWeather prediction={p} />
+                {(['away', 'home'] as const).map((side) => <ContextTeam key={side} side={side} game={game} prediction={p} />)}
+                <Box><span>적용 원칙</span><strong>공식 데이터만</strong><small>미공개 항목은 중립값으로 두고 신뢰도에서 차감</small></Box>
+              </Box>
+            </>}
             <Typography variant="subtitle2">주요 근거</Typography>
             <ul>{p.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
             <Box className="personal-claude-panel">
@@ -392,7 +400,7 @@ function SimulationEvaluation({ evaluation, title }: {
 
 function Starter({ team }: { team: Team }) {
   const p = team.starter
-  return <Box><small>{team.name}</small><strong>{p?.name ?? '미정'}</strong><span>ERA {stat(p?.era)} · FIP {stat(p?.fip)} · WHIP {stat(p?.whip)}</span><span>{p?.opponent_innings ? `오늘 상대팀 상대로 ${stat(p.opponent_innings, 1)}이닝 · ERA ${stat(p.opponent_era)} · WHIP ${stat(p.opponent_whip)}` : '오늘 상대팀과 맞붙은 기록 없음'}</span><span>{p?.rest_days != null ? `${p.rest_days}일 쉬고 등판` : '휴식일 정보 없음'}{p?.recent_pitches != null ? ` · 최근 5일 ${p.recent_pitches}구` : ''}</span></Box>
+  return <Box><small>{team.name}</small><strong>{p?.name ?? '미정'}</strong><span>ERA {stat(p?.era)} · FIP {stat(p?.fip)} · WHIP {stat(p?.whip)}</span><span>{p?.recent?.available ? `최근 ${p.recent.starts ?? 0}선발 ERA ${stat(p.recent.era)} · WHIP ${stat(p.recent.whip)} · K-BB% ${stat((p.recent.k_bb_rate ?? 0) * 100, 1)}` : '공식 최근 선발 세부 기록 미확보'}</span><span>{p?.opponent_innings ? `오늘 상대팀 상대로 ${stat(p.opponent_innings, 1)}이닝 · ERA ${stat(p.opponent_era)} · WHIP ${stat(p.opponent_whip)}` : '오늘 상대팀과 맞붙은 기록 없음'}</span><span>{p?.rest_days != null ? `${p.rest_days}일 쉬고 등판` : '휴식일 정보 없음'}{p?.recent_pitches != null ? ` · 최근 5일 ${p.recent_pitches}구` : ''}{p?.recent?.derived_pitch_limit ? ` · 최근 투구수 기반 ${p.recent.derived_pitch_limit}구 범위` : ''}</span></Box>
 }
 
 function Compare({ team }: { team: Team }) {
@@ -410,8 +418,27 @@ function lineupTitle(game: Game) {
 function Lineup({ team, entries }: { team: string; entries: Game['lineups']['away'] }) {
   return <Box>
     <b>{team}</b>
-    {entries.length ? <ol>{entries.map((entry) => <li key={`${entry.order}-${entry.name}`}><span>{entry.name}</span><small>{entry.matchup_plate_appearances ? `${entry.position ?? '—'} · 오늘 선발 상대 OPS ${stat(entry.matchup_ops, 3)} (${entry.matchup_plate_appearances}타석)` : entry.position ?? '—'}</small></li>)}</ol> : <p>발표 전</p>}
+    {entries.length ? <ol>{entries.map((entry) => <li key={`${entry.order}-${entry.name}`}><span>{entry.name}</span><small>{[
+      entry.position ?? '—',
+      entry.platoon_plate_appearances ? `${entry.platoon_opponent_hand === 'L' ? '좌' : '우'}투수 상대 OPS ${stat(entry.platoon_ops, 3)} (${entry.platoon_plate_appearances}타석)` : null,
+      entry.matchup_plate_appearances ? `오늘 선발 상대 OPS ${stat(entry.matchup_ops, 3)} (${entry.matchup_plate_appearances}타석)` : null,
+    ].filter(Boolean).join(' · ')}</small></li>)}</ol> : <p>발표 전</p>}
   </Box>
+}
+
+function ContextWeather({ prediction }: { prediction: Prediction }) {
+  const weather = prediction.pregame_context?.weather
+  return <Box><span>날씨·구장</span><strong>{weather?.available
+    ? `${weather.temperature_f ?? '—'}℉ · ${weather.condition ?? '정보 있음'}` : '경기 시각 정보 미공개'}</strong>
+    <small>{weather?.available ? `${weather.wind ?? '바람 정보 없음'} · 득점환경 ×${stat(weather.run_multiplier, 3)}` : '정적 구장 계수만 반영'}</small></Box>
+}
+
+function ContextTeam({ side, game, prediction }: { side: 'away' | 'home'; game: Game; prediction: Prediction }) {
+  const bullpen = prediction.pregame_context?.bullpen?.[side]
+  const schedule = prediction.pregame_context?.schedule?.[side]
+  const yesterday = bullpen?.pitches?.['1']
+  return <Box><span>{game[side].name} 피로도</span><strong>불펜 {bullpen?.available ? pct(bullpen.fatigue_index ?? 0) : '미확보'} · 일정 {pct(schedule?.fatigue_index ?? 0)}</strong>
+    <small>{bullpen?.available ? `전날 구원 ${yesterday ?? 0}구${bullpen.high_load_arms?.length ? ` · 고부하 ${bullpen.high_load_arms.length}명` : ''}` : '공식 구원 등판 기록 없음'} · 최근 3일 {schedule?.games_last_3d ?? 0}경기{schedule?.travel_km != null ? ` · 이동 ${Math.round(schedule.travel_km)}km` : ''}</small></Box>
 }
 
 function stageLabel(stage: string) {

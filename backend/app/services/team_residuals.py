@@ -37,6 +37,10 @@ class ResidualObservation:
     away_expected: float
     home_actual: int
     away_actual: int
+    engine: str = "UNKNOWN"
+    confirmation: str = "UNKNOWN"
+    scoring_band: str = "MID"
+    season_phase: str = "MID"
 
 
 class TeamResidualHistory:
@@ -89,10 +93,11 @@ class TeamResidualHistory:
                 away_expected=baseline[1],
                 home_actual=result.home_score,
                 away_actual=result.away_score,
+                **_prediction_regime(prediction.payload or {}, game.game_date),
             ))
         return cls(observations)
 
-    def context_for(self, game: Game) -> dict[str, Any]:
+    def context_for(self, game: Game, regime: dict[str, str] | None = None) -> dict[str, Any]:
         if game.league not in RESIDUAL_ENABLED_LEAGUES:
             return _disabled_context(game.game_date, reason="LEAGUE_NOT_ENABLED")
         if game.game_date < RESIDUAL_FEATURE_START_DATE or game.start_at is None:
@@ -102,24 +107,26 @@ class TeamResidualHistory:
         return residual_context(
             prior, game.home_team_id, game.away_team_id, game.game_date,
             latest_game_id=prior[-1].game_id if prior else None,
+            regime=regime,
         )
 
 
 def residual_context(observations: list[ResidualObservation], home_team_id: int, away_team_id: int,
                      target_date: date, latest_game_id: int | None = None,
-                     force_enabled: bool = False) -> dict[str, Any]:
+                     force_enabled: bool = False, regime: dict[str, str] | None = None) -> dict[str, Any]:
     """Build run adjustments and variance multipliers from observations available at cutoff."""
     if target_date < RESIDUAL_FEATURE_START_DATE and not force_enabled:
         return _disabled_context(target_date)
     league_sd = _league_residual_sd(observations)
-    home = _team_projection(observations, home_team_id, away_team_id, True, league_sd)
-    away = _team_projection(observations, away_team_id, home_team_id, False, league_sd)
+    active_regime = regime or {"season_phase": _season_phase(target_date)}
+    home = _team_projection(observations, home_team_id, away_team_id, True, league_sd, active_regime)
+    away = _team_projection(observations, away_team_id, home_team_id, False, league_sd, active_regime)
 
     # A scoring residual contains both the batting club and opposing prevention signal. Their
     # weights sum to one, avoiding double-counting the same game error. Matchup residuals get
     # only a small final weight after their much stronger sample shrinkage.
-    home_signal = .70 * home["offense"] - .30 * away["defense"] + .10 * home["matchup"]
-    away_signal = .70 * away["offense"] - .30 * home["defense"] + .10 * away["matchup"]
+    home_signal = .70 * home["offense"] - .30 * away["defense"] + .10 * home["matchup"] + .12 * home["structure"]
+    away_signal = .70 * away["offense"] - .30 * home["defense"] + .10 * away["matchup"] + .12 * away["structure"]
     home_adjustment = _clip(RESIDUAL_MEAN_REVERSION_WEIGHT * home_signal,
                             -MAX_RUN_ADJUSTMENT, MAX_RUN_ADJUSTMENT)
     away_adjustment = _clip(RESIDUAL_MEAN_REVERSION_WEIGHT * away_signal,
@@ -140,6 +147,7 @@ def residual_context(observations: list[ResidualObservation], home_team_id: int,
         "home": _public_projection(home),
         "away": _public_projection(away),
         "mean_reversion_weight": RESIDUAL_MEAN_REVERSION_WEIGHT,
+        "regime": active_regime,
         "method": ("walk-forward selected mean reversion of team offense/defense EWMA + "
                    "venue split + shrunk matchup residual"),
     }
@@ -179,12 +187,14 @@ def baseline_expected_runs(prediction: Prediction) -> tuple[float, float]:
 
 
 def _team_projection(observations: list[ResidualObservation], team_id: int, opponent_id: int,
-                     target_is_home: bool, league_sd: float) -> dict[str, float | int]:
+                     target_is_home: bool, league_sd: float,
+                     regime: dict[str, str] | None = None) -> dict[str, float | int]:
     offense_all: list[float] = []
     defense_all: list[float] = []
     offense_venue: list[float] = []
     defense_venue: list[float] = []
     matchup: list[float] = []
+    structure: list[float] = []
     for row in observations:
         if team_id == row.home_team_id:
             offense = _winsor(row.home_actual - row.home_expected)
@@ -205,6 +215,8 @@ def _team_projection(observations: list[ResidualObservation], team_id: int, oppo
             defense_venue.append(defense)
         if opponent == opponent_id:
             matchup.append(offense)
+        if regime and _regime_matches(row, regime):
+            structure.append(offense)
 
     off_mean, off_sd = _ewma(offense_all)
     def_mean, def_sd = _ewma(defense_all)
@@ -218,6 +230,10 @@ def _team_projection(observations: list[ResidualObservation], team_id: int, oppo
     offense_signal = .90 * general_off + .10 * venue_off
     defense_signal = .90 * general_def + .10 * venue_def
     matchup_signal = _shrink(matchup_mean, len(matchup), 40)
+    structure_mean, _ = _ewma(structure)
+    # Center on the team's general residual to avoid counting the same EWMA twice. Structural
+    # bias activates slowly and remains a small correction even after enough observations.
+    structure_signal = _shrink(structure_mean - off_mean, len(structure), 30) if len(structure) >= 20 else 0.0
     # Variance is shrunk toward league noise more aggressively than the mean. With very small
     # samples this makes the multiplier exactly neutral instead of treating one blowout as a trait.
     off_ratio = _variance_ratio(off_sd, len(offense_all), league_sd)
@@ -228,11 +244,13 @@ def _team_projection(observations: list[ResidualObservation], team_id: int, oppo
         "venue_offense": venue_off,
         "venue_defense": venue_def,
         "matchup": matchup_signal,
+        "structure": structure_signal,
         "offense_volatility": off_ratio,
         "defense_volatility": def_ratio,
         "games": len(offense_all),
         "venue_games": len(offense_venue),
         "matchup_games": len(matchup),
+        "structure_games": len(structure),
     }
 
 
@@ -274,6 +292,35 @@ def _variance_ratio(sd: float, games: int, league_sd: float) -> float:
 
 def _public_projection(value: dict[str, float | int]) -> dict[str, float | int]:
     return {key: (round(item, 6) if isinstance(item, float) else item) for key, item in value.items()}
+
+
+def _prediction_regime(payload: dict[str, Any], game_date: date) -> dict[str, str]:
+    features = payload.get("features") or {}
+    total = float(payload.get("statistical_expected_total") or
+                  (float(payload.get("base_home_expected_runs") or 0) + float(payload.get("base_away_expected_runs") or 0)) or 9.0)
+    confirmed = bool(features.get("home_lineup_confirmed") and features.get("away_lineup_confirmed") and
+                     features.get("home_starter_confirmed") and features.get("away_starter_confirmed"))
+    return {
+        "engine": str(payload.get("engine") or "UNKNOWN"),
+        "confirmation": "CONFIRMED" if confirmed else "PARTIAL",
+        "scoring_band": "LOW" if total < 8.5 else ("HIGH" if total > 10.5 else "MID"),
+        "season_phase": _season_phase(game_date),
+    }
+
+
+def _season_phase(value: date) -> str:
+    return "EARLY" if value.month <= 5 else ("LATE" if value.month >= 8 else "MID")
+
+
+def _regime_matches(row: ResidualObservation, regime: dict[str, str]) -> bool:
+    # Require the engine and confirmation state; scoring/season bands add specificity only
+    # when callers provide them. UNKNOWN legacy rows cannot seed a false segment effect.
+    if row.engine == "UNKNOWN" or row.engine != regime.get("engine", row.engine):
+        return False
+    if row.confirmation != regime.get("confirmation", row.confirmation):
+        return False
+    return (row.scoring_band == regime.get("scoring_band", row.scoring_band) and
+            row.season_phase == regime.get("season_phase", row.season_phase))
 
 
 def _disabled_context(target_date: date, reason: str = "BEFORE_EFFECTIVE_DATE") -> dict[str, Any]:

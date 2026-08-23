@@ -231,6 +231,14 @@ class KboClient:
                 "home_runs": _as_int(h1.get("HR_CN")), "walks": _as_int(h2.get("BB_CN")),
                 "strikeouts": _as_int(h2.get("KK_CN")), "era": _as_float(pit.get("ERA_RT")),
                 "whip": _as_float(pit.get("WHIP_RT")),
+                "advanced": {
+                    "available": any(key in h1 or key in h2 for key in ("SB_CN", "CS_CN")),
+                    "source": "KBO_OFFICIAL_TEAM_HITTING",
+                    "stolen_bases": _as_int(h1.get("SB_CN", h2.get("SB_CN"))),
+                    "caught_stealing": _as_int(h1.get("CS_CN", h2.get("CS_CN"))),
+                    "fielding_available": False,
+                    "catcher_available": False,
+                },
             }
         source_url = ", ".join(page.source_url for page in pages)
         return SourcePayload(teams, source_url, max(page.collected_at for page in pages))
@@ -270,6 +278,7 @@ class KboClient:
                 "war": _as_float(values[2]), "games": _as_int(values[3]),
                 "avg_start_innings": _as_float(values[4]), "quality_starts": _as_int(values[5]),
                 "whip": _as_float(values[6]),
+                "recent": {"available": False, "reason": "KBO_STARTER_RECENT_GAME_LOG_NOT_IN_ANALYSIS_FEED"},
                 **opponent_split,
             })
         return SourcePayload(output, ", ".join(source_urls), raw.collected_at)

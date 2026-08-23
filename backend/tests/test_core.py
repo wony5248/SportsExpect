@@ -25,9 +25,10 @@ from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batt
                                                _pitcher_opponent_split, _rank_table, _record_rate,
                                                _scoreboard_innings, _flag)
 from backend.app.collectors.kbo.client import SourcePayload
-from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient, _linescore
+from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient, _linescore, _weather_context
 from backend.app.collectors.odds import _consensus_event
-from backend.app.services.feature_engineering import _effective_lineup_ops, _lineup_matchup_summary
+from backend.app.services.feature_engineering import (_effective_lineup_ops, _lineup_matchup_summary,
+                                                       _platoon_feature)
 from backend.app.services.refresh import (SPLIT_FETCH_BUDGET, _collect_batter_splits, _market_event_date,
                                           _market_refresh_due, _months_for_recent, _optional,
                                           _prediction_stage, _recent_by_team, _split_budget)
@@ -35,6 +36,7 @@ from backend.app.services.batting import SINGLE, STATE_INDEX, build_batter_table
 from backend.app.services.simulation import simulate_scores
 from backend.app.services.simulation import evaluate_simulation_recipe
 from backend.app.services.prediction import (SIMULATION_SUMMARY_SCHEMA_VERSION,
+                                             _apply_daily_bullpen_workload,
                                              blend_classifier_into_means, build_score_estimates,
                                              predict_game, select_primary_score)
 from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
@@ -45,6 +47,7 @@ from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
 from backend.app.services.team_residuals import (ResidualObservation, TeamResidualHistory,
                                                  apply_residual_adjustment, available_before,
                                                  residual_context)
+from backend.app.services.pregame_context import prediction_context
 
 
 def test_rank_and_data_tables_are_schema_driven():
@@ -106,6 +109,101 @@ def test_mlb_linescore_is_normalized_for_result_flow_comparison():
         {"away": {"runs": 0}, "home": {"runs": 2}},
     ]}) == {"away": [1, 0], "home": [0, 2]}
     assert _linescore(None) is None
+
+
+def test_mlb_weather_adjustment_is_neutral_when_missing_and_capped_when_published():
+    assert _weather_context({}, {"roofType": "Open"}) == {
+        "available": False, "reason": "PREGAME_WEATHER_NOT_PUBLISHED", "run_multiplier": 1.0,
+    }
+    hot_windy = _weather_context({"temp": "96", "condition": "Clear", "wind": "18 mph, Out To CF"},
+                                 {"roofType": "Open"})
+    assert hot_windy["available"] is True
+    assert hot_windy["run_multiplier"] == 1.08
+    dome = _weather_context({"temp": "96", "condition": "Clear", "wind": "18 mph, Out To CF"},
+                            {"roofType": "Dome"})
+    assert dome["run_multiplier"] == 1.0
+
+
+def test_mlb_lineup_reads_batting_side_from_official_game_data_people():
+    response = {
+        "gameData": {"players": {"ID7": {"batSide": {"code": "L"}}}},
+        "liveData": {"boxscore": {"teams": {
+            "away": {"battingOrder": [7] * 9, "players": {"ID7": {
+                "person": {"fullName": "Test Hitter"}, "position": {"abbreviation": "RF"},
+                "seasonStats": {"batting": {"ops": ".812"}},
+            }}},
+            "home": {"battingOrder": [], "players": {}},
+        }}},
+    }
+    client = MlbClient(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=response)))
+    try:
+        rows = client.lineups({"game_pk": "1"}).data
+    finally:
+        client.close()
+    assert rows[0]["batting_side"] == "L"
+    assert rows[0]["confirmed"] is True
+
+
+def test_daily_bullpen_workload_changes_relief_tiers_only_with_official_data():
+    staff = {"starter_multiplier": .9, "starter_innings": 5.5,
+             "bullpen": {"high_leverage": .8, "middle": 1.0, "chase": 1.1, "mop_up": 1.3}}
+    neutral = _apply_daily_bullpen_workload(staff, None)
+    assert neutral["bullpen"] == staff["bullpen"]
+    tired = _apply_daily_bullpen_workload(staff, {
+        "available": True, "source": "OFFICIAL_BOX_SCORE", "fatigue_index": .5,
+        "pitches": {1: 85}, "high_load_arms": ["Closer"],
+    })
+    assert tired["bullpen"]["high_leverage"] == .84
+    assert tired["daily_workload"]["high_load_arms"] == ["Closer"]
+
+
+def test_mlb_slate_context_aggregates_only_relief_pitches_from_prior_box_scores():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/schedule":
+            return httpx.Response(200, json={"dates": [{"games": [{
+                "gamePk": 9, "gameDate": "2026-08-22T01:00:00Z",
+                "status": {"abstractGameState": "Final"},
+            }]}]})
+        if "/game/9/" in request.url.path:
+            return httpx.Response(200, json={
+                "gameData": {"teams": {"away": {"id": 1}, "home": {"id": 2}}},
+                "liveData": {"boxscore": {"teams": {
+                    "away": {"pitchers": [11, 12], "players": {
+                        "ID11": {"person": {"fullName": "Starter"}, "stats": {"pitching": {"gamesStarted": 1, "numberOfPitches": 90}}},
+                        "ID12": {"person": {"fullName": "Reliever"}, "stats": {"pitching": {"gamesStarted": 0, "numberOfPitches": 35}}},
+                    }},
+                    "home": {"pitchers": [], "players": {}},
+                }}},
+            })
+        return httpx.Response(200, json={
+            "gameData": {"weather": {"temp": "80", "condition": "Clear", "wind": "5 mph, Out To RF"},
+                         "venue": {"name": "Park", "location": {"defaultCoordinates": {"latitude": 40, "longitude": -75}},
+                                   "fieldInfo": {"roofType": "Open", "turfType": "Grass"},
+                                   "timeZone": {"id": "America/New_York"}}},
+            "liveData": {},
+        })
+
+    client = MlbClient(transport=httpx.MockTransport(handler))
+    try:
+        source = client.slate_context(date(2026, 8, 23), [{
+            "game_pk": "10", "external_id": "MLB-10", "away_code": "1", "home_code": "2",
+        }])
+    finally:
+        client.close()
+    context = source.data["MLB-10"]
+    assert context["bullpen"]["away"]["pitches"][1] == 35
+    assert context["bullpen"]["away"]["high_load_arms"] == ["Reliever"]
+    assert context["weather"]["run_multiplier"] > 1
+    assert context["venue"]["latitude"] == 40
+
+
+def test_platoon_signal_is_sample_shrunk_and_requires_actual_split_rows():
+    rows = [SimpleNamespace(side="home", value=.700, platoon_ops=.900, platoon_plate_appearances=200)] * 9
+    rows += [SimpleNamespace(side="away", value=.700, platoon_ops=None, platoon_plate_appearances=None)] * 9
+    diff, home, away, home_coverage, away_coverage = _platoon_feature(rows)
+    assert 0 < diff < .6
+    assert home > 0 and away == 0
+    assert (home_coverage, away_coverage) == (9, 0)
 
 
 def test_archive_replay_is_explicitly_scoped_to_2026():
@@ -1046,6 +1144,62 @@ def test_residual_calibration_is_kbo_only_until_mlb_history_is_ready():
     assert context["enabled"] is False
     assert context["reason"] == "LEAGUE_NOT_ENABLED"
     assert apply_residual_adjustment(4.5, 4.2, context) == (4.5, 4.2)
+
+
+def test_structural_residual_needs_twenty_matching_regime_games():
+    start = datetime(2026, 4, 1, 18, 30)
+    observations = []
+    for index in range(40):
+        plate = index < 20
+        observations.append(ResidualObservation(
+            game_id=index + 1, started_at=start + timedelta(days=index),
+            finalized_at=start + timedelta(days=index, hours=3),
+            home_team_id=1, away_team_id=2, home_expected=5, away_expected=5,
+            home_actual=7 if plate else 3, away_actual=5,
+            engine="PLATE_APPEARANCE" if plate else "INNING_RATE",
+            confirmation="CONFIRMED" if plate else "PARTIAL", scoring_band="MID", season_phase="EARLY",
+        ))
+    regime = {"engine": "PLATE_APPEARANCE", "confirmation": "CONFIRMED",
+              "scoring_band": "MID", "season_phase": "EARLY"}
+    collecting = residual_context(observations[1:], 1, 2, date(2026, 5, 20),
+                                  force_enabled=True, regime=regime)
+    assert collecting["home"]["structure_games"] == 19
+    assert collecting["home"]["structure"] == 0
+    active = residual_context(observations, 1, 2, date(2026, 5, 20),
+                              force_enabled=True, regime=regime)
+    assert active["home"]["structure_games"] == 20
+    assert active["home"]["structure"] > 0
+
+
+def test_schedule_context_uses_only_prior_final_games_and_computes_travel():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        team = Team(league="MLB", code="1", name="One")
+        opponents = [Team(league="MLB", code=str(index), name=str(index)) for index in (2, 3, 4)]
+        session.add_all([team, *opponents]); session.flush()
+        previous = Game(
+            external_id="P", league="MLB", game_date=date(2026, 8, 22), start_at=datetime(2026, 8, 22, 10),
+            away_team_id=team.id, home_team_id=opponents[0].id, status="FINAL", source="test", source_url="test",
+            collected_at=datetime(2026, 8, 22, 14),
+            pregame_context={"venue": {"latitude": 40.0, "longitude": -75.0}},
+        )
+        current = Game(
+            external_id="C", league="MLB", game_date=date(2026, 8, 23), start_at=datetime(2026, 8, 23, 10),
+            away_team_id=opponents[1].id, home_team_id=team.id, status="SCHEDULED", source="test", source_url="test",
+            collected_at=datetime(2026, 8, 23, 1),
+            pregame_context={"venue": {"latitude": 41.0, "longitude": -74.0}},
+        )
+        future = Game(
+            external_id="F", league="MLB", game_date=date(2026, 8, 24), start_at=datetime(2026, 8, 24, 10),
+            away_team_id=team.id, home_team_id=opponents[2].id, status="FINAL", source="test", source_url="test",
+            collected_at=datetime(2026, 8, 24, 14),
+        )
+        session.add_all([previous, current, future]); session.flush()
+        context = prediction_context(session, current)
+        assert context["schedule"]["home"]["games_last_3d"] == 1
+        assert context["schedule"]["home"]["travel_km"] > 100
+        assert context["availability"]["schedule"] is True
 
 
 def test_side_specific_residual_volatility_widens_the_inning_simulation():

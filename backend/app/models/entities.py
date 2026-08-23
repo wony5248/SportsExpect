@@ -39,6 +39,10 @@ class Game(Base):
     source: Mapped[str] = mapped_column(String(80))
     source_url: Mapped[str] = mapped_column(Text)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Pregame-only official context (weather, venue and daily bullpen workload).  Missing
+    # feeds stay explicit inside the JSON instead of being replaced with guessed values.
+    pregame_context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    context_collected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     away_team: Mapped[Team] = relationship(foreign_keys=[away_team_id])
     home_team: Mapped[Team] = relationship(foreign_keys=[home_team_id])
@@ -70,6 +74,8 @@ class TeamStat(Base):
     era: Mapped[float | None] = mapped_column(Float, nullable=True)
     whip: Mapped[float | None] = mapped_column(Float, nullable=True)
     recent: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # League-specific official fielding, running and catcher-control totals.
+    advanced: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     source: Mapped[str] = mapped_column(String(80))
     source_url: Mapped[str] = mapped_column(Text)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -183,6 +189,8 @@ class PitcherStat(Base):
     opponent_innings: Mapped[float | None] = mapped_column(Float, nullable=True)
     opponent_era: Mapped[float | None] = mapped_column(Float, nullable=True)
     opponent_whip: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Leakage-safe starts strictly before this game (form, workload and derived pitch limit).
+    recent: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     source: Mapped[str] = mapped_column(String(80))
     source_url: Mapped[str] = mapped_column(Text)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -201,6 +209,10 @@ class LineupEntry(Base):
     position: Mapped[str | None] = mapped_column(String(24), nullable=True)
     value: Mapped[float | None] = mapped_column(Float, nullable=True)
     value_metric: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    batting_side: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    platoon_opponent_hand: Mapped[str | None] = mapped_column(String(4), nullable=True)
+    platoon_plate_appearances: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    platoon_ops: Mapped[float | None] = mapped_column(Float, nullable=True)
     opponent_pitcher_id: Mapped[str | None] = mapped_column(String(20), nullable=True)
     matchup_plate_appearances: Mapped[int | None] = mapped_column(Integer, nullable=True)
     matchup_at_bats: Mapped[int | None] = mapped_column(Integer, nullable=True)

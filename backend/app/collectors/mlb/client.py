@@ -28,6 +28,7 @@ class MlbClient:
             base_url=self.base_url, timeout=timeout, follow_redirects=True, transport=transport,
             headers={"User-Agent": "DugoutLab/0.2 (+low-frequency educational collector)"},
         )
+        self._feed_cache: dict[str, SourcePayload] = {}
 
     def close(self) -> None:
         self.client.close()
@@ -36,6 +37,11 @@ class MlbClient:
         response = self.client.get(path, params=params)
         response.raise_for_status()
         return SourcePayload(response.json(), str(response.url), datetime.now(KST))
+
+    def _game_feed(self, game_pk: str) -> SourcePayload:
+        if game_pk not in self._feed_cache:
+            self._feed_cache[game_pk] = self._get_json(f"/api/v1.1/game/{game_pk}/feed/live")
+        return self._feed_cache[game_pk]
 
     def games(self, service_date: date) -> SourcePayload:
         games: dict[str, dict[str, Any]] = {}
@@ -105,6 +111,7 @@ class MlbClient:
                 stat_groups = future.result()
                 hitting = stat_groups.get("hitting", {})
                 pitching = stat_groups.get("pitching", {})
+                fielding = stat_groups.get("fielding", {})
                 games = int(record.get("gamesPlayed", 0))
                 split_records = {item.get("type"): item for item in record.get("records", {}).get("splitRecords", [])}
                 name = record["team"]["name"]
@@ -120,12 +127,26 @@ class MlbClient:
                     "home_runs": _as_int(hitting.get("homeRuns")), "walks": _as_int(hitting.get("baseOnBalls")),
                     "strikeouts": _as_int(hitting.get("strikeOuts")), "era": _as_float(pitching.get("era")),
                     "whip": _as_float(pitching.get("whip")),
+                    "advanced": {
+                        "available": bool(fielding or hitting), "source": "MLB_OFFICIAL_TEAM_STATS",
+                        "stolen_bases": _as_int(hitting.get("stolenBases")),
+                        "caught_stealing": _as_int(hitting.get("caughtStealing")),
+                        "stolen_base_percentage": _as_float(hitting.get("stolenBasePercentage")),
+                        "fielding_percentage": _as_float(fielding.get("fielding")),
+                        "errors": _as_int(fielding.get("errors")),
+                        "double_plays": _as_int(fielding.get("doublePlays")),
+                        "opponent_stolen_bases": _as_int(fielding.get("stolenBases")),
+                        "opponent_caught_stealing": _as_int(fielding.get("caughtStealing")),
+                        "opponent_stolen_base_percentage": _as_float(fielding.get("stolenBasePercentage")),
+                        "passed_balls": _as_int(fielding.get("passedBall")),
+                        "wild_pitches": _as_int(fielding.get("wildPitches")),
+                    },
                 }
         return SourcePayload(output, standings.source_url + ", /api/v1/teams/{id}/stats", datetime.now(KST))
 
     def _team_stat(self, team_id: str, season: int) -> dict[str, dict[str, Any]]:
         payload = self._get_json(f"/api/v1/teams/{team_id}/stats", {
-            "stats": "season", "group": "hitting,pitching", "season": season,
+            "stats": "season", "group": "hitting,pitching,fielding", "season": season,
         })
         groups = {}
         for group in payload.data.get("stats", []):
@@ -163,6 +184,15 @@ class MlbClient:
             last_date = date.fromisoformat(prior_logs[-1]["date"][:10]) if prior_logs else None
             recent_pitches = sum(_as_int(row.get("stat", {}).get("numberOfPitches"), 0) or 0 for row in prior_logs
                                  if (game["game_date"] - date.fromisoformat(row["date"][:10])).days <= 5)
+            prior_starts = [row for row in prior_logs if (_as_int(row.get("stat", {}).get("gamesStarted"), 0) or 0) > 0]
+            recent_starts = prior_starts[-3:]
+            recent_innings = sum(_innings(row.get("stat", {}).get("inningsPitched")) for row in recent_starts)
+            recent_er = sum(_as_int(row.get("stat", {}).get("earnedRuns"), 0) or 0 for row in recent_starts)
+            recent_hits = sum(_as_int(row.get("stat", {}).get("hits"), 0) or 0 for row in recent_starts)
+            recent_walks = sum(_as_int(row.get("stat", {}).get("baseOnBalls"), 0) or 0 for row in recent_starts)
+            recent_strikeouts = sum(_as_int(row.get("stat", {}).get("strikeOuts"), 0) or 0 for row in recent_starts)
+            recent_batters = sum(_as_int(row.get("stat", {}).get("battersFaced"), 0) or 0 for row in recent_starts)
+            start_pitches = [_as_int(row.get("stat", {}).get("numberOfPitches"), 0) or 0 for row in recent_starts]
             person = self._get_json(f"/api/v1/people/{player_id}")
             urls.append(person.source_url)
             person_row = person.data.get("people", [{}])[0]
@@ -186,12 +216,24 @@ class MlbClient:
                 "opponent_games": len(opponent_logs), "opponent_innings": round(opponent_innings, 3),
                 "opponent_era": round(9 * opponent_er / opponent_innings, 3) if opponent_innings else None,
                 "opponent_whip": round((opponent_hits + opponent_walks) / opponent_innings, 3) if opponent_innings else None,
+                "recent": {
+                    "available": bool(recent_starts), "starts": len(recent_starts),
+                    "era": round(9 * recent_er / recent_innings, 3) if recent_innings else None,
+                    "whip": round((recent_hits + recent_walks) / recent_innings, 3) if recent_innings else None,
+                    "k_bb_rate": round((recent_strikeouts - recent_walks) / recent_batters, 4) if recent_batters else None,
+                    "avg_pitches": round(sum(start_pitches) / len(start_pitches), 1) if start_pitches else None,
+                    "max_pitches": max(start_pitches) if start_pitches else None,
+                    # This is explicitly a workload-derived ceiling, not an announced manager limit.
+                    "derived_pitch_limit": min(115, max(70, round(sum(start_pitches) / len(start_pitches) + 8))) if start_pitches else None,
+                    "velocity_available": False, "source": "OFFICIAL_GAME_LOG",
+                },
             })
         return SourcePayload(output, ", ".join(urls) or f"{self.base_url}/api/v1/people/{{id}}/stats", datetime.now(KST))
 
     def lineups(self, game: dict[str, Any]) -> SourcePayload:
-        payload = self._get_json(f"/api/v1.1/game/{game['game_pk']}/feed/live")
+        payload = self._game_feed(str(game["game_pk"]))
         teams = payload.data.get("liveData", {}).get("boxscore", {}).get("teams", {})
+        people = payload.data.get("gameData", {}).get("players", {})
         entries = []
         for side in ("away", "home"):
             team = teams.get(side, {})
@@ -200,14 +242,130 @@ class MlbClient:
             confirmed = len(order) >= 9
             for slot, person_id in enumerate(order[:9], 1):
                 player = players.get(f"ID{person_id}", {})
+                person = people.get(f"ID{person_id}", {})
                 batting = player.get("seasonStats", {}).get("batting", {})
                 entries.append({
                     "side": side, "batting_order": slot, "player_id": str(person_id),
                     "player_name": player.get("person", {}).get("fullName", str(person_id)),
                     "position": player.get("position", {}).get("abbreviation"), "value": _as_float(batting.get("ops")),
                     "value_metric": "OPS", "confirmed": confirmed,
+                    "batting_side": (person.get("batSide") or {}).get("code"),
                 })
         return SourcePayload(entries, payload.source_url, payload.collected_at)
+
+    def batter_platoon(self, entries: list[dict[str, Any]], game: dict[str, Any]) -> SourcePayload:
+        """Fetch official current-season OPS versus the opposing starter's throwing hand."""
+        feed = self._game_feed(str(game["game_pk"]))
+        people = feed.data.get("gameData", {}).get("players", {})
+        pitcher_hands = {
+            side: (people.get(f"ID{game.get(f'{side}_pitcher_id')}", {}).get("pitchHand") or {}).get("code")
+            for side in ("away", "home")
+        }
+        output: dict[str, dict[str, Any]] = {}
+        urls: list[str] = []
+
+        def fetch(entry: dict[str, Any]) -> tuple[str, dict[str, Any], str]:
+            player_id = str(entry["player_id"])
+            opponent_side = "home" if entry["side"] == "away" else "away"
+            hand = pitcher_hands.get(opponent_side)
+            sit_code = "vl" if hand == "L" else "vr" if hand == "R" else None
+            if not sit_code:
+                return player_id, {}, feed.source_url
+            payload = self._get_json(f"/api/v1/people/{player_id}/stats", {
+                "stats": "statSplits", "group": "hitting", "season": str(game["game_date"].year),
+                "sitCodes": sit_code,
+            })
+            split = next((split for group in payload.data.get("stats", []) for split in group.get("splits", [])
+                          if (split.get("split") or {}).get("code") == sit_code), None)
+            stat = (split or {}).get("stat", {})
+            return player_id, {
+                "platoon_opponent_hand": hand,
+                "platoon_plate_appearances": _as_int(stat.get("plateAppearances"), 0) or 0,
+                "platoon_ops": _as_float(stat.get("ops")),
+            }, payload.source_url
+
+        eligible = [entry for entry in entries if entry.get("player_id") and entry.get("confirmed")]
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for future in as_completed([pool.submit(fetch, entry) for entry in eligible]):
+                player_id, data, url = future.result()
+                urls.append(url)
+                if data:
+                    output[player_id] = data
+        return SourcePayload(output, ", ".join(dict.fromkeys(urls)) or feed.source_url, datetime.now(KST))
+
+    def slate_context(self, target_date: date, games: list[dict[str, Any]]) -> SourcePayload:
+        """Official weather/venue and prior-three-day relief usage for one KST slate."""
+        schedule = self._get_json("/api/v1/schedule", {
+            "sportId": 1, "startDate": (target_date - timedelta(days=4)).isoformat(),
+            "endDate": (target_date - timedelta(days=1)).isoformat(), "gameTypes": "R",
+        })
+        prior = [item for group in schedule.data.get("dates", []) for item in group.get("games", [])
+                 if item.get("status", {}).get("abstractGameState") == "Final"]
+        workload: dict[str, dict[str, dict[str, Any]]] = {}
+        urls = [schedule.source_url]
+
+        def relief_rows(item: dict[str, Any]) -> tuple[list[tuple[str, str, str, int]], str]:
+            payload = self._game_feed(str(item["gamePk"]))
+            rows: list[tuple[str, str, str, int]] = []
+            game_day = _parse_datetime(item["gameDate"]).astimezone(KST).date()
+            days_ago = (target_date - game_day).days
+            if not 1 <= days_ago <= 3:
+                return rows, payload.source_url
+            for side in ("away", "home"):
+                team = payload.data.get("gameData", {}).get("teams", {}).get(side, {})
+                box = payload.data.get("liveData", {}).get("boxscore", {}).get("teams", {}).get(side, {})
+                for player_id in box.get("pitchers", []):
+                    player = box.get("players", {}).get(f"ID{player_id}", {})
+                    stat = player.get("stats", {}).get("pitching", {})
+                    if (_as_int(stat.get("gamesStarted"), 0) or 0) > 0:
+                        continue
+                    rows.append((str(team.get("id")), str(player_id),
+                                 player.get("person", {}).get("fullName", str(player_id)),
+                                 _as_int(stat.get("numberOfPitches"), 0) or 0, days_ago))
+            return rows, payload.source_url
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for future in as_completed([pool.submit(relief_rows, item) for item in prior]):
+                rows, url = future.result(); urls.append(url)
+                for team_id, player_id, name, pitches, days_ago in rows:
+                    arm = workload.setdefault(team_id, {}).setdefault(player_id, {"name": name, "days": {}})
+                    arm["days"][str(days_ago)] = arm["days"].get(str(days_ago), 0) + pitches
+
+        bullpen: dict[str, dict[str, Any]] = {}
+        for team_id, arms in workload.items():
+            day_totals = {day: sum(int(arm["days"].get(str(day), 0)) for arm in arms.values()) for day in (1, 2, 3)}
+            high_load = [arm["name"] for arm in arms.values()
+                         if int(arm["days"].get("1", 0)) >= 30 or
+                         (int(arm["days"].get("1", 0)) > 0 and int(arm["days"].get("2", 0)) > 0)]
+            fatigue = min(1.0, day_totals[1] / 140 * .65 + day_totals[2] / 160 * .25 + len(high_load) * .06)
+            bullpen[team_id] = {"available": True, "source": "OFFICIAL_BOX_SCORE", "pitches": day_totals,
+                                 "high_load_arms": high_load, "confirmed_unavailable_arms": [],
+                                 "fatigue_index": round(fatigue, 4),
+                                 "availability_basis": "official workload; manager availability is not inferred"}
+
+        output: dict[str, dict[str, Any]] = {}
+        for game in games:
+            feed = self._game_feed(str(game["game_pk"])); urls.append(feed.source_url)
+            game_data = feed.data.get("gameData", {})
+            venue = game_data.get("venue", {})
+            location = venue.get("location", {})
+            weather = game_data.get("weather") or {}
+            output[game["external_id"]] = {
+                "version": 1, "league": "MLB",
+                "weather": _weather_context(weather, venue.get("fieldInfo") or {}),
+                "venue": {"available": bool(venue), "name": venue.get("name"),
+                          "latitude": (location.get("defaultCoordinates") or {}).get("latitude"),
+                          "longitude": (location.get("defaultCoordinates") or {}).get("longitude"),
+                          "roof_type": (venue.get("fieldInfo") or {}).get("roofType"),
+                          "turf_type": (venue.get("fieldInfo") or {}).get("turfType"),
+                          "time_zone": (venue.get("timeZone") or {}).get("id")},
+                "bullpen": {side: bullpen.get(str(game[f"{side}_code"]), {
+                    "available": False, "source": "OFFICIAL_BOX_SCORE", "reason": "NO_PRIOR_RELIEF_USAGE",
+                    "fatigue_index": 0.0, "pitches": {1: 0, 2: 0, 3: 0},
+                    "high_load_arms": [], "confirmed_unavailable_arms": [],
+                }) for side in ("away", "home")},
+            }
+        return SourcePayload(output, ", ".join(dict.fromkeys(urls)), datetime.now(KST))
 
     def inning_lines(self, game_pks: list[str]) -> SourcePayload:
         """Fetch official inning lines from individual Gameday feeds in parallel."""
@@ -216,7 +374,7 @@ class MlbClient:
         collected = datetime.now(KST)
 
         def fetch(game_pk: str) -> tuple[str, dict[str, list[int | None]] | None, str, datetime]:
-            payload = self._get_json(f"/api/v1.1/game/{game_pk}/feed/live")
+            payload = self._game_feed(str(game_pk))
             innings = _linescore(payload.data.get("liveData", {}).get("linescore"))
             return game_pk, innings, payload.source_url, payload.collected_at
 
@@ -381,3 +539,23 @@ def _innings(value: Any) -> float:
     text = str(value or "0")
     whole, _, outs = text.partition(".")
     return float(whole or 0) + int(outs or 0) / 3
+
+
+def _weather_context(weather: dict[str, Any], field: dict[str, Any]) -> dict[str, Any]:
+    roof = str(field.get("roofType") or "")
+    if not weather:
+        return {"available": False, "reason": "PREGAME_WEATHER_NOT_PUBLISHED", "run_multiplier": 1.0}
+    temperature = _as_float(weather.get("temp"))
+    wind_text = str(weather.get("wind") or "")
+    speed = _as_float(wind_text.split(" ", 1)[0], 0.0) or 0.0
+    controlled = roof.lower() in {"dome", "closed"}
+    temp_effect = 0.0 if controlled or temperature is None else max(-.04, min(.04, (temperature - 70) * .002))
+    wind_effect = 0.0
+    if not controlled and "out" in wind_text.lower():
+        wind_effect = min(.045, speed * .003)
+    elif not controlled and "in " in wind_text.lower():
+        wind_effect = -min(.04, speed * .0025)
+    return {"available": True, "temperature_f": temperature, "condition": weather.get("condition"),
+            "wind": wind_text, "controlled_roof": controlled,
+            "run_multiplier": round(max(.92, min(1.08, 1 + temp_effect + wind_effect)), 4),
+            "method": "conservative temperature/wind adjustment capped at +/-8%"}

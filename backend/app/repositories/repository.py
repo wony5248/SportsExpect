@@ -151,7 +151,8 @@ def upsert_team_stat(session: Session, team: Team, effective_date: date, raw: di
     fields = ("games", "wins", "losses", "draws", "win_rate", "home_win_rate", "away_win_rate", "runs_per_game",
               "runs_allowed_per_game", "avg", "obp", "slg", "ops", "home_runs", "walks", "strikeouts", "era", "whip")
     values = {field: raw.get(field) for field in fields}
-    values.update(recent=recent, source=f"{team.league} official records", source_url=source_url, collected_at=collected_at)
+    values.update(recent=recent, advanced=raw.get("advanced") or {},
+                  source=f"{team.league} official records", source_url=source_url, collected_at=collected_at)
     if stat is None:
         stat = TeamStat(team_id=team.id, effective_date=effective_date, **values)
         session.add(stat)
@@ -233,7 +234,7 @@ def upsert_pitcher(session: Session, game: Game, raw: dict[str, Any], source_url
     values = {key: raw.get(key) for key in (
         "player_id", "name", "confirmed", "era", "whip", "war", "games", "avg_start_innings",
         "quality_starts", "fip", "k_bb_rate", "rest_days", "recent_pitches", "handedness",
-        "opponent_games", "opponent_innings", "opponent_era", "opponent_whip",
+        "opponent_games", "opponent_innings", "opponent_era", "opponent_whip", "recent",
     )}
     values.update(source=f"{game.league} official starter analysis", source_url=source_url, collected_at=collected_at)
     if stat is None:
@@ -278,6 +279,8 @@ def replace_lineups(session: Session, game: Game, entries: list[dict[str, Any]],
             game_id=game.id, side=raw["side"], batting_order=int(raw["batting_order"]),
             player_id=raw.get("player_id"), player_name=raw["player_name"], position=raw.get("position"),
             value=raw.get("value"), value_metric=raw.get("value_metric"), confirmed=bool(raw.get("confirmed")),
+            batting_side=raw.get("batting_side"), platoon_opponent_hand=raw.get("platoon_opponent_hand"),
+            platoon_plate_appearances=raw.get("platoon_plate_appearances"), platoon_ops=raw.get("platoon_ops"),
             opponent_pitcher_id=raw.get("opponent_pitcher_id"),
             matchup_plate_appearances=raw.get("matchup_plate_appearances"), matchup_avg=raw.get("matchup_avg"),
             matchup_at_bats=raw.get("matchup_at_bats"), matchup_hits=raw.get("matchup_hits"),
@@ -620,10 +623,11 @@ def _team_payload(team: Team, stat: TeamStat | None, pitcher: PitcherStat | None
             for window in ("5", "10", "20")
             if isinstance((value := recent.get(window)), dict)
         }
+        data["stats"]["advanced"] = stat.advanced or {}
     data["starter"] = ({key: getattr(pitcher, key) for key in (
         "player_id", "name", "confirmed", "era", "whip", "war", "games", "avg_start_innings", "quality_starts",
         "fip", "k_bb_rate", "rest_days", "recent_pitches", "handedness"
-        , "opponent_games", "opponent_innings", "opponent_era", "opponent_whip"
+        , "opponent_games", "opponent_innings", "opponent_era", "opponent_whip", "recent"
     )} if pitcher else None)
     return data
 
@@ -674,6 +678,8 @@ def _lineup_payload(item: LineupEntry) -> dict[str, Any]:
             "matchup_home_runs": item.matchup_home_runs, "matchup_walks": item.matchup_walks,
             "matchup_hit_by_pitch": item.matchup_hit_by_pitch, "matchup_strikeouts": item.matchup_strikeouts,
             "matchup_obp": item.matchup_obp, "matchup_slg": item.matchup_slg, "matchup_ops": item.matchup_ops,
+            "batting_side": item.batting_side, "platoon_opponent_hand": item.platoon_opponent_hand,
+            "platoon_plate_appearances": item.platoon_plate_appearances, "platoon_ops": item.platoon_ops,
             "collected_at": _iso(item.collected_at)}
 
 

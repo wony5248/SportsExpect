@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session, joinedload
 from backend.app.models import Game, GameResult, MarketSnapshot, Prediction, PredictionSnapshot
 from backend.app.services.team_residuals import (ResidualObservation, apply_residual_adjustment, available_before,
                                                  baseline_expected_runs, probability_from_run_means,
-                                                 residual_context, RESIDUAL_ENABLED_LEAGUES)
+                                                 residual_context, RESIDUAL_ENABLED_LEAGUES,
+                                                 _prediction_regime)
 
 
 EXACT_CHECKPOINT_STAGES = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_15M"}
@@ -94,6 +95,7 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
             "baseline_probability": empirical_home, "outcome": outcome,
             "home_run_error": prediction.home_expected_runs - result.home_score,
             "away_run_error": prediction.away_expected_runs - result.away_score,
+            "context_features": _context_availability(prediction.payload or {}),
             **_run_distribution_fields(prediction, result),
         })
         history.append((prediction.home_win_probability, outcome))
@@ -188,6 +190,7 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
                        "the August 23 residual policy retrospectively to measure counterfactual lift."),
             "lower_is_better": ["runs_mae", "runs_rmse", "brier_score", "log_loss", "calibration_error"],
         },
+        "context_feature_monitoring": _context_feature_monitoring(evaluated),
         "market_consensus_baseline": market_metrics,
         "by_league": {key: _metrics(value, "probability") for key, value in by_league.items()},
         "model_leaderboard": sorted(
@@ -214,6 +217,7 @@ def _residual_walk_forward(
         context = residual_context(
             eligible, game.home_team_id, game.away_team_id, game.game_date,
             latest_game_id=eligible[-1].game_id if eligible else None, force_enabled=True,
+            regime=_prediction_regime(prediction.payload or {}, game.game_date),
         )
         adjusted_home, adjusted_away = apply_residual_adjustment(baseline_home, baseline_away, context)
         outcome = 1.0 if result.home_score > result.away_score else (
@@ -237,6 +241,7 @@ def _residual_walk_forward(
             home_team_id=game.home_team_id, away_team_id=game.away_team_id,
             home_expected=baseline_home, away_expected=baseline_away,
             home_actual=result.home_score, away_actual=result.away_score,
+            **_prediction_regime(prediction.payload or {}, game.game_date),
         ))
     if not baseline_rows:
         return {"sample_size": 0, "baseline": {"sample_size": 0}, "adjusted": {"sample_size": 0}}
@@ -270,6 +275,34 @@ def _readiness(evaluable: int, completed: int) -> dict[str, Any]:
         "recommended_minimum": 500,
         "status": "READY" if evaluable >= 500 else ("PRELIMINARY" if evaluable >= 200 else "COLLECTING"),
     }
+
+
+def _context_availability(payload: dict[str, Any]) -> dict[str, bool]:
+    features = payload.get("features") or {}
+    return {
+        "official_bullpen": bool(features.get("bullpen_workload_available")),
+        "weather": bool(features.get("weather_available")),
+        "platoon": min(int(features.get("home_lineup_platoon_coverage", 0)),
+                       int(features.get("away_lineup_platoon_coverage", 0))) >= 5,
+        "starter_recent": bool(features.get("starter_recent_form_available")),
+        "fielding_running_catcher": bool(features.get("advanced_team_data_available")),
+        "schedule_fatigue": bool(((payload.get("pregame_context") or {}).get("availability") or {}).get("schedule")),
+    }
+
+
+def _context_feature_monitoring(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    names = sorted({name for row in rows for name in (row.get("context_features") or {})})
+    output: dict[str, Any] = {}
+    for name in names:
+        sample = [row for row in rows if (row.get("context_features") or {}).get(name)]
+        output[name] = {
+            "sample_size": len(sample),
+            "status": "READY" if len(sample) >= 200 else "COLLECTING",
+            "minimum_sample_size": 200,
+            "metrics": _metrics(sample, "probability") if sample else {"sample_size": 0},
+            "note": "항목 적용 경기의 순방향 성능 감시이며, 동일 경기 비활성 스냅샷이 쌓이면 paired ablation으로 승격",
+        }
+    return output
 
 
 def _paired_delta(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> dict[str, Any]:

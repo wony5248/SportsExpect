@@ -32,6 +32,9 @@ TRAINABLE_FEATURES = [
     "starter_rest_days_diff", "recent_pitch_burden_diff", "rest_days_diff",
     "doubleheader_diff", "head_to_head_diff", "head_to_head_run_diff",
     "starter_opponent_era_diff", "park_factor", "lineup_strength_diff", "lineup_bvp_diff",
+    "bullpen_fatigue_edge", "schedule_fatigue_edge", "lineup_platoon_diff",
+    "starter_recent_era_diff", "starter_recent_k_bb_diff", "fielding_edge", "baserunning_edge", "catcher_control_edge",
+    "weather_run_multiplier",
     "home_starter_confirmed", "away_starter_confirmed", "home_lineup_confirmed",
     "away_lineup_confirmed", "recent_home_games", "recent_away_games",
 ]
@@ -244,7 +247,7 @@ def _train_candidate(session: Session, league: str, samples: list[dict[str, Any]
     checksum = hashlib.sha256(json.dumps(checksum_payload, sort_keys=True).encode()).hexdigest()
     model = ModelVersion(
         name=name, algorithm="standardized L2 logistic win classifier + ridge home/away run regressors; chronological holdout",
-        feature_schema={"version": 4, "features": TRAINABLE_FEATURES}, checksum=checksum, created_at=now,
+        feature_schema={"version": 5, "features": TRAINABLE_FEATURES}, checksum=checksum, created_at=now,
     )
     session.add(model)
     session.flush()
