@@ -676,14 +676,18 @@ def test_classifier_blend_flips_marginal_runs_favorite_when_records_disagree():
     assert tempered_home < 6.9
 
 
-def test_representative_score_is_exact_simulation_mode():
+def test_representative_score_balances_frequency_with_matchup_shape():
     scores = [
         {"away": 3, "home": 4, "probability": .08},
         {"away": 4, "home": 6, "probability": .06},
         {"away": 5, "home": 3, "probability": .07},
     ]
     selected = select_primary_score(scores, home_expected=5.6, away_expected=4.2, home_win_probability=.61)
-    assert selected == scores[0]
+    assert selected["away"] == 4
+    assert selected["home"] == 6
+    assert selected["probability"] == .06
+    assert selected["selection_method"] == "BALANCED_LIKELIHOOD_V1"
+    assert 0 < selected["selection_score"] <= 1
 
 
 def test_score_estimates_combine_mean_mode_and_weighted_top_scores():
@@ -744,17 +748,24 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     score = after["payload"]["display_expected_score"]
     assert after["expected_total"] == round(score["away"] + score["home"], 1)
     assert after["statistical_expected_total"] == round(after["home_expected_runs"] + after["away_expected_runs"], 2)
-    assert after["payload"]["summary_schema_version"] == 9
+    assert after["payload"]["summary_schema_version"] == 10
     assert after["payload"]["coherence_valid"] is True
-    assert after["payload"]["primary_score"] == after["payload"]["top_scores"][0]
+    assert any(
+        score["away"] == after["payload"]["primary_score"]["away"]
+        and score["home"] == after["payload"]["primary_score"]["home"]
+        for score in after["payload"]["top_scores"]
+    )
+    assert after["payload"]["primary_score"]["selection_method"] == "BALANCED_LIKELIHOOD_V1"
     estimates = after["payload"]["score_estimates"]
     # Hybrid headline: the displayed score is the distribution mean, while the exact-score
     # mode and the top-5 weighted average travel alongside it for the UI.
     assert after["payload"]["display_expected_score"] == estimates["mean"]
     assert estimates["headline"] == "MEAN"
-    assert estimates["mode"]["away"] == after["payload"]["primary_score"]["away"]
-    assert estimates["mode"]["home"] == after["payload"]["primary_score"]["home"]
+    assert estimates["mode"]["away"] == after["payload"]["top_scores"][0]["away"]
+    assert estimates["mode"]["home"] == after["payload"]["top_scores"][0]["home"]
     assert 0 < estimates["mode"]["probability"] <= 1
+    assert estimates["representative"]["away"] == after["payload"]["primary_score"]["away"]
+    assert estimates["representative"]["home"] == after["payload"]["primary_score"]["home"]
     weighted = estimates["top5_weighted"]
     assert weighted["scores_used"] == 5
     assert 0 < weighted["coverage_probability"] <= 1

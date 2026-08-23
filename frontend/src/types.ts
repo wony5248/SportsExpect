@@ -90,6 +90,7 @@ export type Prediction = {
     mean: { away: number; home: number }
     top5_weighted: null | { away: number; home: number; scores_used: number; coverage_probability: number }
     mode: { away: number; home: number; count?: number | null; probability?: number | null }
+    representative?: { away: number; home: number; count?: number | null; probability?: number | null; selection_method?: string; selection_score?: number | null }
   }
   confidence: number
   confidence_label: 'HIGH' | 'MEDIUM' | 'LOW'
@@ -148,6 +149,8 @@ export type SimulatedScore = {
   away: number
   count?: number
   probability: number | null
+  selection_method?: string
+  selection_score?: number | null
   trajectory_count?: number
   trajectory_probability_given_score?: number
   inning_line?: {

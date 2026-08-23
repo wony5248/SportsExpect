@@ -64,7 +64,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     ]
     input_data = {
         "game": game.external_id,
-        "simulation_summary_schema": 9,
+        "simulation_summary_schema": 10,
         "features": features,
         "home_expected": round(base_home_runs, 6),
         "away_expected": round(base_away_runs, 6),
@@ -142,7 +142,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "statistical_expected_total": round(round(home_runs, 2) + round(away_runs, 2), 2),
         "confidence": confidence,
         "payload": {
-            "summary_schema_version": 9,
+            "summary_schema_version": 10,
             "coherence_valid": True,
             "probability_source": (
                 "extra_innings_simulation_mlb_tiebreaker_no_ties" if game.league == "MLB"
@@ -221,12 +221,48 @@ def blend_classifier_into_means(logistic: float, home_runs: float, away_runs: fl
 
 def select_primary_score(top_scores: list[dict[str, Any]], home_expected: float, away_expected: float,
                          home_win_probability: float) -> dict[str, Any]:
-    """Return the exact final score observed most often in the simulation."""
+    """Choose a likely, game-specific exact score from the simulated leaders.
+
+    Exact-score modes naturally bunch around baseball's low-score center.  Frequency remains
+    the strongest signal, while closeness to this matchup's run means, expected total and
+    favored side keep the displayed score representative of this particular game.
+    """
     if not top_scores:
-        return {"home": round(home_expected), "away": round(away_expected), "probability": None}
-    # simulate_scores orders this list by the unrounded occurrence count. Do not
-    # replace the mode with a hand-picked score near the mean or favored winner.
-    return top_scores[0]
+        return {
+            "home": round(home_expected), "away": round(away_expected), "probability": None,
+            "selection_method": "BALANCED_LIKELIHOOD_V1", "selection_score": None,
+        }
+
+    def evidence(score: dict[str, Any]) -> float:
+        probability = score.get("probability")
+        return float(probability if probability is not None else score.get("count") or 0)
+
+    max_evidence = max(evidence(score) for score in top_scores) or 1.0
+    expected_total = home_expected + away_expected
+    favorite_strength = min(1.0, abs(home_win_probability - .5) / .15)
+    favored_home = home_win_probability >= .5
+
+    def candidate_fit(score: dict[str, Any]) -> tuple[float, float, float]:
+        home, away = float(score["home"]), float(score["away"])
+        team_error = abs(home - home_expected) + abs(away - away_expected)
+        frequency_fit = evidence(score) / max_evidence
+        team_fit = 1 / (1 + team_error / 2)
+        total_fit = 1 / (1 + abs((home + away) - expected_total) / 2)
+        direction_matches = (home > away) == favored_home if home != away else None
+        direction_fit = .4 if direction_matches is None else (1.0 if direction_matches else 0.0)
+        direction_fit = (1 - favorite_strength) * .5 + favorite_strength * direction_fit
+        selection_score = (
+            .50 * frequency_fit
+            + .25 * team_fit
+            + .15 * total_fit
+            + .10 * direction_fit
+        )
+        return selection_score, evidence(score), -team_error
+
+    selected = dict(max(top_scores, key=candidate_fit))
+    selected["selection_method"] = "BALANCED_LIKELIHOOD_V1"
+    selected["selection_score"] = round(candidate_fit(selected)[0], 6)
+    return selected
 
 
 def build_score_estimates(top_scores: list[dict[str, Any]], primary_score: dict[str, Any],
@@ -238,12 +274,21 @@ def build_score_estimates(top_scores: list[dict[str, Any]], primary_score: dict[
     - top5_weighted: occurrence-weighted average of the five most frequent exact scores,
       an integer-anchored middle ground between mode and mean.
     - mode: the single most frequent exact score with its honest (low) probability.
+    - representative: a high-frequency score balanced against the matchup-specific run means,
+      total and favored side.
     """
+    mode_score = top_scores[0] if top_scores else primary_score
     estimates: dict[str, Any] = {
         "headline": "MEAN",
         "mean": {"away": round(away_expected, 1), "home": round(home_expected, 1)},
-        "mode": {"away": primary_score["away"], "home": primary_score["home"],
-                 "count": primary_score.get("count"), "probability": primary_score.get("probability")},
+        "mode": {"away": mode_score["away"], "home": mode_score["home"],
+                 "count": mode_score.get("count"), "probability": mode_score.get("probability")},
+        "representative": {
+            "away": primary_score["away"], "home": primary_score["home"],
+            "count": primary_score.get("count"), "probability": primary_score.get("probability"),
+            "selection_method": primary_score.get("selection_method"),
+            "selection_score": primary_score.get("selection_score"),
+        },
     }
     candidates = top_scores[:5]
     weight = sum(int(score.get("count") or 0) for score in candidates)
