@@ -9,8 +9,9 @@ from backend.app.config import KST
 from backend.app.database import SessionLocal, database_now, session_scope
 from backend.app.models import Game, PredictionSnapshot
 from backend.app.services.operations import job_lock
-from backend.app.services.refresh import (backfill_batter_splits, backfill_kbo_innings, refresh_kbo,
-                                          refresh_market, refresh_mlb)
+from backend.app.services.refresh import (backfill_batter_splits, backfill_kbo_innings,
+                                          backfill_mlb_innings, refresh_kbo, refresh_market,
+                                          refresh_mlb)
 from backend.app.services.model_lifecycle import run_model_lifecycle
 from backend.app.services.historical_replay import run_historical_replay
 
@@ -120,7 +121,7 @@ def run_lifecycle_refresh(league: str) -> dict[str, Any]:
 
 def run_replay_refresh(league: str, limit: int = 10) -> dict[str, Any]:
     with job_lock(f"historical-replay:{league}"):
-        innings = backfill_kbo_innings(limit) if league == "KBO" else None
+        innings = backfill_kbo_innings(limit) if league == "KBO" else backfill_mlb_innings(limit)
         with session_scope() as session:
             return {**run_historical_replay(session, league, limit=limit), "inning_backfill": innings}
 

@@ -25,7 +25,7 @@ from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batt
                                                _pitcher_opponent_split, _rank_table, _record_rate,
                                                _scoreboard_innings)
 from backend.app.collectors.kbo.client import SourcePayload
-from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient
+from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient, _linescore
 from backend.app.collectors.odds import _consensus_event
 from backend.app.services.feature_engineering import _effective_lineup_ops, _lineup_matchup_summary
 from backend.app.services.refresh import (SPLIT_FETCH_BUDGET, _collect_batter_splits, _market_event_date,
@@ -74,6 +74,14 @@ def test_kbo_scoreboard_inning_rows_are_parsed_and_trailing_blanks_removed():
     ]}
     result = _scoreboard_innings({"code": "100", "table2": json.dumps(table)})
     assert result == {"away": [1, 0, 2], "home": [0, 1, 0]}
+
+
+def test_mlb_linescore_is_normalized_for_result_flow_comparison():
+    assert _linescore({"innings": [
+        {"away": {"runs": 1}, "home": {"runs": 0}},
+        {"away": {"runs": 0}, "home": {"runs": 2}},
+    ]}) == {"away": [1, 0], "home": [0, 2]}
+    assert _linescore(None) is None
 
 
 def test_stored_simulation_recipe_reproduces_actual_result_frequencies():

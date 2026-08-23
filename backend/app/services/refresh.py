@@ -477,6 +477,56 @@ def backfill_kbo_innings(limit: int = 10, target_date: date | None = None,
     return {"requested": len(targets), "written": written, "errors": errors}
 
 
+def backfill_mlb_innings(limit: int = 50, client: MlbClient | None = None) -> dict[str, Any]:
+    """Fill missing MLB inning lines from the official season schedule linescore."""
+    init_db()
+    own_client = client is None
+    client = client or MlbClient()
+    query = select(Game.external_id, Game.game_date).join(
+        GameResult, GameResult.game_id == Game.id,
+    ).where(Game.league == "MLB", GameResult.innings.is_(None))
+    with SessionLocal() as session:
+        targets = session.execute(query.order_by(Game.game_date.desc()).limit(limit)).all()
+    if not targets:
+        if own_client:
+            client.close()
+        return {"requested": 0, "written": 0, "errors": []}
+
+    target_ids = {external_id for external_id, _ in targets}
+    official: dict[str, tuple[dict[str, Any], str]] = {}
+    errors: list[str] = []
+    try:
+        for season in sorted({game_date.year for _, game_date in targets}):
+            try:
+                source = client.season_games(season)
+                official.update({
+                    row["external_id"]: (row["innings"], source.source_url)
+                    for row in source.data
+                    if row["external_id"] in target_ids and row.get("innings")
+                })
+            except Exception as exc:
+                errors.append(f"{season}: {type(exc).__name__}: {exc}")
+    finally:
+        if own_client:
+            client.close()
+
+    written = 0
+    if official:
+        with session_scope() as session:
+            games = {
+                game.external_id: game
+                for game in session.scalars(select(Game).where(Game.external_id.in_(list(official)))).all()
+            }
+            for external_id, (innings, source_url) in official.items():
+                game = games.get(external_id)
+                result = session.get(GameResult, game.id) if game else None
+                if result and result.innings is None:
+                    result.innings = innings
+                    result.source_url = source_url
+                    written += 1
+    return {"requested": len(targets), "written": written, "errors": errors}
+
+
 def _optional(action: Callable[[], Any], default: Any, label: str, errors: list[str]) -> Any:
     """Run an optional enrichment, degrading instead of taking the whole refresh down.
 
