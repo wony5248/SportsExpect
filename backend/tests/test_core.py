@@ -84,6 +84,24 @@ def test_mlb_linescore_is_normalized_for_result_flow_comparison():
     assert _linescore(None) is None
 
 
+def test_mlb_individual_feeds_fill_lines_missing_from_season_schedule():
+    def handler(request: httpx.Request) -> httpx.Response:
+        game_pk = request.url.path.split("/")[-3]
+        return httpx.Response(200, json={"liveData": {"linescore": {"innings": [
+            {"away": {"runs": int(game_pk) % 2}, "home": {"runs": 1}},
+        ]}}})
+
+    client = MlbClient(transport=httpx.MockTransport(handler))
+    try:
+        source = client.inning_lines(["10", "11"])
+    finally:
+        client.close()
+    assert source.data == {
+        "MLB-10": {"away": [0], "home": [1]},
+        "MLB-11": {"away": [1], "home": [1]},
+    }
+
+
 def test_stored_simulation_recipe_reproduces_actual_result_frequencies():
     recipe = {
         "home_expected": 4.8, "away_expected": 4.1, "simulations": 5_000, "seed": 2026,

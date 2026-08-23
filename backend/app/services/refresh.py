@@ -506,6 +506,16 @@ def backfill_mlb_innings(limit: int = 50, client: MlbClient | None = None) -> di
                 })
             except Exception as exc:
                 errors.append(f"{season}: {type(exc).__name__}: {exc}")
+        unresolved = [external_id.removeprefix("MLB-") for external_id in target_ids - set(official)]
+        if unresolved:
+            try:
+                source = client.inning_lines(unresolved)
+                official.update({
+                    external_id: (innings, source.source_url)
+                    for external_id, innings in source.data.items()
+                })
+            except Exception as exc:
+                errors.append(f"individual feeds: {type(exc).__name__}: {exc}")
     finally:
         if own_client:
             client.close()

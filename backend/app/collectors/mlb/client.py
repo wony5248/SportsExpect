@@ -209,6 +209,27 @@ class MlbClient:
                 })
         return SourcePayload(entries, payload.source_url, payload.collected_at)
 
+    def inning_lines(self, game_pks: list[str]) -> SourcePayload:
+        """Fetch official inning lines from individual Gameday feeds in parallel."""
+        output: dict[str, dict[str, list[int | None]]] = {}
+        urls: list[str] = []
+        collected = datetime.now(KST)
+
+        def fetch(game_pk: str) -> tuple[str, dict[str, list[int | None]] | None, str, datetime]:
+            payload = self._get_json(f"/api/v1.1/game/{game_pk}/feed/live")
+            innings = _linescore(payload.data.get("liveData", {}).get("linescore"))
+            return game_pk, innings, payload.source_url, payload.collected_at
+
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(game_pks)))) as executor:
+            futures = [executor.submit(fetch, game_pk) for game_pk in game_pks]
+            for future in as_completed(futures):
+                game_pk, innings, source_url, fetched_at = future.result()
+                urls.append(source_url)
+                collected = max(collected, fetched_at)
+                if innings:
+                    output[f"MLB-{game_pk}"] = innings
+        return SourcePayload(output, ", ".join(urls), collected)
+
     def batter_splits(self, player_ids: list[str], season: int) -> SourcePayload:
         """Fetch each hitter's official base-state splits for the season.
 
