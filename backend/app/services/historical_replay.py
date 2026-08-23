@@ -9,7 +9,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from backend.app.config import KST
-from backend.app.models import Game, GameResult, LineupEntry, PitcherStat, Prediction, Team
+from backend.app.models import (Game, GameResult, LineupEntry, PitcherStat, Prediction,
+                                PredictionEvaluation, Team)
 from backend.app.repositories.repository import save_prediction
 from backend.app.services.prediction import predict_game
 from backend.app.services.prediction_evaluation import evaluate_game_predictions
@@ -38,26 +39,46 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
     by_game: dict[int, list[Prediction]] = defaultdict(list)
     for prediction in predictions:
         by_game[prediction.game_id].append(prediction)
+    evaluated_prediction_ids = set(session.scalars(
+        select(PredictionEvaluation.prediction_id).join(
+            Prediction, Prediction.id == PredictionEvaluation.prediction_id,
+        ).join(Game, Game.id == Prediction.game_id).where(Game.league == league)
+    ).all())
 
-    created = evaluated = skipped_live = skipped_existing = skipped_history = 0
+    created = evaluated = skipped_live = skipped_existing = legacy_live_replayed = cold_start_created = 0
     processed: list[str] = []
     for game, result in candidates:
         stored = by_game.get(game.id, [])
-        if any(row.origin == "LIVE_PREGAME" and _before_start(row, game) for row in stored):
-            evaluated += evaluate_game_predictions(session, game, result)
-            skipped_live += 1
-            continue
-        if any(row.origin == "HISTORICAL_REPLAY" for row in stored):
-            evaluated += evaluate_game_predictions(session, game, result)
+        needs_legacy_replay = False
+        live_predictions = [
+            row for row in stored
+            if row.origin == "LIVE_PREGAME" and _before_start(row, game)
+        ]
+        if live_predictions:
+            # Forecasts saved before full simulation populations were persisted cannot be
+            # evaluated exactly after the game. Preserve those live forecasts, but also create
+            # a clearly labelled retrospective replay so archive cards can still show exact
+            # 20,000-run result frequencies without pretending they came from the old forecast.
+            exact_live = [row for row in live_predictions if _has_exact_simulation_population(row)]
+            if exact_live:
+                if any(row.id not in evaluated_prediction_ids for row in exact_live):
+                    evaluated += evaluate_game_predictions(session, game, result)
+                    evaluated_prediction_ids.update(row.id for row in exact_live)
+                skipped_live += 1
+                continue
+            needs_legacy_replay = True
+        existing_replays = [row for row in stored if row.origin == "HISTORICAL_REPLAY"]
+        if existing_replays:
+            if any(row.id not in evaluated_prediction_ids for row in existing_replays):
+                evaluated += evaluate_game_predictions(session, game, result)
+                evaluated_prediction_ids.update(row.id for row in existing_replays)
             skipped_existing += 1
             continue
         prior = [(prior_game, prior_result) for prior_game, prior_result in history
                  if prior_game.game_date.year == game.game_date.year and _game_before(prior_game, game)]
         home = _reconstructed_team_stat(game.home_team, game, prior)
         away = _reconstructed_team_stat(game.away_team, game, prior)
-        if home.games < 5 or away.games < 5:
-            skipped_history += 1
-            continue
+        cold_start = home.games < 5 or away.games < 5
         cutoff = game.start_at
         pitchers = session.scalars(select(PitcherStat).where(
             PitcherStat.game_id == game.id, PitcherStat.collected_at <= cutoff,
@@ -75,6 +96,8 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             "future_games_used": 0,
             "home_prior_games": home.games,
             "away_prior_games": away.games,
+            "history_sufficient": not cold_start,
+            "cold_start": cold_start,
             "pregame_pitchers_used": len(pitchers),
             "pregame_lineup_entries_used": len(lineups),
             "official_metric": False,
@@ -99,13 +122,16 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
         by_game[game.id].append(prediction)
         evaluated += evaluate_game_predictions(session, game, result)
         created += 1
+        legacy_live_replayed += int(needs_legacy_replay)
+        cold_start_created += int(cold_start)
         processed.append(game.external_id)
         if created >= limit:
             break
     return {
         "league": league, "created": created, "evaluations_created": evaluated,
         "skipped_live": skipped_live, "skipped_existing_replay": skipped_existing,
-        "skipped_insufficient_history": skipped_history, "limit": limit,
+        "skipped_insufficient_history": 0, "cold_start_created": cold_start_created,
+        "legacy_live_replayed": legacy_live_replayed, "limit": limit,
         "games": processed,
         "disclosure": "과거 재현은 경기 전 데이터만 복원한 회고 시뮬레이션이며 당시 저장된 실전 예측과 분리됩니다.",
     }
@@ -192,6 +218,11 @@ def _game_before(candidate: Game, target: Game) -> bool:
 
 def _before_start(prediction: Prediction, game: Game) -> bool:
     return bool(game.start_at and _naive(prediction.data_cutoff or prediction.created_at) <= _naive(game.start_at))
+
+
+def _has_exact_simulation_population(prediction: Prediction) -> bool:
+    payload = prediction.payload or {}
+    return isinstance(payload.get("simulation_recipe"), dict) or isinstance(payload.get("frequency_tables"), dict)
 
 
 def _naive(value: datetime) -> datetime:

@@ -183,6 +183,7 @@ export type Game = {
     innings?: null | { away: (number | null)[]; home: (number | null)[] }
   }
   prediction: Prediction | null
+  replay_prediction: Prediction | null
   market: null | {
     provider: string
     bookmaker_count: number

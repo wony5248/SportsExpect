@@ -136,6 +136,82 @@ def test_historical_replay_is_audited_evaluated_and_serialized_separately():
         assert card["prediction"]["evaluation"]["actual_score_count"] >= 0
 
 
+def test_legacy_live_forecast_keeps_original_and_adds_separate_exact_replay():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        away = Team(league="MLB", code="AW", name="Away")
+        home = Team(league="MLB", code="HM", name="Home")
+        session.add_all([away, home]); session.flush()
+        base = datetime(2026, 4, 1, 18, 30)
+        target = None
+        for index in range(6):
+            start = base + timedelta(days=index)
+            game = Game(
+                external_id=f"LEGACY-REPLAY-{index}", league="MLB", game_date=start.date(),
+                start_at=start, start_time=start.time(), away_team_id=away.id, home_team_id=home.id,
+                status="FINAL", source="test", source_url="test", collected_at=start + timedelta(hours=3),
+            )
+            session.add(game); session.flush()
+            session.add(GameResult(
+                game_id=game.id, away_score=3, home_score=5,
+                finalized_at=start + timedelta(hours=3), source_url="test",
+            ))
+            target = game
+        legacy_model = ModelVersion(
+            name="MLB_LEGACY_TEST", algorithm="legacy", feature_schema={}, checksum="legacy-test",
+        )
+        session.add(legacy_model); session.flush()
+        session.add(Prediction(
+            game_id=target.id, model_version_id=legacy_model.id, input_hash="legacy-input",
+            origin="LIVE_PREGAME", data_cutoff=target.start_at - timedelta(hours=1),
+            home_win_probability=.6, away_win_probability=.4,
+            home_expected_runs=5.0, away_expected_runs=3.0, confidence=.5,
+            # Schema 4 forecasts predate stored recipes and full frequency tables.
+            payload={"summary_schema_version": 4, "model": {"name": "MLB_MATCHUP_V10"}},
+            created_at=target.start_at - timedelta(hours=1),
+        ))
+        session.flush()
+
+        report = run_historical_replay(session, "MLB", limit=1)
+        assert report["created"] == 1
+        assert report["legacy_live_replayed"] == 1
+        card = game_cards(session, target.game_date, "MLB")[0]
+        assert card["prediction"]["origin"] == "LIVE_PREGAME"
+        assert card["prediction"]["evaluation"] is None
+        assert card["replay_prediction"]["origin"] == "HISTORICAL_REPLAY"
+        assert card["replay_prediction"]["evaluation"]["simulation_count"] == settings.simulations
+
+
+def test_historical_replay_covers_leakage_safe_season_cold_start():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        away = Team(league="KBO", code="AW", name="Away")
+        home = Team(league="KBO", code="HM", name="Home")
+        session.add_all([away, home]); session.flush()
+        start = datetime(2026, 3, 28, 14, 0)
+        game = Game(
+            external_id="COLD-START-1", league="KBO", game_date=start.date(),
+            start_at=start, start_time=start.time(), away_team_id=away.id, home_team_id=home.id,
+            status="FINAL", source="test", source_url="test", collected_at=start + timedelta(hours=3),
+        )
+        session.add(game); session.flush()
+        session.add(GameResult(
+            game_id=game.id, away_score=2, home_score=4,
+            finalized_at=start + timedelta(hours=3), source_url="test",
+        ))
+        session.flush()
+
+        report = run_historical_replay(session, "KBO", limit=10)
+        assert report["created"] == 1
+        assert report["cold_start_created"] == 1
+        prediction = session.scalar(select(Prediction).where(Prediction.game_id == game.id))
+        assert prediction.leakage_audit["passed"] is True
+        assert prediction.leakage_audit["history_sufficient"] is False
+        assert prediction.leakage_audit["target_result_used_as_input"] is False
+
+
 def test_month_range_crosses_year_boundary():
     assert _months_for_recent(date(2026, 1, 10), 80) == [(2025, 10), (2025, 11), (2025, 12), (2026, 1)]
 

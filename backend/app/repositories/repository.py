@@ -440,7 +440,8 @@ def _game_serialization_context(session: Session, games: list[Game]) -> dict[str
     empty: dict[Any, Any] = {}
     if not game_ids:
         return {
-            "predictions": empty, "prediction_history": empty, "predictions_by_id": empty,
+            "predictions": empty, "replay_predictions": empty,
+            "prediction_history": empty, "predictions_by_id": empty,
             "pitchers": empty, "lineups": empty, "team_stats": empty, "results": empty,
             "markets": empty, "snapshots": empty, "evaluations": empty,
         }
@@ -495,9 +496,16 @@ def _game_serialization_context(session: Session, games: list[Game]) -> dict[str
             game, predictions_by_game.get(game.id, []), results.get(game.id),
         )) is not None
     }
+    replay_predictions = {
+        game.id: replay
+        for game in games
+        if (replay := next((row for row in predictions_by_game.get(game.id, [])
+                            if row.origin == "HISTORICAL_REPLAY" and
+                            bool((row.leakage_audit or {}).get("passed"))), None)) is not None
+    }
 
     return {
-        "predictions": display_predictions,
+        "predictions": display_predictions, "replay_predictions": replay_predictions,
         "prediction_history": {game_id: rows[:10] for game_id, rows in predictions_by_game.items()},
         "predictions_by_id": predictions_by_id,
         "pitchers": pitchers_by_game,
@@ -528,6 +536,7 @@ def _display_prediction(game: Game, predictions: list[Prediction], result: GameR
 
 def _serialize_game(game: Game, context: dict[str, Any]) -> dict[str, Any]:
     prediction = context["predictions"].get(game.id)
+    replay_prediction = context["replay_predictions"].get(game.id)
     pitchers = context["pitchers"].get(game.id, [])
     lineups = context["lineups"].get(game.id, [])
     pitcher_map = {p.side: p for p in pitchers}
@@ -550,6 +559,9 @@ def _serialize_game(game: Game, context: dict[str, Any]) -> dict[str, Any]:
                     **({"innings": result.innings} if result.innings is not None else {})}
                    if result else None),
         "prediction": _prediction_payload(prediction, context["evaluations"].get(prediction.id)) if prediction else None,
+        "replay_prediction": (_prediction_payload(
+            replay_prediction, context["evaluations"].get(replay_prediction.id),
+        ) if replay_prediction and (not prediction or replay_prediction.id != prediction.id) else None),
         "market": _market_payload(market, prediction) if market else None,
         "prediction_history": _history_payload(context["prediction_history"].get(game.id, []), snapshots),
         "prediction_timeline": _timeline_payload(context["predictions_by_id"], snapshots),
