@@ -23,7 +23,8 @@ from backend.app.services.feature_engineering import _effective_lineup_ops, _lin
 from backend.app.services.refresh import (_market_event_date, _market_refresh_due, _months_for_recent,
                                           _prediction_stage, _recent_by_team)
 from backend.app.services.simulation import simulate_scores
-from backend.app.services.prediction import build_score_estimates, predict_game, select_primary_score
+from backend.app.services.prediction import (blend_classifier_into_means, build_score_estimates,
+                                             predict_game, select_primary_score)
 from backend.app.services.jobs import _missing_leagues_for_date, checkpoint_stage_for_minutes
 from backend.app.services.model_lifecycle import _promotion_decision, predict_with_runtime
 from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
@@ -320,6 +321,23 @@ def test_kbo_plays_to_eleven_and_keeps_ties():
     assert all(len(score["inning_line"]) <= 11 for score in result["top_scores"])
 
 
+def test_classifier_blend_flips_marginal_runs_favorite_when_records_disagree():
+    # Runs model barely favors home (5.54 vs 5.43) but the classifier strongly favors away
+    # (better record, form, and starter) - mirroring the LG @ Hanwha case.
+    home_runs, away_runs = blend_classifier_into_means(.399, 5.54, 5.43)
+    assert home_runs < away_runs
+    # The expected total is preserved by the tilt.
+    assert abs((home_runs + away_runs) - (5.54 + 5.43)) < 1e-9
+    # When both signals agree, the tilt is small and direction is unchanged.
+    agree_home, agree_away = blend_classifier_into_means(.62, 5.2, 4.4)
+    assert agree_home > agree_away
+    assert abs(agree_home - 5.2) < .45
+    # A neutral classifier pulls an extreme runs edge only modestly, never past even.
+    tempered_home, tempered_away = blend_classifier_into_means(.5, 6.9, 2.6)
+    assert tempered_home > tempered_away
+    assert tempered_home < 6.9
+
+
 def test_representative_score_is_exact_simulation_mode():
     scores = [
         {"away": 3, "home": 4, "probability": .08},
@@ -388,7 +406,7 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     score = after["payload"]["display_expected_score"]
     assert after["expected_total"] == round(score["away"] + score["home"], 1)
     assert after["statistical_expected_total"] == round(after["home_expected_runs"] + after["away_expected_runs"], 2)
-    assert after["payload"]["summary_schema_version"] == 6
+    assert after["payload"]["summary_schema_version"] == 7
     assert after["payload"]["coherence_valid"] is True
     assert after["payload"]["primary_score"] == after["payload"]["top_scores"][0]
     estimates = after["payload"]["score_estimates"]
