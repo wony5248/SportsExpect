@@ -113,6 +113,13 @@ export type Prediction = {
   totals: Record<string, { over: number; under: number; push?: number }>
   tie_probability: number
   top_scores: SimulatedScore[]
+  outcome_scores?: Partial<Record<'HOME_WIN' | 'AWAY_WIN' | 'TIE', {
+    home: number
+    away: number
+    count: number
+    probability_given_outcome: number
+  }[]>>
+  team_run_distribution?: Record<'home' | 'away', number[]>
   primary_score?: SimulatedScore
   simulation_modes?: {
     home_runs: SimulationMode<number>

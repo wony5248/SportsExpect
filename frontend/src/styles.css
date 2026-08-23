@@ -193,6 +193,16 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .empty-state { border: 1px dashed rgba(191,233,215,.18); border-radius: 18px; }
 footer { display: flex; flex-wrap: wrap; gap: 10px 24px; margin-top: 48px; padding-top: 24px; border-top: 1px solid rgba(191,233,215,.12); color: #5f786e; font-size: .64rem; font-weight: 700; letter-spacing: .1em; }
 footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
+.branch-scores { display: grid; gap: 7px; margin: -6px 0 16px; padding: 0 4px; }
+.branch-scores > span { color: #728b81; font-size: .67rem; }
+.branch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
+.branch { display: grid; gap: 2px; padding: 9px 11px; border: 1px solid rgba(189,231,213,.1); border-radius: 10px; background: rgba(3,16,12,.24); }
+.branch span { color: #708a80; font-size: .6rem; }
+.branch strong { color: #cfe0d8; font-size: 1rem; font-variant-numeric: tabular-nums; }
+.branch strong i { color: #49665b; font-style: normal; padding: 0 3px; }
+.branch small { color: #667f75; font-size: .58rem; }
+.branch.likely { border-color: rgba(126,231,184,.28); background: rgba(126,231,184,.08); }
+.branch.likely strong { color: #e2f0ea; }
 .bullpen-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 8px; }
 .bullpen-team { display: grid; gap: 7px; padding: 12px; background: rgba(3,16,12,.25); border-radius: 10px; }
 .bullpen-team b { color: #c8d9d2; font-size: .78rem; }
@@ -282,7 +292,17 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .outcome-label span { font-size: .69rem; }
   .outcome-ranking .confidence { min-height: 34px; min-width: 96px; width: auto; }
   .confidence { width: 100%; min-height: 44px; }
-  .lineup-grid, .market-comparison, .starter-grid, .personal-claude-result, .bullpen-grid { grid-template-columns: 1fr; }
+  .lineup-grid, .market-comparison, .starter-grid, .personal-claude-result, .branch-scores { display: grid; gap: 7px; margin: -6px 0 16px; padding: 0 4px; }
+.branch-scores > span { color: #728b81; font-size: .67rem; }
+.branch-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; }
+.branch { display: grid; gap: 2px; padding: 9px 11px; border: 1px solid rgba(189,231,213,.1); border-radius: 10px; background: rgba(3,16,12,.24); }
+.branch span { color: #708a80; font-size: .6rem; }
+.branch strong { color: #cfe0d8; font-size: 1rem; font-variant-numeric: tabular-nums; }
+.branch strong i { color: #49665b; font-style: normal; padding: 0 3px; }
+.branch small { color: #667f75; font-size: .58rem; }
+.branch.likely { border-color: rgba(126,231,184,.28); background: rgba(126,231,184,.08); }
+.branch.likely strong { color: #e2f0ea; }
+.bullpen-grid { grid-template-columns: 1fr; }
   .personal-claude-result ul, .personal-claude-result p, .personal-claude-result > small { grid-column: auto; }
   .history-list > div { display: grid; }
   .history-list b { text-align: left; }

@@ -40,11 +40,18 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const coherent = isDetailedPrediction(p)
   // Forecasts saved before the engine field was introduced all used the inning-rate simulator.
   const engine = p?.engine ?? (coherent ? 'INNING_RATE' : undefined)
+  // MLB games cannot end level, so a tied score from any stored payload is dropped before it
+  // can be displayed. Older forecasts were saved before extra innings were simulated and do
+  // contain them.
+  const decidable = <T extends { home: number; away: number }>(scores: T[]) =>
+    game.league === 'MLB' ? scores.filter((score) => score.home !== score.away) : scores
+  const usableScores = decidable(p?.top_scores ?? [])
   const predictedScore = p ? ((p.summary_schema_version ?? 0) >= 10 && p.primary_score
+    && !(game.league === 'MLB' && p.primary_score.home === p.primary_score.away)
     ? p.primary_score
-    : selectRepresentativeScore(p)) : undefined
-  const displayedScoreCandidates = p?.top_scores?.length
-    ? prioritizeScoreCandidates(p.top_scores, predictedScore)
+    : selectRepresentativeScore(p, usableScores)) : undefined
+  const displayedScoreCandidates = usableScores.length
+    ? prioritizeScoreCandidates(usableScores, predictedScore)
     : []
   const expectedScore = predictedScore ? { away: predictedScore.away, home: predictedScore.home } : p?.display_expected_score ?? (p ? {
     away: Number(p.away_expected_runs.toFixed(1)), home: Number(p.home_expected_runs.toFixed(1)),
@@ -173,6 +180,22 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             {modeTotal ? <b className="mode-total">총점은 {modeTotal.value}점이 최다<small>{pctFine(modeTotal.probability)}</small></b> : null}
           </Stack>
         </Box> : null}
+
+        {p.outcome_scores && <Box className="branch-scores">
+          <span>이기는 쪽이 갈릴 때 예상되는 점수</span>
+          <Box className="branch-grid">
+            {([['HOME_WIN', game.home.name], ['AWAY_WIN', game.away.name],
+               ['TIE', '무승부']] as const).map(([branch, name]) => {
+              const best = p.outcome_scores?.[branch]?.[0]
+              if (!best) return null
+              return <Box key={branch} className={`branch${branch === (homeFavored ? 'HOME_WIN' : 'AWAY_WIN') ? ' likely' : ''}`}>
+                <span>{branch === 'TIE' ? '무승부로 끝나면' : `${name} 승리 시`}</span>
+                <strong>{best.away} <i>:</i> {best.home}</strong>
+                <small>이 경우의 {pct(best.probability_given_outcome)}</small>
+              </Box>
+            })}
+          </Box>
+        </Box>}
 
         {p.team_dense_intervals && p.total_dense_interval && p.game_shape ? <Box className="forecast-range">
           <Stack direction="row" justifyContent="space-between" alignItems="baseline">
@@ -617,11 +640,14 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game, includeR
   return { outcomes, line, lineSource }
 }
 
-function selectRepresentativeScore(p: NonNullable<Game['prediction']>) {
-  if (!p.top_scores.length) return p.primary_score
+function selectRepresentativeScore(
+  p: NonNullable<Game['prediction']>,
+  candidates: NonNullable<Game['prediction']>['top_scores'] = p.top_scores,
+) {
+  if (!candidates.length) return p.primary_score
   const evidence = (score: NonNullable<Game['prediction']>['top_scores'][number]) =>
     score.probability ?? score.count ?? 0
-  const maxEvidence = Math.max(...p.top_scores.map(evidence)) || 1
+  const maxEvidence = Math.max(...candidates.map(evidence)) || 1
   const expectedTotal = p.home_expected_runs + p.away_expected_runs
   const favoriteStrength = Math.min(1, Math.abs(p.home_win_probability - .5) / .15)
   const favoredHome = p.home_win_probability >= .5
@@ -635,7 +661,7 @@ function selectRepresentativeScore(p: NonNullable<Game['prediction']>) {
     const directionFit = (1 - favoriteStrength) * .5 + favoriteStrength * rawDirectionFit
     return .50 * frequencyFit + .25 * teamFit + .15 * totalFit + .10 * directionFit
   }
-  return p.top_scores.reduce((best, score) => fit(score) > fit(best) ? score : best)
+  return candidates.reduce((best, score) => fit(score) > fit(best) ? score : best)
 }
 
 function prioritizeScoreCandidates(

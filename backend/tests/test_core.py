@@ -783,6 +783,40 @@ def test_optional_enrichment_degrades_instead_of_failing_the_refresh():
     assert _optional(lambda: {"ok": 1}, {}, "bullpen profiles", errors) == {"ok": 1}
 
 
+def test_mlb_never_reports_a_tied_score_and_branches_beat_the_raw_mode():
+    result = simulate_scores(4.6, 4.2, 20_000, 42, league="MLB")
+    # No MLB game can end level, so nothing in the payload may describe one.
+    assert result["tie_probability"] == 0
+    assert "TIE" not in result["outcome_scores"]
+    assert all(score["home"] != score["away"] for score in result["top_scores"])
+    home_best = result["outcome_scores"]["HOME_WIN"][0]
+    away_best = result["outcome_scores"]["AWAY_WIN"][0]
+    assert home_best["home"] > home_best["away"]
+    assert away_best["away"] > away_best["home"]
+    # Conditioning on the outcome concentrates the estimate: the raw mode holds only a few
+    # percent of all games, while the branch score holds far more of its own branch.
+    assert home_best["probability_given_outcome"] > result["top_scores"][0]["probability"]
+    # KBO can end level, so its draw branch is present and its scores are genuinely tied.
+    kbo = simulate_scores(4.6, 4.2, 20_000, 42, league="KBO")
+    assert kbo["tie_probability"] > 0
+    assert all(score["home"] == score["away"] for score in kbo["outcome_scores"]["TIE"])
+
+
+def test_simulated_run_distribution_tracks_real_results():
+    """The fitted dispersion must keep the run histogram close to real team-game outcomes."""
+    # Shape of ~3,900 real MLB team-games: mode at 2-3 runs with a long right tail.
+    observed = [.064, .110, .140, .135, .120, .106, .094, .065, .053, .039, .026]
+    result = simulate_scores(4.47, 4.47, 40_000, 11, league="MLB", team_variance=.26)
+    simulated = result["team_run_distribution"]["away"][:len(observed)]
+    total_variation = sum(abs(a - b) for a, b in zip(simulated, observed, strict=True)) / 2
+    assert total_variation < .06
+    # The old hand-picked dispersion was materially worse against the same data.
+    legacy = simulate_scores(4.47, 4.47, 40_000, 11, league="MLB", team_variance=.11)
+    legacy_variation = sum(abs(a - b) for a, b in
+                           zip(legacy["team_run_distribution"]["away"][:len(observed)], observed, strict=True)) / 2
+    assert total_variation < legacy_variation
+
+
 def test_dense_intervals_are_tighter_than_central_80_band():
     result = simulate_scores(5.2, 4.1, 20_000, 42)
     for interval, quantiles in (

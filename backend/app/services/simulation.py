@@ -299,6 +299,50 @@ def _plate_usage(counts: dict[str, int], staff: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _run_histogram(runs: np.ndarray, simulations: int, cap: int = 15) -> list[float]:
+    """Probability of scoring 0..cap runs, with the final bucket holding everything above."""
+    counts = np.bincount(np.minimum(runs, cap), minlength=cap + 1)
+    return [round(float(value) / simulations, 5) for value in counts[:cap + 1]]
+
+
+def _outcome_scores(score_counts: Counter[tuple[int, int]], outcome_counts: Counter[str],
+                    league: str) -> dict[str, Any]:
+    """Most likely exact scores inside each outcome, rather than one mode over the whole game.
+
+    The single most frequent score is a poor headline: with roughly forty plausible scores no
+    candidate holds more than about 4% of the runs, so the top two are inside sampling noise and
+    the winner flips with the seed. Worse, the joint mode follows whichever club has the tighter
+    distribution, which can name a home-winning score in a game the away club is favoured to win.
+    Conditioning on the outcome removes both problems: each branch is coherent with its own
+    result and the branches differ from matchup to matchup.
+    """
+    branches = {
+        "HOME_WIN": lambda h, a: h > a,
+        "AWAY_WIN": lambda h, a: a > h,
+        "TIE": lambda h, a: h == a,
+    }
+    scores: dict[str, Any] = {}
+    for outcome, matches in branches.items():
+        # A tied final score is not a possible MLB result, so the branch is absent rather than
+        # empty - the card must never be able to render one from a stored payload.
+        if outcome == "TIE" and league == "MLB":
+            continue
+        decided = outcome_counts.get(outcome, 0)
+        if not decided:
+            continue
+        ranked = sorted(((count, home_runs, away_runs)
+                         for (home_runs, away_runs), count in score_counts.items()
+                         if matches(home_runs, away_runs)), reverse=True)[:3]
+        scores[outcome] = [
+            {"home": home_runs, "away": away_runs, "count": count,
+             # Probability of this exact score given the outcome actually happens, which is what
+             # "if the home club wins, it most likely ends 4-2" means.
+             "probability_given_outcome": round(count / decided, 4)}
+            for count, home_runs, away_runs in ranked
+        ]
+    return scores
+
+
 def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndarray, away: np.ndarray,
                simulations: int, league: str, bullpen_usage: dict[str, Any], engine: str,
                observed_result: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -348,6 +392,7 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "AWAY_WIN": int(np.count_nonzero(away > home)),
         "TIE": int(np.count_nonzero(home == away)),
     })
+    outcome_scores = _outcome_scores(score_counts, outcome_counts, league)
     total_counts = Counter(total.tolist())
     margin_counts = Counter((home - away).tolist())
     simulation_modes = {
@@ -398,6 +443,11 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "away_plus_1_5": handicap["away_plus_1_5"],
         "totals": totals,
         "top_scores": top_scores,
+        "outcome_scores": outcome_scores,
+        # Per-club run histograms, so the shape can be compared against real results.
+        "team_run_distribution": {
+            "home": _run_histogram(home, simulations), "away": _run_histogram(away, simulations),
+        },
         # Compact full-population tables make every final-score comparison exact even when the
         # observed score was not one of the 16 most common candidates shown on the card.
         "frequency_tables": {
