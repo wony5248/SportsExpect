@@ -159,7 +159,7 @@ def refresh(target_date: date = Query(alias="date", default_factory=lambda: date
 @app.post("/api/v1/admin/cron/refresh", dependencies=[Depends(require_admin)])
 def cron_refresh(
     league: str = Query(pattern="^(KBO|MLB)$"),
-    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle)$"),
+    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle|splits)$"),
 ):
     try:
         return run_cron_refresh(league, scope)

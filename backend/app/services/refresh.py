@@ -43,6 +43,7 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
     client = client or KboClient()
     errors: list[str] = []
     fetched_games: list[dict[str, Any]] = []
+    split_budget = _split_budget()
     try:
         games_source = _tracked("kbo_games", "/ws/Main.asmx/GetKboGameList", lambda: client.games(target_date), errors)
         if games_source:
@@ -99,7 +100,7 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                 )
                 if lineup_source and lineup_source.data:
                     _enrich_batter_matchups(client, raw, lineup_source.data, errors, "KBO")
-                    _collect_batter_splits(client, lineup_source.data, target_date.year, "KBO", errors)
+                    _collect_batter_splits(client, lineup_source.data, target_date.year, "KBO", errors, split_budget)
                     with session_scope() as session:
                         game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
                         if game:
@@ -121,6 +122,7 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
     client = client or MlbClient()
     errors: list[str] = []
     fetched_games: list[dict[str, Any]] = []
+    split_budget = _split_budget()
     try:
         games_source = _tracked("mlb_games", "/api/v1/schedule", lambda: client.games(target_date), errors)
         if games_source:
@@ -169,7 +171,7 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
                 )
                 if lineup_source and lineup_source.data:
                     _enrich_batter_matchups(client, raw, lineup_source.data, errors, "MLB")
-                    _collect_batter_splits(client, lineup_source.data, target_date.year, "MLB", errors)
+                    _collect_batter_splits(client, lineup_source.data, target_date.year, "MLB", errors, split_budget)
                     with session_scope() as session:
                         game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
                         if game:
@@ -389,6 +391,46 @@ def _team_key(name: str) -> str:
     return aliases.get(compact, compact)
 
 
+# Backfilling every hitter's splits in one refresh does not fit a serverless invocation, so a
+# run spends only part of its budget on it and later runs finish the job. Until a club is fully
+# covered the inning-rate engine handles it, which is a degraded forecast rather than a failed one.
+SPLIT_FETCH_BUDGET = 40
+SPLIT_DEADLINE_SECONDS = 120
+
+
+def _split_budget() -> dict[str, Any]:
+    return {"remaining": SPLIT_FETCH_BUDGET, "deadline": time.monotonic() + SPLIT_DEADLINE_SECONDS}
+
+
+def backfill_batter_splits(league: str, target_date: date) -> dict[str, Any]:
+    """Fetch base-state splits for today's lineup hitters, outside the full refresh.
+
+    The full refresh cannot afford to backfill hundreds of hitters inside one serverless
+    invocation, so this runs on its own schedule and works through the queue over several runs.
+    """
+    init_db()
+    errors: list[str] = []
+    budget = _split_budget()
+    with session_scope() as session:
+        entries = [
+            {"player_id": row.player_id}
+            for row in session.scalars(
+                select(LineupEntry).join(Game, Game.id == LineupEntry.game_id)
+                .where(Game.league == league, Game.game_date == target_date,
+                       LineupEntry.player_id.is_not(None))
+            ).all()
+        ]
+    if not entries:
+        return {"league": league, "scope": "splits", "hitters": 0, "fetched": 0, "errors": errors}
+    client = KboClient() if league == "KBO" else MlbClient()
+    try:
+        _collect_batter_splits(client, entries, target_date.year, league, errors, budget)
+    finally:
+        client.close()
+    return {"league": league, "scope": "splits", "hitters": len(entries),
+            "fetched": SPLIT_FETCH_BUDGET - budget["remaining"], "errors": errors}
+
+
 def _optional(action: Callable[[], Any], default: Any, label: str, errors: list[str]) -> Any:
     """Run an optional enrichment, degrading instead of taking the whole refresh down.
 
@@ -404,7 +446,8 @@ def _optional(action: Callable[[], Any], default: Any, label: str, errors: list[
 
 
 def _collect_batter_splits(client: KboClient | MlbClient, entries: list[dict[str, Any]],
-                           season: int, league: str, errors: list[str]) -> None:
+                           season: int, league: str, errors: list[str],
+                           budget: dict[str, Any] | None = None) -> None:
     """Fetch base-state splits for lineup hitters we have not stored this season yet.
 
     One request per hitter, so only genuinely missing hitters are fetched and the result is
@@ -424,6 +467,11 @@ def _collect_batter_splits(client: KboClient | MlbClient, entries: list[dict[str
     missing = sorted(player_ids - stored)
     if not missing:
         return
+    if budget is not None:
+        if budget["remaining"] <= 0 or time.monotonic() > budget["deadline"]:
+            return
+        missing = missing[:budget["remaining"]]
+        budget["remaining"] -= len(missing)
     source = _tracked(
         f"{league.lower()}_batter_splits",
         "/Record/Player/HitterDetail/Situation.aspx" if league == "KBO"

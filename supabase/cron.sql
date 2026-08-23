@@ -23,7 +23,7 @@ begin
   if refresh_league not in ('KBO', 'MLB') then
     raise exception 'Unsupported league: %', refresh_league;
   end if;
-  if refresh_scope not in ('full', 'nearby', 'tomorrow', 'market', 'checkpoints', 'lifecycle') then
+  if refresh_scope not in ('full', 'nearby', 'tomorrow', 'market', 'checkpoints', 'lifecycle', 'splits') then
     raise exception 'Unsupported scope: %', refresh_scope;
   end if;
 
@@ -97,6 +97,13 @@ select cron.schedule('dugout-kbo-tomorrow', '10 4 * * *',
   $$select public.invoke_dugout_refresh('KBO', 'tomorrow')$$);
 select cron.schedule('dugout-mlb-tomorrow', '20 15 * * *',
   $$select public.invoke_dugout_refresh('MLB', 'tomorrow')$$);
+
+-- Batter base-state splits. One lineup's worth of hitters per run, so the queue drains over
+-- several passes instead of pushing the full refresh past its function timeout.
+select cron.schedule('dugout-kbo-splits', '9,39 * * * *',
+  $$select public.invoke_dugout_refresh('KBO', 'splits')$$);
+select cron.schedule('dugout-mlb-splits', '24,54 * * * *',
+  $$select public.invoke_dugout_refresh('MLB', 'splits')$$);
 
 -- Daily champion/challenger evaluation. Runs only after the result collectors
 -- have had time to finalize the previous slate (05:30 and 16:30 KST).

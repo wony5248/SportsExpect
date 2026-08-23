@@ -22,11 +22,13 @@ from backend.app.services.claude_advisor import blend_with_claude
 from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batter_base_states,
                                                _batter_pitcher_split, _data_id_table, _hitter_name,
                                                _pitcher_opponent_split, _rank_table, _record_rate)
+from backend.app.collectors.kbo.client import SourcePayload
 from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient
 from backend.app.collectors.odds import _consensus_event
 from backend.app.services.feature_engineering import _effective_lineup_ops, _lineup_matchup_summary
-from backend.app.services.refresh import (_market_event_date, _market_refresh_due, _months_for_recent,
-                                          _optional, _prediction_stage, _recent_by_team)
+from backend.app.services.refresh import (SPLIT_FETCH_BUDGET, _collect_batter_splits, _market_event_date,
+                                          _market_refresh_due, _months_for_recent, _optional,
+                                          _prediction_stage, _recent_by_team, _split_budget)
 from backend.app.services.batting import SINGLE, STATE_INDEX, build_batter_table
 from backend.app.services.simulation import simulate_scores
 from backend.app.services.prediction import (blend_classifier_into_means, build_score_estimates,
@@ -405,6 +407,27 @@ def test_plate_engine_matches_expected_runs_and_obeys_the_ninth_inning_rules():
 
     # One lineup without collected splits is enough to fall back to the inning-rate model.
     assert simulate_scores(4.8, 4.2, 5_000, 21, league="MLB", home_lineup=lineup)["engine"] == "INNING_RATE"
+
+
+def test_split_backfill_stays_inside_one_refresh_budget():
+    """A full slate must not spend the whole serverless invocation fetching hitters."""
+    fetched: list[int] = []
+
+    class Client:
+        def batter_splits(self, ids, season):
+            fetched.append(len(ids))
+            return SourcePayload({}, "url", datetime(2026, 8, 23))
+
+    budget = _split_budget()
+    errors: list[str] = []
+    for game in range(15):
+        entries = [{"player_id": f"g{game}-p{index}"} for index in range(18)]
+        _collect_batter_splits(Client(), entries, 2026, "MLB", errors, budget)
+    assert 0 < sum(fetched) <= SPLIT_FETCH_BUDGET
+    # Once the budget is gone the remaining games stop calling out entirely.
+    assert budget["remaining"] == 0
+    _collect_batter_splits(Client(), [{"player_id": "later"}], 2026, "MLB", errors, budget)
+    assert sum(fetched) <= SPLIT_FETCH_BUDGET
 
 
 def test_optional_enrichment_degrades_instead_of_failing_the_refresh():
