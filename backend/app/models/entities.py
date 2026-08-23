@@ -227,6 +227,9 @@ class GameResult(Base):
     game_id: Mapped[int] = mapped_column(ForeignKey("games.id"), primary_key=True)
     away_score: Mapped[int] = mapped_column(Integer)
     home_score: Mapped[int] = mapped_column(Integer)
+    # Official inning-by-inning runs when the league feed supplies them. The shape is
+    # {"away": [..], "home": [..]}; missing half innings are represented by null.
+    innings: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     finalized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     source_url: Mapped[str] = mapped_column(Text)
 
@@ -351,6 +354,12 @@ class Prediction(Base):
     game_id: Mapped[int] = mapped_column(ForeignKey("games.id"), index=True)
     model_version_id: Mapped[int] = mapped_column(ForeignKey("model_versions.id"))
     input_hash: Mapped[str] = mapped_column(String(64), index=True)
+    # LIVE_PREGAME is an observation captured before first pitch. HISTORICAL_REPLAY is
+    # generated later from an explicit as-of cutoff and must never be presented as live.
+    origin: Mapped[str] = mapped_column(String(24), default="LIVE_PREGAME", index=True)
+    data_cutoff: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    training_eligible: Mapped[bool] = mapped_column(default=True, index=True)
+    leakage_audit: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     home_win_probability: Mapped[float] = mapped_column(Float)
     away_win_probability: Mapped[float] = mapped_column(Float)
     home_expected_runs: Mapped[float] = mapped_column(Float)
@@ -360,6 +369,30 @@ class Prediction(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
 
     model_version: Mapped[ModelVersion] = relationship()
+    evaluation: Mapped[PredictionEvaluation | None] = relationship(uselist=False)
+
+
+class PredictionEvaluation(Base):
+    """Post-game comparison against the exact Monte Carlo population used by a prediction."""
+
+    __tablename__ = "prediction_evaluations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    prediction_id: Mapped[int] = mapped_column(ForeignKey("predictions.id"), unique=True, index=True)
+    game_id: Mapped[int] = mapped_column(ForeignKey("games.id"), index=True)
+    simulation_count: Mapped[int] = mapped_column(Integer)
+    actual_score_count: Mapped[int] = mapped_column(Integer)
+    actual_score_probability: Mapped[float] = mapped_column(Float)
+    actual_outcome_count: Mapped[int] = mapped_column(Integer)
+    actual_outcome_probability: Mapped[float] = mapped_column(Float)
+    actual_total_count: Mapped[int] = mapped_column(Integer)
+    actual_total_probability: Mapped[float] = mapped_column(Float)
+    actual_margin_count: Mapped[int] = mapped_column(Integer)
+    actual_margin_probability: Mapped[float] = mapped_column(Float)
+    actual_inning_path_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    actual_inning_path_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
 
 
 class PredictionHistory(Base):

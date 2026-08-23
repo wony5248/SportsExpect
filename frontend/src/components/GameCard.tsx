@@ -62,6 +62,8 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
     }
   }
   const resultComparison = completedGameComparison(game, expectedScore)
+  const isReplay = p?.origin === 'HISTORICAL_REPLAY'
+  const evaluation = p?.evaluation
   const verdicts = game.result && p && ranking ? marketVerdicts(p, game, ranking) : null
   const judgedVerdicts = verdicts?.filter((verdict) => verdict.hit != null) ?? []
   const verdictHits = judgedVerdicts.filter((verdict) => verdict.hit).length
@@ -80,8 +82,12 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
       </Box>
       {game.result && <Box className="result-comparison">
         <Stack direction="row" justifyContent="space-between" alignItems="baseline" className="result-comparison-heading">
-          <b>경기 전 예측은 맞았을까{judgedVerdicts.length ? ` · ${judgedVerdicts.length}개 중 ${verdictHits}개 적중` : ''}</b>
-          <span>{resultComparison ? `${new Date(resultComparison.createdAt).toLocaleString('ko-KR')}에 저장한 예측` : '경기 전 저장한 예측 없음'}</span>
+          <b>{isReplay ? '과거 재현과 실제 결과 비교' : '경기 전 예측은 맞았을까'}{judgedVerdicts.length ? ` · ${judgedVerdicts.length}개 중 ${verdictHits}개 적중` : ''}</b>
+          <span>{resultComparison
+            ? isReplay
+              ? `${new Date(p?.data_cutoff ?? resultComparison.createdAt).toLocaleString('ko-KR')} 이전 데이터만 사용`
+              : `${new Date(resultComparison.createdAt).toLocaleString('ko-KR')}에 저장한 실전 예측`
+            : '경기 전 저장한 예측 없음'}</span>
         </Stack>
         <Box className="result-comparison-grid">
           <Box className="result-score actual"><span>실제 최종</span><strong>{game.result.away_score} <i>:</i> {game.result.home_score}</strong><small>{game.away.name} : {game.home.name}</small></Box>
@@ -90,6 +96,21 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             <Box className={`result-verdict ${resultComparison.verdictClass}`}><b>{resultComparison.verdict}</b><span>{resultComparison.favorite}</span><small>이 점수 기준 팀당 {stat(resultComparison.runsMae, 1)}점 차이</small></Box>
           </> : <Box className="result-verdict unavailable"><b>비교할 예측 없음</b><span>경기 시작 전에 저장해 둔 예측이 없습니다.</span></Box>}
         </Box>
+        {isReplay && <Alert severity="info" className="replay-disclosure">
+          이 값은 당시 실시간으로 저장한 예측이 아니라, 경기 시작 전까지의 데이터만 복원해 현재 모델로 다시 돌린 과거 재현입니다. 실전 예측 성과와 분리해 집계합니다.
+        </Alert>}
+        {evaluation && <Box className="simulation-actual-match">
+          <span className="simulation-match-title">실제 결과는 {evaluation.simulation_count.toLocaleString()}번 중 얼마나 나왔나</span>
+          <Box className="simulation-match-grid">
+            <SimulationMatch label="동일 최종 점수" count={evaluation.actual_score_count} probability={evaluation.actual_score_probability} />
+            <SimulationMatch label="동일 승패 결과" count={evaluation.actual_outcome_count} probability={evaluation.actual_outcome_probability} />
+            <SimulationMatch label="동일 총점" count={evaluation.actual_total_count} probability={evaluation.actual_total_probability} />
+            <SimulationMatch label="동일 점수차" count={evaluation.actual_margin_count} probability={evaluation.actual_margin_probability} />
+            {evaluation.inning_data_available
+              ? <SimulationMatch label="동일 이닝별 흐름" count={evaluation.actual_inning_path_count ?? 0} probability={evaluation.actual_inning_path_probability ?? 0} />
+              : <Box className="simulation-match unavailable"><small>동일 이닝별 흐름</small><b>비교 대기</b><span>공식 이닝 기록이 수집된 경기부터 제공</span></Box>}
+          </Box>
+        </Box>}
         {verdicts && verdicts.length > 0 && <Box className="market-verdicts">
           {verdicts.map((verdict) => <Box key={verdict.market} className={`market-verdict ${verdict.hit == null ? 'neutral' : verdict.hit ? 'hit' : 'miss'}`}>
             <span>{verdict.market}</span>
@@ -323,6 +344,10 @@ function TeamName({ team, side }: { team: Team; side: string }) {
   </Box>
 }
 
+function SimulationMatch({ label, count, probability }: { label: string; count: number; probability: number }) {
+  return <Box className="simulation-match"><small>{label}</small><b>{count.toLocaleString()}번</b><span>{pctFine(probability)}</span></Box>
+}
+
 function Starter({ team }: { team: Team }) {
   const p = team.starter
   return <Box><small>{team.name}</small><strong>{p?.name ?? '미정'}</strong><span>ERA {stat(p?.era)} · FIP {stat(p?.fip)} · WHIP {stat(p?.whip)}</span><span>{p?.opponent_innings ? `오늘 상대팀 상대로 ${stat(p.opponent_innings, 1)}이닝 · ERA ${stat(p.opponent_era)} · WHIP ${stat(p.opponent_whip)}` : '오늘 상대팀과 맞붙은 기록 없음'}</span><span>{p?.rest_days != null ? `${p.rest_days}일 쉬고 등판` : '휴식일 정보 없음'}{p?.recent_pitches != null ? ` · 최근 5일 ${p.recent_pitches}구` : ''}</span></Box>
@@ -364,7 +389,7 @@ function predictionUnavailableMessage(game: Game, hasPrediction: boolean) {
       ? '경기 일정과 팀 기록은 모았지만 예측 계산이 아직 끝나지 않았습니다. 다음 갱신 때 표시됩니다.'
       : '예측에 필요한 시즌 팀 기록을 아직 모으는 중입니다. 다음 갱신 때 표시됩니다.'
   }
-  return '경기 시작 전에 저장해 둔 예측이 없습니다.'
+  return '당시 저장된 경기 전 예측이 없습니다. 누수 방지 조건을 통과한 과거 재현이 생성되면 실제 결과와 비교해 표시합니다.'
 }
 
 function completedGameComparison(game: Game, expectedScore: { away: number; home: number } | undefined) {

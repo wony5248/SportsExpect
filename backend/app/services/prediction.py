@@ -23,8 +23,9 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
                  lineups: list[Any] | None = None, game_context: dict[str, Any] | None = None,
                  model_runtime: dict[str, Any] | None = None,
                  bullpens: dict[str, dict[str, Any] | None] | None = None,
-                 lineup_tables: dict[str, Any] | None = None) -> dict[str, Any]:
-    model_name = (model_runtime or {}).get("model_name") or (
+                 lineup_tables: dict[str, Any] | None = None,
+                 prediction_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    model_name = (model_runtime or {}).get("model_name") or (prediction_context or {}).get("model_name") or (
         "KBO_MATCHUP_V14" if game.league == "KBO" else "MLB_MATCHUP_V13"
     )
     features = build_features(home, away, home_pitcher, away_pitcher, game.stadium, game.league, lineups,
@@ -77,6 +78,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         # Split coverage belongs in the hash: adding a hitter's splits changes which engine runs.
         "split_coverage": (lineup_tables or {}).get("coverage"),
         "lineups": lineup_fingerprint,
+        "prediction_context": prediction_context or {"origin": "LIVE_PREGAME"},
     }
     input_hash = hashlib.sha256(json.dumps(input_data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
     seed = int(input_hash[:16], 16) % (2**32)
@@ -99,6 +101,14 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         home_lineup=home_table if away_table is not None else None,
         away_lineup=away_table if home_table is not None else None,
     )
+    simulation_recipe = {
+        "home_expected": home_runs, "away_expected": away_runs,
+        "simulations": settings.simulations, "seed": seed,
+        "environment_variance": environment_variance, "team_variance": team_variance,
+        "league": game.league, "home_staff": home_staff, "away_staff": away_staff,
+        "home_lineup": home_table.tolist() if home_table is not None and away_table is not None else None,
+        "away_lineup": away_table.tolist() if away_table is not None and home_table is not None else None,
+    }
     # Every headline score-distribution metric must describe the same population. The logistic
     # classifier remains an independent diagnostic, but win probability, expected score,
     # intervals, handicaps and totals now all come from this single simulation distribution.
@@ -171,6 +181,9 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "totals": simulation["totals"],
             "tie_probability": round(simulation["tie_probability"], 4),
             "top_scores": simulation["top_scores"],
+            "frequency_tables": simulation["frequency_tables"],
+            # Kept server-side for deterministic post-game replay; the API serializer removes it.
+            "simulation_recipe": simulation_recipe,
             "primary_score": primary_score,
             "simulation_modes": simulation["simulation_modes"],
             "total_quantiles": simulation["total_quantiles"],

@@ -145,7 +145,7 @@ select id, status_code, error_msg, created from net._http_response order by crea
 1. API `/health`가 `database: connected`를 반환합니다.
 2. 수동 KBO 및 MLB 갱신이 각각 `200`을 반환합니다.
 3. 프런트에서 오늘 날짜의 경기 카드가 나타납니다.
-4. `cron.job`에 12개 `dugout-*` 작업이 활성화되어 있습니다.
+4. `cron.job`에 과거 재현 작업을 포함한 `dugout-*` 작업이 활성화되어 있습니다.
 5. 다음 정각 이후 `net._http_response`에서 응답 코드가 확인됩니다.
 6. 서로 다른 두 사용자로 로그인했을 때 Claude 키 상태와 개인 분석이 분리되는지 확인합니다.
 

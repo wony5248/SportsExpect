@@ -100,6 +100,7 @@ python -m backend.app.cli refresh --league MLB
 python -m backend.app.cli backtest --league ALL
 python -m backend.app.cli backtest --league MLB --stage T_MINUS_15M
 python -m backend.app.cli model-lifecycle --league KBO
+python -m backend.app.cli historical-replay --league KBO --limit 20
 python -m backend.app.cli backup
 pytest backend/tests
 cd frontend && npm run build
@@ -110,6 +111,7 @@ cd frontend && npm run build
 - `/api/v1/operations/status`: 오류율, 최근 성공, 변경 알림, 예측 수
 - `/api/v1/model/lifecycle?league=KBO`: 운영 모델, 학습 준비도, 최근 승격·롤백 결정
 - `/api/v1/model/backtest`: 누수 방지 walk-forward 평가
+- `/api/v1/admin/replay`: 경기 전 데이터만 복원하는 과거 재현 백필(관리자 전용)
 - 화면의 `내 Claude 설정`: 로그인 사용자별 Claude API 키 확인·암호화 저장·교체
 - `/api/v1/games/{id}/claude-analysis`: 로그인 사용자 키로만 계산하는 비공개 Claude 보조 분석
 - `/api/v1/games`: KBO/MLB 카드·신선도·변화 타임라인

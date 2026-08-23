@@ -108,14 +108,15 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                     environment_variance: float = .08, team_variance: float = .12,
                     league: str = "MLB", home_staff: dict[str, Any] | None = None,
                     away_staff: dict[str, Any] | None = None, home_lineup: np.ndarray | None = None,
-                    away_lineup: np.ndarray | None = None) -> dict[str, Any]:
+                    away_lineup: np.ndarray | None = None,
+                    observed_result: dict[str, Any] | None = None) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
     if home_lineup is not None and away_lineup is not None:
         # Both lineups have collected splits, so play the game out plate appearance by plate
         # appearance instead of drawing inning run totals.
         return _summarize(*_plate_appearance_game(
             rng, home_expected, away_expected, simulations, league, home_staff, away_staff,
-            home_lineup, away_lineup))
+            home_lineup, away_lineup), observed_result=observed_result)
     # A shared gamma run environment creates realistic over-dispersion and correlation
     # (weather/umpire/park conditions affect both clubs) while preserving expected means.
     variance = min(.18, max(.02, environment_variance))
@@ -232,7 +233,25 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
         home_innings = np.concatenate([home_innings, np.stack(extra_home_columns, axis=1)], axis=1)
     usage = {"home": _bullpen_usage(home_staff_profile, home_tier_counts),
              "away": _bullpen_usage(away_staff_profile, away_tier_counts)}
-    return _summarize(home_innings, away_innings, home, away, simulations, league, usage, "INNING_RATE")
+    return _summarize(home_innings, away_innings, home, away, simulations, league, usage, "INNING_RATE",
+                      observed_result=observed_result)
+
+
+def evaluate_simulation_recipe(recipe: dict[str, Any], observed_result: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically reproduce one stored simulation and compare its full population."""
+    result = simulate_scores(
+        float(recipe["home_expected"]), float(recipe["away_expected"]), int(recipe["simulations"]),
+        int(recipe["seed"]), float(recipe.get("environment_variance", .08)),
+        float(recipe.get("team_variance", .12)), league=str(recipe.get("league", "MLB")),
+        home_staff=recipe.get("home_staff"), away_staff=recipe.get("away_staff"),
+        home_lineup=_recipe_array(recipe.get("home_lineup")),
+        away_lineup=_recipe_array(recipe.get("away_lineup")), observed_result=observed_result,
+    )
+    return result["observed_evaluation"]
+
+
+def _recipe_array(value: Any) -> np.ndarray | None:
+    return np.asarray(value, dtype=float) if value is not None else None
 
 
 def _plate_appearance_game(rng: np.random.Generator, home_expected: float, away_expected: float,
@@ -273,7 +292,8 @@ def _plate_usage(counts: dict[str, int], staff: dict[str, Any]) -> dict[str, Any
 
 
 def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndarray, away: np.ndarray,
-               simulations: int, league: str, bullpen_usage: dict[str, Any], engine: str) -> dict[str, Any]:
+               simulations: int, league: str, bullpen_usage: dict[str, Any], engine: str,
+               observed_result: dict[str, Any] | None = None) -> dict[str, Any]:
     total = home + away
     home_win_probability = float(np.mean(home > away))
     away_win_probability = float(np.mean(away > home))
@@ -320,11 +340,13 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "AWAY_WIN": int(np.count_nonzero(away > home)),
         "TIE": int(np.count_nonzero(home == away)),
     })
+    total_counts = Counter(total.tolist())
+    margin_counts = Counter((home - away).tolist())
     simulation_modes = {
         "home_runs": _mode_payload(Counter(home.tolist()), simulations),
         "away_runs": _mode_payload(Counter(away.tolist()), simulations),
-        "total_runs": _mode_payload(Counter(total.tolist()), simulations),
-        "run_margin": _mode_payload(Counter((home - away).tolist()), simulations),
+        "total_runs": _mode_payload(total_counts, simulations),
+        "run_margin": _mode_payload(margin_counts, simulations),
         "outcome": _mode_payload(outcome_counts, simulations),
     }
     handicap = {
@@ -368,6 +390,14 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "away_plus_1_5": handicap["away_plus_1_5"],
         "totals": totals,
         "top_scores": top_scores,
+        # Compact full-population tables make every final-score comparison exact even when the
+        # observed score was not one of the 16 most common candidates shown on the card.
+        "frequency_tables": {
+            "scores": {f"{a}:{h}": count for (h, a), count in score_counts.items()},
+            "totals": {str(value): count for value, count in total_counts.items()},
+            "margins": {str(value): count for value, count in margin_counts.items()},
+            "outcomes": dict(outcome_counts),
+        },
         "simulation_modes": simulation_modes,
         "total_quantiles": {
             "p10": float(np.quantile(total, .10)), "p50": float(np.quantile(total, .50)), "p90": float(np.quantile(total, .90)),
@@ -386,8 +416,54 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
             "either_shutout_probability": float(np.mean((home == 0) | (away == 0))),
         },
     }
+    if observed_result is not None:
+        result["observed_evaluation"] = _observed_evaluation(
+            observed_result, simulations, home, away, home_innings, away_innings,
+            score_counts, total_counts, margin_counts, outcome_counts, trajectory_of,
+        )
     validate_simulation_summary(result)
     return result
+
+
+def _observed_evaluation(observed: dict[str, Any], simulations: int, home: np.ndarray, away: np.ndarray,
+                         home_innings: np.ndarray, away_innings: np.ndarray,
+                         score_counts: Counter[Any], total_counts: Counter[Any], margin_counts: Counter[Any],
+                         outcome_counts: Counter[Any], trajectory_of: Any) -> dict[str, Any]:
+    actual_away, actual_home = int(observed["away_score"]), int(observed["home_score"])
+    outcome = "HOME_WIN" if actual_home > actual_away else ("AWAY_WIN" if actual_away > actual_home else "TIE")
+    score_count = int(score_counts[(actual_home, actual_away)])
+    total_count = int(total_counts[actual_home + actual_away])
+    margin_count = int(margin_counts[actual_home - actual_away])
+    outcome_count = int(outcome_counts[outcome])
+    inning_count: int | None = None
+    innings = observed.get("innings")
+    if isinstance(innings, dict) and isinstance(innings.get("away"), list) and isinstance(innings.get("home"), list):
+        size = max(len(innings["away"]), len(innings["home"]))
+        actual_path = tuple(
+            (int(innings["away"][index] or 0) if index < len(innings["away"]) else 0,
+             int(innings["home"][index] or 0) if index < len(innings["home"]) else 0)
+            for index in range(size)
+        )
+        # Only simulations with the same number of played innings can be an exact flow match.
+        inning_count = sum(trajectory_of(index) == actual_path for index in range(simulations))
+    return {
+        "simulation_count": simulations,
+        "actual_score": {"away": actual_away, "home": actual_home},
+        "actual_score_count": score_count,
+        "actual_score_probability": round(score_count / simulations, 6),
+        "actual_outcome": outcome,
+        "actual_outcome_count": outcome_count,
+        "actual_outcome_probability": round(outcome_count / simulations, 6),
+        "actual_total": actual_home + actual_away,
+        "actual_total_count": total_count,
+        "actual_total_probability": round(total_count / simulations, 6),
+        "actual_margin": actual_home - actual_away,
+        "actual_margin_count": margin_count,
+        "actual_margin_probability": round(margin_count / simulations, 6),
+        "actual_inning_path_count": inning_count,
+        "actual_inning_path_probability": round(inning_count / simulations, 6) if inning_count is not None else None,
+        "inning_data_available": inning_count is not None,
+    }
 
 
 def _staff_profile(staff: dict[str, Any] | None, rng: np.random.Generator, simulations: int) -> dict[str, Any]:

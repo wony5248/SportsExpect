@@ -13,8 +13,8 @@ from backend.app.collectors.kbo import KboClient
 from backend.app.collectors.mlb import MlbClient
 from backend.app.collectors.odds import OddsClient
 from backend.app.config import KST, settings
-from backend.app.database import database_now, init_db, session_scope
-from backend.app.models import CrawlLog, Game, LineupEntry, PitcherStat, Team
+from backend.app.database import SessionLocal, database_now, init_db, session_scope
+from backend.app.models import CrawlLog, Game, GameResult, LineupEntry, PitcherStat, Team
 from backend.app.repositories.repository import (
     latest_team_stat,
     load_batter_splits,
@@ -33,6 +33,7 @@ from backend.app.services.prediction import predict_game
 from backend.app.services.batting import build_batter_table, league_average_table, lineup_tables
 from backend.app.services.bullpen import load_profiles, seed_league
 from backend.app.services.model_lifecycle import load_champion_runtime
+from backend.app.services.prediction_evaluation import evaluate_pending_predictions
 
 
 def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None = None,
@@ -107,9 +108,14 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                         if game:
                             replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
 
+        inning_backfill = backfill_kbo_innings(10, target_date=target_date, client=client)
         _refresh_market("KBO", errors)
         predicted = _predict_games("KBO", target_date, game_ids, errors, trigger, checkpoint_stage)
-        return {"date": target_date.isoformat(), "games": len(fetched_games) or predicted, "predictions": predicted, "errors": errors, "used_cached_team_stats": fresh and not force}
+        with session_scope() as session:
+            evaluations = evaluate_pending_predictions(session, "KBO", target_date)
+        return {"date": target_date.isoformat(), "games": len(fetched_games) or predicted, "predictions": predicted,
+                "evaluations": evaluations, "inning_results": inning_backfill,
+                "errors": errors, "used_cached_team_stats": fresh and not force}
     finally:
         if own_client:
             client.close()
@@ -179,8 +185,11 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
                             replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
         _refresh_market("MLB", errors)
         predicted = _predict_games("MLB", target_date, game_ids, errors, trigger, checkpoint_stage)
+        with session_scope() as session:
+            evaluations = evaluate_pending_predictions(session, "MLB", target_date)
         return {"date": target_date.isoformat(), "league": "MLB", "games": len(fetched_games) or predicted,
-                "predictions": predicted, "errors": errors, "used_cached_team_stats": fresh and not force}
+                "predictions": predicted, "evaluations": evaluations, "errors": errors,
+                "used_cached_team_stats": fresh and not force}
     finally:
         if own_client:
             client.close()
@@ -430,6 +439,42 @@ def backfill_batter_splits(league: str, target_date: date) -> dict[str, Any]:
         client.close()
     return {"league": league, "scope": "splits", "hitters": len(entries),
             "fetched": SPLIT_FETCH_BUDGET - budget["remaining"], "errors": errors}
+
+
+def backfill_kbo_innings(limit: int = 10, target_date: date | None = None,
+                         client: KboClient | None = None) -> dict[str, Any]:
+    """Fill missing KBO inning lines from the official GameCenter scoreboard."""
+    init_db()
+    own_client = client is None
+    client = client or KboClient()
+    query = select(Game.external_id, Game.game_date).join(
+        GameResult, GameResult.game_id == Game.id,
+    ).where(Game.league == "KBO", GameResult.innings.is_(None))
+    if target_date:
+        query = query.where(Game.game_date == target_date)
+    with SessionLocal() as session:
+        targets = session.execute(query.order_by(Game.game_date.desc()).limit(limit)).all()
+    written = 0
+    errors: list[str] = []
+    try:
+        for external_id, game_date in targets:
+            try:
+                source = client.score_innings(external_id, game_date.year)
+                if not source.data:
+                    continue
+                with session_scope() as session:
+                    game = session.scalar(select(Game).where(Game.external_id == external_id))
+                    result = session.get(GameResult, game.id) if game else None
+                    if result and result.innings is None:
+                        result.innings = source.data
+                        result.source_url = source.source_url
+                        written += 1
+            except Exception as exc:
+                errors.append(f"{external_id}: {type(exc).__name__}: {exc}")
+    finally:
+        if own_client:
+            client.close()
+    return {"requested": len(targets), "written": written, "errors": errors}
 
 
 def _optional(action: Callable[[], Any], default: Any, label: str, errors: list[str]) -> Any:

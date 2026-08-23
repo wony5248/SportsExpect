@@ -9,8 +9,10 @@ from backend.app.config import KST
 from backend.app.database import SessionLocal, database_now, session_scope
 from backend.app.models import Game, PredictionSnapshot
 from backend.app.services.operations import job_lock
-from backend.app.services.refresh import backfill_batter_splits, refresh_kbo, refresh_market, refresh_mlb
+from backend.app.services.refresh import (backfill_batter_splits, backfill_kbo_innings, refresh_kbo,
+                                          refresh_market, refresh_mlb)
 from backend.app.services.model_lifecycle import run_model_lifecycle
+from backend.app.services.historical_replay import run_historical_replay
 
 
 RefreshOperation = Callable[..., dict[str, Any]]
@@ -116,6 +118,13 @@ def run_lifecycle_refresh(league: str) -> dict[str, Any]:
             return run_model_lifecycle(session, league)
 
 
+def run_replay_refresh(league: str, limit: int = 10) -> dict[str, Any]:
+    with job_lock(f"historical-replay:{league}"):
+        innings = backfill_kbo_innings(limit) if league == "KBO" else None
+        with session_scope() as session:
+            return {**run_historical_replay(session, league, limit=limit), "inning_backfill": innings}
+
+
 def run_cron_refresh(league: str, scope: str) -> dict[str, Any]:
     if scope == "full":
         return run_full_refresh(league)
@@ -129,6 +138,8 @@ def run_cron_refresh(league: str, scope: str) -> dict[str, Any]:
         return run_checkpoint_refresh(league)
     if scope == "lifecycle":
         return run_lifecycle_refresh(league)
+    if scope == "replay":
+        return run_replay_refresh(league)
     if scope == "splits":
         return backfill_batter_splits(league, datetime.now(KST).date())
     raise ValueError(f"Unsupported refresh scope: {scope}")

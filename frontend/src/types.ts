@@ -45,6 +45,24 @@ export type Team = {
 }
 
 export type Prediction = {
+  origin?: 'LIVE_PREGAME' | 'HISTORICAL_REPLAY'
+  data_cutoff?: string | null
+  training_eligible?: boolean
+  leakage_audit?: { passed?: boolean; method?: string; note?: string; [key: string]: unknown }
+  evaluation?: null | {
+    simulation_count: number
+    actual_score_count: number
+    actual_score_probability: number
+    actual_outcome_count: number
+    actual_outcome_probability: number
+    actual_total_count: number
+    actual_total_probability: number
+    actual_margin_count: number
+    actual_margin_probability: number
+    actual_inning_path_count: number | null
+    actual_inning_path_probability: number | null
+    inning_data_available: boolean
+  }
   summary_schema_version?: number
   coherence_valid?: boolean
   probability_source?: string
@@ -159,7 +177,11 @@ export type Game = {
   collected_at: string
   away: Team
   home: Team
-  result: null | { away_score: number; home_score: number }
+  result: null | {
+    away_score: number
+    home_score: number
+    innings?: null | { away: (number | null)[]; home: (number | null)[] }
+  }
   prediction: Prediction | null
   market: null | {
     provider: string

@@ -89,6 +89,7 @@ def run_model_lifecycle(session: Session, league: str) -> dict[str, Any]:
     registry.last_evaluated_at = now
 
     samples = _training_samples(session, league)
+    live_samples = [row for row in samples if row["origin"] == "LIVE_PREGAME"]
     rollback = _maybe_rollback(session, registry, samples, now)
     if rollback:
         return {**lifecycle_status(session, league), "decision": rollback}
@@ -97,6 +98,12 @@ def run_model_lifecycle(session: Session, league: str) -> dict[str, Any]:
         _event_once(session, league, "WAITING_FOR_DATA", len(samples), reason,
                     champion_id=registry.champion_model_version_id)
         return {**lifecycle_status(session, league), "decision": "WAITING_FOR_DATA", "reason": reason}
+    if len(live_samples) < MIN_VALIDATION_SAMPLES:
+        reason = (f"과거 재현을 포함한 학습 표본은 {len(samples)}개지만 독립 실전 검증 표본이 "
+                  f"{len(live_samples)}개입니다. {MIN_VALIDATION_SAMPLES}개 전에는 자동 승격하지 않습니다.")
+        _event_once(session, league, "WAITING_FOR_LIVE_VALIDATION", len(live_samples), reason,
+                    champion_id=registry.champion_model_version_id)
+        return {**lifecycle_status(session, league), "decision": "WAITING_FOR_LIVE_VALIDATION", "reason": reason}
 
     latest_artifact = session.scalar(select(ModelArtifact).where(
         ModelArtifact.league == league,
@@ -130,7 +137,10 @@ def lifecycle_status(session: Session, league: str) -> dict[str, Any]:
     registry = session.get(ModelRegistry, league)
     champion = session.get(ModelVersion, registry.champion_model_version_id) if registry and registry.champion_model_version_id else None
     previous = session.get(ModelVersion, registry.previous_model_version_id) if registry and registry.previous_model_version_id else None
-    sample_size = len(_training_samples(session, league))
+    samples = _training_samples(session, league)
+    sample_size = len(samples)
+    source_counts = {origin: sum(row["origin"] == origin for row in samples)
+                     for origin in ("LIVE_PREGAME", "HISTORICAL_REPLAY")}
     events = session.scalars(select(ModelLifecycleEvent).where(
         ModelLifecycleEvent.league == league,
     ).order_by(ModelLifecycleEvent.created_at.desc()).limit(10)).all()
@@ -142,6 +152,7 @@ def lifecycle_status(session: Session, league: str) -> dict[str, Any]:
         "promoted_at": registry.promoted_at.isoformat() if registry and registry.promoted_at else None,
         "last_evaluated_at": registry.last_evaluated_at.isoformat() if registry and registry.last_evaluated_at else None,
         "evaluable_samples": sample_size,
+        "sample_sources": source_counts,
         "training_ready": sample_size >= MIN_TRAINING_SAMPLES,
         "samples_needed": max(0, MIN_TRAINING_SAMPLES - sample_size),
         "policy": registry.policy if registry else POLICY,
@@ -163,9 +174,15 @@ def _training_samples(session: Session, league: str) -> list[dict[str, Any]]:
     ).all()
     by_game: dict[int, dict[str, Any]] = {}
     for snapshot, prediction, game, result in rows:
-        if game.start_at and _naive(snapshot.captured_at) > _naive(game.start_at):
+        origin = prediction.origin or "LIVE_PREGAME"
+        cutoff = prediction.data_cutoff or prediction.created_at
+        if game.start_at and _naive(cutoff) > _naive(game.start_at):
             continue
-        if game.start_at and _naive(prediction.created_at) > _naive(game.start_at):
+        if origin == "LIVE_PREGAME" and game.start_at and _naive(snapshot.captured_at) > _naive(game.start_at):
+            continue
+        if origin == "HISTORICAL_REPLAY" and (
+            not prediction.training_eligible or not bool((prediction.leakage_audit or {}).get("passed"))
+        ):
             continue
         features = snapshot.input_payload.get("features") if snapshot.input_payload else None
         if not isinstance(features, dict):
@@ -174,20 +191,31 @@ def _training_samples(session: Session, league: str) -> list[dict[str, Any]]:
         base_home = float(snapshot.input_payload.get("home_expected", payload.get("base_home_expected_runs", prediction.home_expected_runs)))
         base_away = float(snapshot.input_payload.get("away_expected", payload.get("base_away_expected_runs", prediction.away_expected_runs)))
         baseline_probability = _two_way_poisson_probability(base_home, base_away)
-        by_game[game.id] = {
-            "game_id": game.id, "captured_at": snapshot.captured_at, "features": features,
+        candidate = {
+            "game_id": game.id, "captured_at": cutoff, "features": features, "origin": origin,
             "base_home_runs": base_home, "base_away_runs": base_away,
             "baseline_probability": baseline_probability,
             "home_score": float(result.home_score), "away_score": float(result.away_score),
             "outcome": 1.0 if result.home_score > result.away_score else (.5 if result.home_score == result.away_score else 0.0),
         }
+        current = by_game.get(game.id)
+        # A real pregame observation always supersedes a retrospective reconstruction.
+        if current is None or (current["origin"] != "LIVE_PREGAME" and origin == "LIVE_PREGAME") or (
+            current["origin"] == origin and _naive(candidate["captured_at"]) >= _naive(current["captured_at"])
+        ):
+            by_game[game.id] = candidate
     return sorted(by_game.values(), key=lambda row: (_naive(row["captured_at"]), row["game_id"]))
 
 
 def _train_candidate(session: Session, league: str, samples: list[dict[str, Any]], now: datetime
                      ) -> tuple[ModelArtifact, dict[str, float], dict[str, float]]:
-    split = max(MIN_VALIDATION_SAMPLES, round(len(samples) * VALIDATION_FRACTION))
-    train, validation = samples[:-split], samples[-split:]
+    live = [row for row in samples if row["origin"] == "LIVE_PREGAME"]
+    split = max(MIN_VALIDATION_SAMPLES, round(len(live) * VALIDATION_FRACTION))
+    validation = live[-split:]
+    validation_start = min(_naive(row["captured_at"]) for row in validation)
+    # Strict walk-forward boundary: replay rows can enrich the fit only when their as-of cutoff
+    # precedes the first live validation game.
+    train = [row for row in samples if _naive(row["captured_at"]) < validation_start]
     x_train = np.vstack([_feature_values(row["features"], row["base_home_runs"], row["base_away_runs"])
                          for row in train])
     means = x_train.mean(axis=0)
@@ -245,7 +273,8 @@ def _promotion_decision(candidate: dict[str, float], comparator: dict[str, float
 def _maybe_rollback(session: Session, registry: ModelRegistry, samples: list[dict[str, Any]], now: datetime) -> str | None:
     if registry.champion_model_version_id is None or registry.promoted_at is None:
         return None
-    live = [row for row in samples if _naive(row["captured_at"]) >= _naive(registry.promoted_at)]
+    live = [row for row in samples if row["origin"] == "LIVE_PREGAME" and
+            _naive(row["captured_at"]) >= _naive(registry.promoted_at)]
     if len(live) < MIN_ROLLBACK_SAMPLES:
         return None
     champion = _artifact_runtime(session, registry.champion_model_version_id)

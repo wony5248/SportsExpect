@@ -60,7 +60,7 @@ class MlbClient:
         """Return the complete regular-season schedule grouped by KST date."""
         payload = self._get_json("/api/v1/schedule", {
             "sportId": 1, "startDate": date(season, 1, 1).isoformat(),
-            "endDate": date(season, 12, 31).isoformat(), "gameTypes": "R", "hydrate": "team,venue",
+            "endDate": date(season, 12, 31).isoformat(), "gameTypes": "R", "hydrate": "team,venue,linescore",
         })
         rows = []
         for date_group in payload.data.get("dates", []):
@@ -329,12 +329,23 @@ def _schedule_game(item: dict[str, Any], service_date: date) -> dict[str, Any]:
         "stadium": item.get("venue", {}).get("name"), "status": status,
         "away_score": away.get("score") if status == "FINAL" else None,
         "home_score": home.get("score") if status == "FINAL" else None,
+        "innings": _linescore(item.get("linescore")) if status == "FINAL" else None,
         "away_pitcher_id": _person_id(away.get("probablePitcher")),
         "away_pitcher_name": _person_name(away.get("probablePitcher")),
         "home_pitcher_id": _person_id(home.get("probablePitcher")),
         "home_pitcher_name": _person_name(home.get("probablePitcher")),
         "starter_confirmed": bool(away.get("probablePitcher") and home.get("probablePitcher")),
         "lineup_confirmed": False,
+    }
+
+
+def _linescore(value: dict[str, Any] | None) -> dict[str, list[int | None]] | None:
+    innings = (value or {}).get("innings") or []
+    if not innings:
+        return None
+    return {
+        side: [inning.get(side, {}).get("runs") for inning in innings]
+        for side in ("away", "home")
     }
 
 

@@ -36,6 +36,7 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
     for market_row in market_rows:
         markets[market_row.game_id].append(market_row)
     candidates: dict[int, tuple[Prediction, Game, GameResult, PredictionSnapshot | None]] = {}
+    replay_candidates: dict[int, tuple[Prediction, Game, GameResult, PredictionSnapshot | None]] = {}
     model_candidates: dict[tuple[int, str], tuple[Prediction, Game, GameResult, PredictionSnapshot | None]] = {}
     for prediction, game, result in raw:
         prediction_snapshots = sorted(snapshots.get(prediction.id, []), key=lambda item: item.captured_at)
@@ -45,19 +46,27 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
         snapshot = matching[-1] if matching else None
         if stage and snapshot is None:
             continue
-        if game.start_at and _naive(prediction.created_at) > _naive(game.start_at):
+        cutoff = prediction.data_cutoff or prediction.created_at
+        if game.start_at and _naive(cutoff) > _naive(game.start_at):
             continue
-        if _naive(prediction.created_at) > _naive(result.finalized_at):
+        origin = prediction.origin or "LIVE_PREGAME"
+        if origin == "LIVE_PREGAME" and _naive(prediction.created_at) > _naive(result.finalized_at):
             continue
-        current = candidates.get(game.id)
+        if origin == "HISTORICAL_REPLAY" and not bool((prediction.leakage_audit or {}).get("passed")):
+            continue
+        target = replay_candidates if origin == "HISTORICAL_REPLAY" else candidates
+        current = target.get(game.id)
         if current is None or prediction.created_at > current[0].created_at:
-            candidates[game.id] = (prediction, game, result, snapshot)
+            target[game.id] = (prediction, game, result, snapshot)
+        if origin != "LIVE_PREGAME":
+            continue
         model_key = (game.id, prediction.model_version.name)
         model_current = model_candidates.get(model_key)
         if model_current is None or prediction.created_at > model_current[0].created_at:
             model_candidates[model_key] = (prediction, game, result, snapshot)
     rows = sorted(candidates.values(), key=lambda row: (row[1].game_date, row[1].start_at or datetime.min, row[1].id))
-    if not rows:
+    replay_rows = sorted(replay_candidates.values(), key=lambda row: (row[1].game_date, row[1].start_at or datetime.min, row[1].id))
+    if not rows and not replay_rows:
         return {
             "sample_size": 0, "league": league, "stage": stage,
             "message": "종료 경기의 경기 전 예측 스냅샷이 쌓이면 walk-forward 평가가 시작됩니다.",
@@ -84,6 +93,18 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
         })
         history.append((prediction.home_win_probability, outcome))
         prior_outcomes.append(outcome)
+
+    replay_evaluated: list[dict[str, Any]] = []
+    for prediction, game, result, snapshot in replay_rows:
+        outcome = 1.0 if result.home_score > result.away_score else (0.5 if result.home_score == result.away_score else 0.0)
+        replay_evaluated.append({
+            "game_id": game.id, "date": game.game_date.isoformat(), "league": game.league,
+            "model": prediction.model_version.name, "stage": snapshot.stage if snapshot else "HISTORICAL_REPLAY",
+            "probability": prediction.home_win_probability, "outcome": outcome,
+            "home_run_error": prediction.home_expected_runs - result.home_score,
+            "away_run_error": prediction.away_expected_runs - result.away_score,
+            **_run_distribution_fields(prediction, result),
+        })
 
     by_month: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_league: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -144,11 +165,17 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
         market_metrics["total_line_mae"] = round(sum(market_total_errors) / len(market_total_errors), 4)
     return {
         "sample_size": len(evaluated), "league": league, "stage": stage,
-        "leakage_guard": "prediction.created_at <= game.start_at",
+        "leakage_guard": "LIVE: created_at <= start_at; REPLAY: audited data_cutoff <= start_at",
         "readiness": _readiness(len(evaluated), completed_results),
-        "metrics": _metrics(evaluated, "probability"),
-        "walk_forward_calibrated": _metrics(evaluated, "calibrated_probability"),
-        "expanding_home_rate_baseline": _metrics(evaluated, "baseline_probability"),
+        "metrics": _metrics(evaluated, "probability") if evaluated else {"sample_size": 0, "message": "실전 경기 전 예측 표본이 없습니다."},
+        "walk_forward_calibrated": _metrics(evaluated, "calibrated_probability") if evaluated else {"sample_size": 0},
+        "expanding_home_rate_baseline": _metrics(evaluated, "baseline_probability") if evaluated else {"sample_size": 0},
+        "historical_replay": {
+            "sample_size": len(replay_evaluated),
+            "metrics": _metrics(replay_evaluated, "probability") if replay_evaluated else {"sample_size": 0},
+            "official_live_metric": False,
+            "disclosure": "경기 전 데이터만 사용해 현재 코드로 다시 계산한 회고 성능입니다.",
+        },
         "market_consensus_baseline": market_metrics,
         "by_league": {key: _metrics(value, "probability") for key, value in by_league.items()},
         "model_leaderboard": sorted(

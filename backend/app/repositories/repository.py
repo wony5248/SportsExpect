@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, joinedload
 from backend.app.config import KST, settings
 from backend.app.database import database_datetime, database_now
 from backend.app.models import (BatterSplit, Game, GameResult, LineupEntry, MarketConsensus, MarketSnapshot,
-                                ModelVersion, PitcherStat, Prediction, PredictionHistory, PredictionSnapshot,
+                                ModelVersion, PitcherStat, Prediction, PredictionEvaluation, PredictionHistory, PredictionSnapshot,
                                 Team, TeamStat)
 
 
@@ -50,10 +50,13 @@ def upsert_game(session: Session, raw: dict[str, Any], source_url: str, collecte
         result = session.get(GameResult, game.id)
         if result is None:
             result = GameResult(game_id=game.id, away_score=raw["away_score"], home_score=raw["home_score"],
+                                innings=raw.get("innings"),
                                 finalized_at=collected_at, source_url=source_url)
             session.add(result)
         else:
             result.away_score, result.home_score = raw["away_score"], raw["home_score"]
+            if raw.get("innings") is not None:
+                result.innings = raw["innings"]
             result.source_url = source_url
     return game
 
@@ -120,10 +123,12 @@ def upsert_games_bulk(session: Session, rows: list[dict[str, Any]], source_url: 
         if result is None:
             result = GameResult(game_id=game.id, away_score=int(raw["away_score"]),
                                 home_score=int(raw["home_score"]), finalized_at=collected_at,
-                                source_url=source_url)
+                                innings=raw.get("innings"), source_url=source_url)
             session.add(result); results[game.id] = result
         else:
             result.away_score, result.home_score = int(raw["away_score"]), int(raw["home_score"])
+            if raw.get("innings") is not None:
+                result.innings = raw["innings"]
             result.source_url = source_url
     return output
 
@@ -313,9 +318,14 @@ def get_or_create_model(session: Session, name: str, algorithm: str) -> ModelVer
 
 
 def save_prediction(session: Session, game: Game, result: dict[str, Any], *, stage: str = "UNSCHEDULED",
-                    trigger: str = "manual", captured_at: datetime | None = None) -> Prediction:
+                    trigger: str = "manual", captured_at: datetime | None = None,
+                    origin: str = "LIVE_PREGAME", data_cutoff: datetime | None = None,
+                    training_eligible: bool = True,
+                    leakage_audit: dict[str, Any] | None = None) -> Prediction:
     captured_at = captured_at or datetime.now(KST)
-    latest = session.scalar(select(Prediction).where(Prediction.game_id == game.id).order_by(Prediction.created_at.desc()).limit(1))
+    latest = session.scalar(select(Prediction).where(
+        Prediction.game_id == game.id, Prediction.origin == origin,
+    ).order_by(Prediction.created_at.desc()).limit(1))
     if latest and latest.input_hash == result["input_hash"]:
         prediction = latest
     else:
@@ -326,6 +336,8 @@ def save_prediction(session: Session, game: Game, result: dict[str, Any], *, sta
             home_win_probability=result["home_win_probability"], away_win_probability=result["away_win_probability"],
             home_expected_runs=result["home_expected_runs"], away_expected_runs=result["away_expected_runs"],
             confidence=result["confidence"], payload=result["payload"], created_at=captured_at,
+            origin=origin, data_cutoff=data_cutoff or captured_at,
+            training_eligible=training_eligible, leakage_audit=leakage_audit or {},
         )
         session.add(prediction)
         session.flush()
@@ -346,7 +358,7 @@ def save_prediction(session: Session, game: Game, result: dict[str, Any], *, sta
     )
     if not duplicate_latest_snapshot:
         minutes = None
-        if game.start_at:
+        if game.start_at and stage != "HISTORICAL_REPLAY":
             start_at = game.start_at if game.start_at.tzinfo else game.start_at.replace(tzinfo=KST)
             captured = captured_at if captured_at.tzinfo else captured_at.replace(tzinfo=KST)
             minutes = round((start_at - captured).total_seconds() / 60)
@@ -430,12 +442,12 @@ def _game_serialization_context(session: Session, games: list[Game]) -> dict[str
         return {
             "predictions": empty, "prediction_history": empty, "predictions_by_id": empty,
             "pitchers": empty, "lineups": empty, "team_stats": empty, "results": empty,
-            "markets": empty, "snapshots": empty,
+            "markets": empty, "snapshots": empty, "evaluations": empty,
         }
 
     predictions_by_game: dict[int, list[Prediction]] = defaultdict(list)
     predictions_by_id: dict[int, Prediction] = {}
-    for row in session.scalars(select(Prediction).where(
+    for row in session.scalars(select(Prediction).options(joinedload(Prediction.evaluation)).where(
         Prediction.game_id.in_(game_ids),
     ).order_by(Prediction.game_id, Prediction.created_at.desc())).all():
         predictions_by_game[row.game_id].append(row)
@@ -460,6 +472,8 @@ def _game_serialization_context(session: Session, games: list[Game]) -> dict[str
         team_stats.setdefault(row.team_id, row)
 
     results = {row.game_id: row for row in session.scalars(select(GameResult).where(GameResult.game_id.in_(game_ids))).all()}
+
+    evaluations = {row.id: row.evaluation for row in predictions_by_id.values() if row.evaluation is not None}
 
     markets: dict[int, MarketConsensus] = {}
     for row in session.scalars(select(MarketConsensus).where(
@@ -492,6 +506,7 @@ def _game_serialization_context(session: Session, games: list[Game]) -> dict[str
         "results": results,
         "markets": markets,
         "snapshots": snapshots_by_game,
+        "evaluations": evaluations,
     }
 
 
@@ -502,7 +517,13 @@ def _display_prediction(game: Game, predictions: list[Prediction], result: GameR
     if result is None:
         return predictions[0]
     cutoff = game.start_at or result.finalized_at
-    return next((row for row in predictions if _naive(row.created_at) <= _naive(cutoff)), None)
+    live = next((row for row in predictions if row.origin == "LIVE_PREGAME" and
+                 _naive(row.data_cutoff or row.created_at) <= _naive(cutoff)), None)
+    if live:
+        return live
+    return next((row for row in predictions if row.origin == "HISTORICAL_REPLAY" and
+                 bool((row.leakage_audit or {}).get("passed")) and
+                 _naive(row.data_cutoff or row.created_at) <= _naive(cutoff)), None)
 
 
 def _serialize_game(game: Game, context: dict[str, Any]) -> dict[str, Any]:
@@ -525,8 +546,10 @@ def _serialize_game(game: Game, context: dict[str, Any]) -> dict[str, Any]:
         "status": game.status, "collected_at": _iso(game.collected_at),
         "away": _team_payload(game.away_team, away_stat, pitcher_map.get("away")),
         "home": _team_payload(game.home_team, home_stat, pitcher_map.get("home")),
-        "result": {"away_score": result.away_score, "home_score": result.home_score} if result else None,
-        "prediction": _prediction_payload(prediction) if prediction else None,
+        "result": ({"away_score": result.away_score, "home_score": result.home_score,
+                    **({"innings": result.innings} if result.innings is not None else {})}
+                   if result else None),
+        "prediction": _prediction_payload(prediction, context["evaluations"].get(prediction.id)) if prediction else None,
         "market": _market_payload(market, prediction) if market else None,
         "prediction_history": _history_payload(context["prediction_history"].get(game.id, []), snapshots),
         "prediction_timeline": _timeline_payload(context["predictions_by_id"], snapshots),
@@ -563,8 +586,8 @@ def _team_payload(team: Team, stat: TeamStat | None, pitcher: PitcherStat | None
     return data
 
 
-def _prediction_payload(p: Prediction) -> dict[str, Any]:
-    payload = p.payload or {}
+def _prediction_payload(p: Prediction, evaluation: PredictionEvaluation | None = None) -> dict[str, Any]:
+    payload = {key: value for key, value in (p.payload or {}).items() if key != "simulation_recipe"}
     display_score = payload.get("display_expected_score") or {
         "away": round(p.away_expected_runs, 1), "home": round(p.home_expected_runs, 1),
     }
@@ -574,7 +597,28 @@ def _prediction_payload(p: Prediction) -> dict[str, Any]:
         "home_expected_runs": p.home_expected_runs, "away_expected_runs": p.away_expected_runs,
         "expected_total": displayed_total,
         "statistical_expected_total": round(p.home_expected_runs + p.away_expected_runs, 2),
-        "confidence": p.confidence, "created_at": _iso(p.created_at), **payload,
+        "confidence": p.confidence, "created_at": _iso(p.created_at),
+        "origin": p.origin, "data_cutoff": _iso(p.data_cutoff) if p.data_cutoff else None,
+        "training_eligible": p.training_eligible, "leakage_audit": p.leakage_audit or {},
+        "evaluation": _evaluation_payload(evaluation) if evaluation else None,
+        **payload,
+    }
+
+
+def _evaluation_payload(row: PredictionEvaluation) -> dict[str, Any]:
+    return {
+        "simulation_count": row.simulation_count,
+        "actual_score_count": row.actual_score_count,
+        "actual_score_probability": row.actual_score_probability,
+        "actual_outcome_count": row.actual_outcome_count,
+        "actual_outcome_probability": row.actual_outcome_probability,
+        "actual_total_count": row.actual_total_count,
+        "actual_total_probability": row.actual_total_probability,
+        "actual_margin_count": row.actual_margin_count,
+        "actual_margin_probability": row.actual_margin_probability,
+        "actual_inning_path_count": row.actual_inning_path_count,
+        "actual_inning_path_probability": row.actual_inning_path_probability,
+        **(row.details or {}),
     }
 
 
@@ -650,16 +694,41 @@ def performance_metrics(session: Session) -> dict[str, Any]:
     rows = session.execute(select(Prediction, GameResult, Game).join(
         GameResult, GameResult.game_id == Prediction.game_id
     ).join(Game, Game.id == Prediction.game_id)).all()
-    # One evaluation per game: retain the final prediction created before the result was stored.
+    # One evaluation per game and source. Retrospective replay never changes the official live metric.
     latest: dict[int, tuple[Prediction, GameResult]] = {}
+    replay: dict[int, tuple[Prediction, GameResult]] = {}
     for prediction, result, game in rows:
-        before_start = game.start_at is None or prediction.created_at <= game.start_at
-        if before_start and prediction.created_at <= result.finalized_at and (prediction.game_id not in latest or prediction.created_at > latest[prediction.game_id][0].created_at):
-            latest[prediction.game_id] = (prediction, result)
+        cutoff = prediction.data_cutoff or prediction.created_at
+        before_start = game.start_at is None or _naive(cutoff) <= _naive(game.start_at)
+        origin = prediction.origin or "LIVE_PREGAME"
+        if not before_start:
+            continue
+        if origin == "HISTORICAL_REPLAY":
+            if not bool((prediction.leakage_audit or {}).get("passed")):
+                continue
+            target = replay
+        elif origin == "LIVE_PREGAME" and _naive(prediction.created_at) <= _naive(result.finalized_at):
+            target = latest
+        else:
+            continue
+        if prediction.game_id not in target or prediction.created_at > target[prediction.game_id][0].created_at:
+            target[prediction.game_id] = (prediction, result)
     if not latest:
-        return {"sample_size": 0, "message": "종료 경기와 경기 전 예측이 쌓이면 평가 지표가 표시됩니다.", "calibration": []}
+        output = {"sample_size": 0, "message": "종료 경기와 경기 전 실전 예측이 쌓이면 평가 지표가 표시됩니다.",
+                  "calibration": []}
+    else:
+        output = _performance_summary(latest)
+    output["historical_replay"] = {
+        **(_performance_summary(replay) if replay else {"sample_size": 0, "calibration": []}),
+        "official_live_metric": False,
+        "disclosure": "현재 모델로 다시 계산한 회고 재현이며 실전 성과와 분리됩니다.",
+    }
+    return output
+
+
+def _performance_summary(rows: dict[int, tuple[Prediction, GameResult]]) -> dict[str, Any]:
     probs, outcomes, run_errors = [], [], []
-    for p, r in latest.values():
+    for p, r in rows.values():
         outcome = 1.0 if r.home_score > r.away_score else (0.5 if r.home_score == r.away_score else 0.0)
         probs.append(p.home_win_probability); outcomes.append(outcome)
         run_errors.extend([p.home_expected_runs - r.home_score, p.away_expected_runs - r.away_score])

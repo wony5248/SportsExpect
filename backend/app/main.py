@@ -19,7 +19,7 @@ from backend.app.repositories.repository import game_cards, game_dates, game_det
 from backend.app.services.operations import LockUnavailable, backup_database, operational_status
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services.bullpen import TIERS, apply_profile_update, load_profiles
-from backend.app.services.jobs import run_cron_refresh, run_full_refresh
+from backend.app.services.jobs import run_cron_refresh, run_full_refresh, run_replay_refresh
 from backend.app.services.model_lifecycle import lifecycle_status
 from backend.app.services.claude_advisor import clear_claude_cache
 from backend.app.services.personal_claude import analyze_game_for_user
@@ -159,12 +159,21 @@ def refresh(target_date: date = Query(alias="date", default_factory=lambda: date
 @app.post("/api/v1/admin/cron/refresh", dependencies=[Depends(require_admin)])
 def cron_refresh(
     league: str = Query(pattern="^(KBO|MLB)$"),
-    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle|splits)$"),
+    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle|splits|replay)$"),
 ):
     try:
         return run_cron_refresh(league, scope)
     except LockUnavailable as exc:
         # A concurrent full/nearby run is expected occasionally; Cron can safely retry later.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/replay", dependencies=[Depends(require_admin)])
+def historical_replay(league: str = Query(pattern="^(KBO|MLB)$"), limit: int = Query(default=20, ge=1, le=100)):
+    """Backfill archive forecasts without presenting them as original live predictions."""
+    try:
+        return run_replay_refresh(league, limit)
+    except LockUnavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 

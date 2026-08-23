@@ -23,7 +23,7 @@ begin
   if refresh_league not in ('KBO', 'MLB') then
     raise exception 'Unsupported league: %', refresh_league;
   end if;
-  if refresh_scope not in ('full', 'nearby', 'tomorrow', 'market', 'checkpoints', 'lifecycle', 'splits') then
+  if refresh_scope not in ('full', 'nearby', 'tomorrow', 'market', 'checkpoints', 'lifecycle', 'splits', 'replay') then
     raise exception 'Unsupported scope: %', refresh_scope;
   end if;
 
@@ -104,6 +104,13 @@ select cron.schedule('dugout-kbo-splits', '9,39 * * * *',
   $$select public.invoke_dugout_refresh('KBO', 'splits')$$);
 select cron.schedule('dugout-mlb-splits', '24,54 * * * *',
   $$select public.invoke_dugout_refresh('MLB', 'splits')$$);
+
+-- Rebuild at most ten archive games per league/day from strictly pregame information.
+-- These are labelled retrospective replays and never replace a stored live forecast.
+select cron.schedule('dugout-kbo-historical-replay', '0 20 * * *',
+  $$select public.invoke_dugout_refresh('KBO', 'replay')$$);
+select cron.schedule('dugout-mlb-historical-replay', '0 7 * * *',
+  $$select public.invoke_dugout_refresh('MLB', 'replay')$$);
 
 -- Daily champion/challenger evaluation. Runs only after the result collectors
 -- have had time to finalize the previous slate (05:30 and 16:30 KST).

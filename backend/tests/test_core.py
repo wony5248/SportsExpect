@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import json
 import logging
 from types import SimpleNamespace
 import httpx
@@ -10,9 +11,9 @@ from fastapi import HTTPException
 from sqlalchemy import Text, create_engine, event, select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
-from backend.app.config import KST, database_url_from_environment
+from backend.app.config import KST, database_url_from_environment, settings
 from backend.app.database.base import Base
-from backend.app.models import (Game, GameResult, ModelVersion, Prediction, PredictionSnapshot, Team,
+from backend.app.models import (Game, GameResult, ModelVersion, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
                                 TeamBullpenEvent, UserClaudeSetting)
 from backend.app.repositories.repository import _prediction_changes, game_cards, game_dates
 from backend.app.services.backtest import walk_forward_backtest
@@ -21,7 +22,8 @@ from backend.app.services import claude_advisor, personal_claude, runtime_secret
 from backend.app.services.claude_advisor import blend_with_claude
 from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batter_base_states,
                                                _batter_pitcher_split, _data_id_table, _hitter_name,
-                                               _pitcher_opponent_split, _rank_table, _record_rate)
+                                               _pitcher_opponent_split, _rank_table, _record_rate,
+                                               _scoreboard_innings)
 from backend.app.collectors.kbo.client import SourcePayload
 from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient
 from backend.app.collectors.odds import _consensus_event
@@ -31,10 +33,12 @@ from backend.app.services.refresh import (SPLIT_FETCH_BUDGET, _collect_batter_sp
                                           _prediction_stage, _recent_by_team, _split_budget)
 from backend.app.services.batting import SINGLE, STATE_INDEX, build_batter_table
 from backend.app.services.simulation import simulate_scores
+from backend.app.services.simulation import evaluate_simulation_recipe
 from backend.app.services.prediction import (blend_classifier_into_means, build_score_estimates,
                                              predict_game, select_primary_score)
 from backend.app.services.jobs import _missing_leagues_for_date, checkpoint_stage_for_minutes
 from backend.app.services.model_lifecycle import _promotion_decision, predict_with_runtime
+from backend.app.services.historical_replay import run_historical_replay
 from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
 
 
@@ -61,6 +65,75 @@ def test_recent_form_excludes_target_date():
     assert result["LG"]["10"]["avg_runs"] == 5
     assert result["KIA"]["10"]["win_rate"] == 0
     assert result["LG"]["matchups"]["KIA"]["avg_run_diff"] == 2
+
+
+def test_kbo_scoreboard_inning_rows_are_parsed_and_trailing_blanks_removed():
+    table = {"rows": [
+        {"row": [{"Text": value} for value in ("1", "0", "2", "-", "-")]},
+        {"row": [{"Text": value} for value in ("0", "1", "0", "-", "-")]},
+    ]}
+    result = _scoreboard_innings({"code": "100", "table2": json.dumps(table)})
+    assert result == {"away": [1, 0, 2], "home": [0, 1, 0]}
+
+
+def test_stored_simulation_recipe_reproduces_actual_result_frequencies():
+    recipe = {
+        "home_expected": 4.8, "away_expected": 4.1, "simulations": 5_000, "seed": 2026,
+        "environment_variance": .08, "team_variance": .12, "league": "KBO",
+        "home_staff": None, "away_staff": None, "home_lineup": None, "away_lineup": None,
+    }
+    evaluation = evaluate_simulation_recipe(recipe, {
+        "away_score": 3, "home_score": 5,
+        "innings": {"away": [0, 0, 1, 0, 0, 1, 0, 1, 0],
+                    "home": [1, 0, 0, 2, 0, 0, 1, 1, 0]},
+    })
+    assert evaluation["simulation_count"] == 5_000
+    assert evaluation["actual_score_count"] >= 0
+    assert evaluation["actual_score_probability"] == round(evaluation["actual_score_count"] / 5_000, 6)
+    assert evaluation["actual_outcome"] == "HOME_WIN"
+    assert evaluation["actual_outcome_count"] > evaluation["actual_score_count"]
+    assert evaluation["inning_data_available"] is True
+    assert evaluation["actual_inning_path_count"] >= 0
+
+
+def test_historical_replay_is_audited_evaluated_and_serialized_separately():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        away = Team(league="KBO", code="AW", name="Away")
+        home = Team(league="KBO", code="HM", name="Home")
+        session.add_all([away, home]); session.flush()
+        base = datetime(2026, 4, 1, 18, 30)
+        for index in range(6):
+            start = base + timedelta(days=index)
+            game = Game(
+                external_id=f"REPLAY-{index}", league="KBO", game_date=start.date(),
+                start_at=start, start_time=start.time(), away_team_id=away.id, home_team_id=home.id,
+                status="FINAL", source="test", source_url="test", collected_at=start + timedelta(hours=3),
+            )
+            session.add(game); session.flush()
+            session.add(GameResult(
+                game_id=game.id, away_score=3 + index % 2, home_score=5 - index % 2,
+                innings={"away": [0, 0, 1, 0, 1, 0, 1, 0, 0],
+                         "home": [1, 0, 0, 1, 0, 1, 0, 2 - index % 2, 0]},
+                finalized_at=start + timedelta(hours=3), source_url="test",
+            ))
+        session.flush()
+        report = run_historical_replay(session, "KBO", limit=1)
+        assert report["created"] == 1
+        prediction = session.scalar(select(Prediction).where(Prediction.origin == "HISTORICAL_REPLAY"))
+        assert prediction is not None
+        assert prediction.training_eligible is True
+        assert prediction.leakage_audit["passed"] is True
+        assert prediction.leakage_audit["target_result_used_as_input"] is False
+        evaluation = session.scalar(select(PredictionEvaluation).where(
+            PredictionEvaluation.prediction_id == prediction.id,
+        ))
+        assert evaluation is not None
+        assert evaluation.simulation_count == settings.simulations
+        card = game_cards(session, date(2026, 4, 6), "KBO")[0]
+        assert card["prediction"]["origin"] == "HISTORICAL_REPLAY"
+        assert card["prediction"]["evaluation"]["actual_score_count"] >= 0
 
 
 def test_month_range_crosses_year_boundary():

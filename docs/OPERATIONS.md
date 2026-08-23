@@ -94,6 +94,8 @@ alembic upgrade head
 
 `python -m backend.app.cli backtest --league ALL`에서 Accuracy, Brier, Log Loss, 득점 MAE·RMSE, calibration error, 월·리그·모델별 결과와 expanding home-rate 기준 모델을 함께 확인합니다. 두 모델이 같은 경기를 예측한 경우에는 paired 차이와 bootstrap 95% 신뢰구간을 추가로 계산합니다. 200경기는 예비 판단선, 500경기는 권장 판단선이며 그 전에는 승격 결론을 내리지 않습니다.
 
+과거 아카이브 재현은 `python -m backend.app.cli historical-replay --league KBO --limit 20`으로 백필합니다. 재현은 경기 시작 전 종료 경기만으로 팀 기록을 다시 만들며 `HISTORICAL_REPLAY`로 저장됩니다. 백테스트의 공식 실전 지표와 재현 지표는 분리되고, 재현 표본은 학습을 보조할 수 있지만 최소 40개의 독립 실전 검증 표본 없이는 자동 모델 승격에 사용되지 않습니다.
+
 ## 자동 학습·승격·롤백
 
 - 매일 KBO 05:30, MLB 16:30 KST에 리그별 lifecycle job 실행

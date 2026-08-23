@@ -47,6 +47,13 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .result-comparison-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: stretch; }
 .result-score, .result-verdict { min-width: 0; padding: 9px 11px; border-radius: 9px; background: rgba(3,16,12,.26); }
 .result-score { display: grid; gap: 2px; }.result-score span, .result-verdict span { color: #8d8063; font-size: .61rem; }.result-score strong { color: #f6c86b; font-size: 1.12rem; }.result-score.predicted strong { color: #c7d8d1; }.result-score i { color: #826f49; font-style: normal; }.result-score small, .result-verdict small { color: #6f765f; font-size: .54rem; }
+.replay-disclosure { margin-top: 10px; background: rgba(44,112,139,.11) !important; color: #9fc8d8 !important; border: 1px solid rgba(95,166,194,.2); font-size: .66rem; }
+.simulation-actual-match { margin-top: 12px; padding-top: 11px; border-top: 1px solid rgba(246,200,107,.12); }
+.simulation-match-title { display: block; margin-bottom: 8px; color: #a89569; font-size: .64rem; }
+.simulation-match-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; }
+.simulation-match { display: grid; gap: 2px; padding: 8px 9px; border-radius: 8px; background: rgba(3,16,12,.28); }
+.simulation-match small { color: #7f8e82; font-size: .55rem; }.simulation-match b { color: #e7d19a; font-size: .76rem; }.simulation-match span { color: #6e8179; font-size: .55rem; }
+.simulation-match.unavailable b { color: #718078; }.simulation-match.unavailable span { line-height: 1.35; }
 .result-verdict { display: grid; align-content: center; gap: 3px; }.result-verdict b { font-size: .72rem; }.result-verdict.correct b { color: #7ee7b8; }.result-verdict.incorrect b { color: #f29b8e; }.result-verdict.neutral b, .result-verdict.unavailable b { color: #d0b879; }
 .market-verdicts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
 .market-verdict { display: grid; align-content: start; gap: 3px; padding: 9px 11px; border-radius: 9px; background: rgba(3,16,12,.26); border: 1px solid transparent; }
@@ -245,6 +252,7 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .score-row > div.primary strong { font-size: 1.12rem; }
   .range-bar { grid-template-columns: minmax(44px, auto) 1fr auto; gap: 7px; }
   .result-comparison-grid { grid-template-columns: 1fr 1fr; }
+  .simulation-match-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .result-verdict { grid-column: 1 / -1; }
   .market-verdicts { grid-template-columns: 1fr; }
   .forecast-range b, .forecast-range small { line-height: 1.5; }

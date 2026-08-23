@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -99,6 +100,14 @@ class KboClient:
                 "lineup_confirmed": bool(item.get("LINEUP_CK")),
             })
         return SourcePayload(games, raw.source_url, raw.collected_at)
+
+    def score_innings(self, game_id: str, season: int) -> SourcePayload:
+        """Return official inning runs from the KBO GameCenter scoreboard."""
+        raw = self._post_json(
+            "/ws/Schedule.asmx/GetScoreBoardScroll",
+            {"leId": "1", "srId": "0", "seasonId": str(season), "gameId": game_id},
+        )
+        return SourcePayload(_scoreboard_innings(raw.data), raw.source_url, raw.collected_at)
 
     def lineups(self, game: dict[str, Any]) -> SourcePayload:
         path = "/ws/Schedule.asmx/GetLineUpAnalysis"
@@ -510,6 +519,27 @@ def _baseball_innings(value: Any) -> float:
     if not match:
         return _as_float(text, 0.0) or 0.0
     return float(match.group(1)) + (int(match.group(2)) / 3 if match.group(2) else 0.0)
+
+
+def _scoreboard_innings(payload: dict[str, Any]) -> dict[str, list[int | None]] | None:
+    if payload.get("code") != "100" or not payload.get("table2"):
+        return None
+    table = json.loads(payload["table2"])
+    rows = table.get("rows") or []
+    if len(rows) < 2:
+        return None
+
+    def runs(row: dict[str, Any]) -> list[int | None]:
+        values: list[int | None] = []
+        for cell in row.get("row") or []:
+            text = str(cell.get("Text", "")).strip()
+            values.append(int(text) if text.isdigit() else None)
+        while values and values[-1] is None:
+            values.pop()
+        return values
+
+    away, home = runs(rows[0]), runs(rows[1])
+    return {"away": away, "home": home} if away and home else None
 
 
 _PREFIX = "ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$"
