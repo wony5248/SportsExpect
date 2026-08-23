@@ -76,7 +76,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <Box className="result-comparison-grid">
           <Box className="result-score actual"><span>실제 최종</span><strong>{game.result.away_score} <i>:</i> {game.result.home_score}</strong><small>{game.away.name} : {game.home.name}</small></Box>
           {resultComparison ? <>
-            <Box className="result-score predicted"><span>시뮬레이션 최빈 점수</span><strong>{stat(resultComparison.awayExpected, 0)} <i>:</i> {stat(resultComparison.homeExpected, 0)}</strong><small>{game.away.name} : {game.home.name}</small></Box>
+            <Box className="result-score predicted"><span>시뮬레이션 최빈 점수</span><strong>{stat(resultComparison.awayExpected, 0)} <i>:</i> {stat(resultComparison.homeExpected, 0)}</strong><small>{game.away.name} : {game.home.name}{p?.extra_innings ? '' : ' · 9이닝 구모델'}</small></Box>
             <Box className={`result-verdict ${resultComparison.verdictClass}`}><b>{resultComparison.verdict}</b><span>{resultComparison.favorite}</span><small>최빈 점수 기준 팀당 오차 {stat(resultComparison.runsMae, 1)}점</small></Box>
           </> : <Box className="result-verdict unavailable"><b>비교할 예측 없음</b><span>경기 시작 전에 저장된 시뮬레이션 예측이 없습니다.</span></Box>}
         </Box>
@@ -104,7 +104,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <Box className="score-row">
           <Box className="primary"><span>시뮬레이션 평균 스코어</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>{weightedScore ? `최빈 5개 가중 ${stat(weightedScore.away, 1)} : ${stat(weightedScore.home, 1)} (표본 ${pct(weightedScore.coverage_probability)})` : `평균 총점 ${stat(statisticalExpectedTotal, 1)}점`}</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>{p.model.simulations.toLocaleString()}회 최빈 스코어</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}</small></Box>
+          <Box><span>{p.model.simulations.toLocaleString()}회 최빈 스코어</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}{p.extra_innings ? '' : ' · 9이닝 구모델'}</small></Box>
           <Divider orientation="vertical" flexItem />
           <Box><span>{ranking ? '가장 많이 나온 결과 1위' : modeOutcome ? '가장 많이 나온 결과' : '승률이 높은 결과'}</span><strong>{ranking ? ranking.outcomes[0].label : modeOutcome ? outcomeLabel(modeOutcome.value, game) : favoriteLabel(p, game)}</strong><small>{ranking ? `${pct(ranking.outcomes[0].probability)}${ranking.outcomes[0].note ? ` · ${ranking.outcomes[0].note}` : ''}` : modeOutcome ? modeFrequency(modeOutcome) : pct(Math.max(p.home_win_probability, p.away_win_probability))}</small></Box>
         </Box>
