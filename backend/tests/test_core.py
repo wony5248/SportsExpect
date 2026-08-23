@@ -48,6 +48,7 @@ from backend.app.services.team_residuals import (ResidualObservation, TeamResidu
                                                  apply_residual_adjustment, available_before,
                                                  residual_context)
 from backend.app.services.pregame_context import prediction_context
+from backend.app.services.data_integrity import summarize_pitcher_rows
 
 
 def test_rank_and_data_tables_are_schema_driven():
@@ -109,6 +110,25 @@ def test_mlb_linescore_is_normalized_for_result_flow_comparison():
         {"away": {"runs": 0}, "home": {"runs": 2}},
     ]}) == {"away": [1, 0], "home": [0, 2]}
     assert _linescore(None) is None
+
+
+def test_pitcher_integrity_distinguishes_same_game_duplicates_from_normal_repeated_snapshots():
+    game1 = SimpleNamespace(id=1, external_id="GAME-1", game_date=date(2026, 8, 20))
+    game2 = SimpleNamespace(id=2, external_id="GAME-2", game_date=date(2026, 8, 25))
+    def stat(row_id, game_id, side):
+        return SimpleNamespace(
+            id=row_id, game_id=game_id, side=side, player_id="42", name="Pitcher", confirmed=True,
+            era=3.2, whip=1.1, war=1.2, games=20, avg_start_innings=5.5, quality_starts=10,
+            fip=3.4, k_bb_rate=.18, rest_days=5, recent_pitches=0, handedness="R",
+            opponent_games=1, opponent_innings=6.0, opponent_era=2.0, opponent_whip=1.0, recent={},
+        )
+    summary = summarize_pitcher_rows([
+        (stat(1, 1, "home"), game1), (stat(2, 1, "home"), game1),
+        (stat(3, 2, "away"), game2),
+    ])
+    assert len(summary["_same_game_side_rows"]) == 1
+    assert len(summary["_same_game_player_rows"]) == 1
+    assert len(summary["_repeated_signature_rows"]) == 1
 
 
 def test_mlb_weather_adjustment_is_neutral_when_missing_and_capped_when_published():

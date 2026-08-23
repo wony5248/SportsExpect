@@ -22,6 +22,7 @@ from backend.app.services.bullpen import TIERS, apply_profile_update, load_profi
 from backend.app.services.jobs import run_cron_refresh, run_full_refresh, run_replay_refresh
 from backend.app.services.model_lifecycle import lifecycle_status
 from backend.app.services.claude_advisor import clear_claude_cache
+from backend.app.services.data_integrity import pitcher_stats_integrity
 from backend.app.services.personal_claude import analyze_game_for_user
 from backend.app.services.runtime_secrets import (public_user_claude_status, remove_user_claude_key,
                                                   save_user_claude_key, user_claude_configuration,
@@ -158,6 +159,15 @@ def refresh(target_date: date = Query(alias="date", default_factory=lambda: date
         return run_full_refresh(league, target_date, force=force, trigger="manual_api")
     except LockUnavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/data-integrity/pitchers", dependencies=[Depends(require_admin)])
+def pitcher_data_integrity(repair: bool = Query(default=False), session: Session = Depends(get_session)):
+    """Admin-only audit; repair deletes only duplicate rows for one game/team side."""
+    report = pitcher_stats_integrity(session, repair=repair)
+    if repair:
+        session.commit()
+    return report
 
 
 @app.post("/api/v1/admin/cron/refresh", dependencies=[Depends(require_admin)])
