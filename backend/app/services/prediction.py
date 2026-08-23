@@ -206,6 +206,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
                 "away_run_adjustment": round(away_runs - baseline_away_runs, 6),
                 "home_variance_multiplier": residual_context.get("home_variance_multiplier", 1.0),
                 "away_variance_multiplier": residual_context.get("away_variance_multiplier", 1.0),
+                "mean_reversion_weight": residual_context.get("mean_reversion_weight"),
                 "source_game_count": residual_context.get("source_game_count", 0),
                 "latest_source_game_id": residual_context.get("latest_source_game_id"),
                 "home": residual_context.get("home") or {},

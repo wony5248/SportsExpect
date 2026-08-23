@@ -243,13 +243,20 @@ def _residual_walk_forward(
     baseline_metrics = _metrics(baseline_rows, "probability")
     adjusted_metrics = _metrics(adjusted_rows, "probability")
     compared = ("runs_mae", "runs_rmse", "brier_score", "log_loss", "calibration_error")
+    deltas = {
+        key: round(float(adjusted_metrics[key]) - float(baseline_metrics[key]), 5)
+        for key in compared if key in baseline_metrics and key in adjusted_metrics
+    }
+    gate_passed = len(baseline_rows) >= 200 and all(value <= 0 for value in deltas.values())
     return {
         "sample_size": len(baseline_rows),
         "baseline": baseline_metrics,
         "adjusted": adjusted_metrics,
-        "delta_adjusted_minus_baseline": {
-            key: round(float(adjusted_metrics[key]) - float(baseline_metrics[key]), 5)
-            for key in compared if key in baseline_metrics and key in adjusted_metrics
+        "delta_adjusted_minus_baseline": deltas,
+        "deployment_gate": {
+            "status": "PASS" if gate_passed else ("COLLECTING" if len(baseline_rows) < 200 else "HOLD"),
+            "minimum_sample_size": 200,
+            "requires_no_regression": list(compared),
         },
     }
 

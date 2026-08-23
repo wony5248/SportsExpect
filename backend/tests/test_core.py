@@ -1020,7 +1020,9 @@ def test_kbo_residual_calibration_separates_venue_shrinks_matchups_and_respects_
     # No games were against team 3, so matchup carry-over is exactly neutral.
     assert context["home"]["matchup"] == 0
     adjusted = apply_residual_adjustment(5.0, 5.0, context)
-    assert adjusted[0] > 5.0
+    # Recent form is already in the base model, so the validated residual layer mean-reverts
+    # unexplained over-performance instead of counting the same hot streak twice.
+    assert adjusted[0] < 5.0
     assert abs(adjusted[0] - 5.0) <= .45
     assert available_before(observations[-1], datetime(2026, 8, 23, 18, 30)) is True
 

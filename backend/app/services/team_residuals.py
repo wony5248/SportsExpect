@@ -17,9 +17,13 @@ from backend.app.models import Game, GameResult, Prediction
 RESIDUAL_FEATURE_START_DATE = date(2026, 8, 23)
 RESIDUAL_POLICY_VERSION = 1
 RESIDUAL_ENABLED_LEAGUES = {"KBO"}
-EWMA_HALF_LIFE_GAMES = 6.0
+EWMA_HALF_LIFE_GAMES = 12.0
 RESIDUAL_WINSOR_LIMIT = 6.0
 MAX_RUN_ADJUSTMENT = .45
+# The base model already includes recent form. KBO's 550-game walk-forward replay showed that
+# unexplained run residuals mean-revert; carrying them forward double-counted form and worsened
+# every tracked metric. Half of the shrunk signal is therefore pulled back toward the baseline.
+RESIDUAL_MEAN_REVERSION_WEIGHT = -.50
 
 
 @dataclass(frozen=True)
@@ -114,9 +118,11 @@ def residual_context(observations: list[ResidualObservation], home_team_id: int,
     # A scoring residual contains both the batting club and opposing prevention signal. Their
     # weights sum to one, avoiding double-counting the same game error. Matchup residuals get
     # only a small final weight after their much stronger sample shrinkage.
-    home_adjustment = _clip(.55 * home["offense"] - .45 * away["defense"] + .10 * home["matchup"],
+    home_signal = .70 * home["offense"] - .30 * away["defense"] + .10 * home["matchup"]
+    away_signal = .70 * away["offense"] - .30 * home["defense"] + .10 * away["matchup"]
+    home_adjustment = _clip(RESIDUAL_MEAN_REVERSION_WEIGHT * home_signal,
                             -MAX_RUN_ADJUSTMENT, MAX_RUN_ADJUSTMENT)
-    away_adjustment = _clip(.55 * away["offense"] - .45 * home["defense"] + .10 * away["matchup"],
+    away_adjustment = _clip(RESIDUAL_MEAN_REVERSION_WEIGHT * away_signal,
                             -MAX_RUN_ADJUSTMENT, MAX_RUN_ADJUSTMENT)
     home_volatility = _clip(math.sqrt(home["offense_volatility"] * away["defense_volatility"]), .82, 1.35)
     away_volatility = _clip(math.sqrt(away["offense_volatility"] * home["defense_volatility"]), .82, 1.35)
@@ -133,7 +139,9 @@ def residual_context(observations: list[ResidualObservation], home_team_id: int,
         "away_variance_multiplier": round(away_volatility ** 2, 6),
         "home": _public_projection(home),
         "away": _public_projection(away),
-        "method": "team offense/defense EWMA + venue split + shrunk matchup residual",
+        "mean_reversion_weight": RESIDUAL_MEAN_REVERSION_WEIGHT,
+        "method": ("walk-forward selected mean reversion of team offense/defense EWMA + "
+                   "venue split + shrunk matchup residual"),
     }
 
 
@@ -203,12 +211,12 @@ def _team_projection(observations: list[ResidualObservation], team_id: int, oppo
     venue_off, _ = _ewma(offense_venue)
     venue_def, _ = _ewma(defense_venue)
     matchup_mean, _ = _ewma(matchup)
-    general_off = _shrink(off_mean, len(offense_all), 20)
-    general_def = _shrink(def_mean, len(defense_all), 20)
-    venue_off = _shrink(venue_off, len(offense_venue), 30)
-    venue_def = _shrink(venue_def, len(defense_venue), 30)
-    offense_signal = .75 * general_off + .25 * venue_off
-    defense_signal = .75 * general_def + .25 * venue_def
+    general_off = _shrink(off_mean, len(offense_all), 10)
+    general_def = _shrink(def_mean, len(defense_all), 10)
+    venue_off = _shrink(venue_off, len(offense_venue), 15)
+    venue_def = _shrink(venue_def, len(defense_venue), 15)
+    offense_signal = .90 * general_off + .10 * venue_off
+    defense_signal = .90 * general_def + .10 * venue_def
     matchup_signal = _shrink(matchup_mean, len(matchup), 40)
     # Variance is shrunk toward league noise more aggressively than the mean. With very small
     # samples this makes the multiplier exactly neutral instead of treating one blowout as a trait.
