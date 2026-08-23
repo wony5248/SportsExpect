@@ -36,7 +36,8 @@ from backend.app.services.simulation import simulate_scores
 from backend.app.services.simulation import evaluate_simulation_recipe
 from backend.app.services.prediction import (blend_classifier_into_means, build_score_estimates,
                                              predict_game, select_primary_score)
-from backend.app.services.jobs import _missing_leagues_for_date, checkpoint_stage_for_minutes
+from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
+                                       _missing_leagues_for_date, checkpoint_stage_for_minutes)
 from backend.app.services.model_lifecycle import _promotion_decision, predict_with_runtime
 from backend.app.services.historical_replay import run_historical_replay
 from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
@@ -82,6 +83,11 @@ def test_mlb_linescore_is_normalized_for_result_flow_comparison():
         {"away": {"runs": 0}, "home": {"runs": 2}},
     ]}) == {"away": [1, 0], "home": [0, 2]}
     assert _linescore(None) is None
+
+
+def test_archive_replay_is_explicitly_scoped_to_2026():
+    assert REPLAY_START_DATE == date(2026, 1, 1)
+    assert REPLAY_END_DATE == date(2026, 12, 31)
 
 
 def test_mlb_individual_feeds_fill_lines_missing_from_season_schedule():

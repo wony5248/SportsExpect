@@ -24,6 +24,8 @@ CHECKPOINTS = {
     "T_MINUS_15M": 15,
 }
 CHECKPOINT_TOLERANCE_MINUTES = 2.5
+REPLAY_START_DATE = date(2026, 1, 1)
+REPLAY_END_DATE = date(2026, 12, 31)
 
 
 def checkpoint_stage_for_minutes(minutes_to_start: float) -> str | None:
@@ -123,7 +125,20 @@ def run_replay_refresh(league: str, limit: int = 10) -> dict[str, Any]:
     with job_lock(f"historical-replay:{league}"):
         innings = backfill_kbo_innings(limit) if league == "KBO" else backfill_mlb_innings(limit)
         with session_scope() as session:
-            return {**run_historical_replay(session, league, limit=limit), "inning_backfill": innings}
+            replay = run_historical_replay(
+                session, league,
+                start_date=REPLAY_START_DATE,
+                end_date=REPLAY_END_DATE,
+                limit=limit,
+            )
+            return {
+                **replay,
+                "replay_window": {
+                    "start": REPLAY_START_DATE.isoformat(),
+                    "end": REPLAY_END_DATE.isoformat(),
+                },
+                "inning_backfill": innings,
+            }
 
 
 def run_cron_refresh(league: str, scope: str) -> dict[str, Any]:
