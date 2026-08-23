@@ -5,6 +5,7 @@ import {
 } from '@mui/material'
 import KeyRounded from '@mui/icons-material/KeyRounded'
 import DeleteOutlineRounded from '@mui/icons-material/DeleteOutlineRounded'
+import { useMobile } from '../lib/useMobile'
 import { fetchClaudeKeyStatus, fetchClaudeModels, registerClaudeKey, removeClaudeKey } from '../lib/api'
 import { getAccessToken } from '../lib/auth'
 import type { ClaudeKeyStatus, ClaudeModel } from '../types'
@@ -15,6 +16,7 @@ export default function ClaudeSettingsDialog({ open, email, onClose }: {
   email: string | null
   onClose: () => void
 }) {
+  const mobile = useMobile()
   const [apiKey, setApiKey] = useState('')
   const [enabled, setEnabled] = useState(true)
   const [status, setStatus] = useState<ClaudeKeyStatus | null>(null)
@@ -90,7 +92,7 @@ export default function ClaudeSettingsDialog({ open, email, onClose }: {
     setSelectedModel('')
   }
 
-  return <Dialog open={open} onClose={busy ? undefined : onClose} fullWidth maxWidth="sm">
+  return <Dialog open={open} onClose={busy ? undefined : onClose} fullWidth maxWidth="sm" fullScreen={mobile} className="app-dialog">
     <DialogTitle><Stack direction="row" spacing={1} alignItems="center"><KeyRounded /><span>내 Claude API 연결</span></Stack></DialogTitle>
     <DialogContent>
       <Stack spacing={2} sx={{ pt: 1 }}>

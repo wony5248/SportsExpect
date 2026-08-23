@@ -9,6 +9,8 @@ import { fetchBacktest, fetchGameDates, fetchGames, fetchOperations, kstToday } 
 import { loadAuthSession, onAuthStateChange, signOut } from './lib/auth'
 import type { AuthSession } from './lib/auth'
 import type { Backtest, Game, GameDate, OperationsStatus } from './types'
+import { useMobile } from './lib/useMobile'
+import DatePicker from './components/DatePicker'
 import GameCard from './components/GameCard'
 import ClaudeSettingsDialog from './components/ClaudeSettingsDialog'
 import LoginDialog from './components/LoginDialog'
@@ -27,6 +29,7 @@ export default function App() {
   const [loginOpen, setLoginOpen] = useState(false)
   const [session, setSession] = useState<AuthSession | null>(null)
   const [seasonDates, setSeasonDates] = useState<GameDate[]>([])
+  const mobile = useMobile()
   const requestId = useRef(0)
   const seasonYear = Number(date.slice(0, 4))
 
@@ -109,13 +112,7 @@ export default function App() {
         <main>
           <Box className="season-nav">
             <Box><b>{seasonYear} 시즌 경기 아카이브</b><span>한국 날짜 기준 · 저장된 경기일 {seasonDates.length}일</span></Box>
-            <select aria-label="저장된 시즌 경기일" value={seasonDates.some((item) => item.date === date) ? date : ''}
-              onChange={(event) => event.target.value && setDate(event.target.value)}>
-              <option value="">경기 있는 날짜 선택</option>
-              {seasonDates.map((item) => <option key={item.date} value={item.date}>
-                {item.date.replaceAll('-', '.')} · {item.games}경기{league === 'ALL' ? ` (KBO ${item.kbo} / MLB ${item.mlb})` : ''}
-              </option>)}
-            </select>
+            <DatePicker dates={seasonDates} value={date} league={league} onChange={setDate} />
           </Box>
           {operations && <Box className={`operations-banner ${operations.status}`}>
             <Box><b>{operations.status === 'ok' ? '자동 수집 정상' : '자동 수집 점검 필요'}</b>
@@ -123,6 +120,11 @@ export default function App() {
             <Box><span>24시간 오류</span><strong>{operations.failures_24h}</strong></Box>
             <Box><span>저장 예측</span><strong>{operations.stored_predictions}</strong></Box>
             <Box><span>변경 알림</span><strong>{operations.change_alerts_24h}</strong></Box>
+          </Box>}
+          {mobile && <Box className="league-bar">
+            <ToggleButtonGroup exclusive size="small" value={league} onChange={(_, value) => value && setLeague(value)} aria-label="리그 필터">
+              <ToggleButton value="ALL">전체</ToggleButton><ToggleButton value="KBO">KBO</ToggleButton><ToggleButton value="MLB">MLB</ToggleButton>
+            </ToggleButtonGroup>
           </Box>}
           <Stack direction="row" justifyContent="space-between" alignItems="end" className="section-heading">
             <Box>

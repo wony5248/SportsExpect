@@ -9,6 +9,15 @@ import type { Game, PersonalClaudeAnalysis, Team } from '../types'
 
 const pct = (value: number) => `${Math.round(value * 100)}%`
 const pctFine = (value: number) => `${(value * 100).toFixed(1)}%`
+
+// Relief groups in the order a manager works through them, worst leverage last.
+const BULLPEN_TIERS = [
+  { key: 'starter', share: 'starter_share', label: '선발' },
+  { key: 'high', share: 'high_leverage_share', label: '필승조' },
+  { key: 'middle', share: 'middle_share', label: '중간' },
+  { key: 'chase', share: 'chase_share', label: '추격조' },
+  { key: 'mop', share: 'mop_up_share', label: '등봉조' },
+] as const
 const stat = (value: number | null | undefined, digits = 2) =>
   typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
 
@@ -176,6 +185,31 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
                 <Box><span>총점 시각차</span><strong>{game.market.model_total_difference == null ? '—' : `${game.market.model_total_difference > 0 ? '+' : ''}${game.market.model_total_difference}`}</strong><small>우리 평균 총점이 시장 기준보다 {game.market.model_total_difference == null ? '—' : game.market.model_total_difference > 0 ? '높음' : game.market.model_total_difference < 0 ? '낮음' : '같음'}</small></Box>
               </Box>
               <Typography className="source-note">{game.market.provider} · {new Date(game.market.collected_at).toLocaleString('ko-KR')} · 시장 정보는 비교용으로만 보여드리며 베팅 추천이 아닙니다.</Typography>
+            </>}
+            {p.bullpen_usage && <>
+              <Typography variant="subtitle2">마운드 운영 예상</Typography>
+              <Box className="bullpen-grid">
+                {(['away', 'home'] as const).map((side) => {
+                  const usage = p.bullpen_usage![side]
+                  return <Box key={side} className="bullpen-team">
+                    <Stack direction="row" justifyContent="space-between" alignItems="baseline">
+                      <b>{game[side].name}</b><small>선발 {usage.starter_innings}이닝 예상</small>
+                    </Stack>
+                    <Box className="bullpen-bar">
+                      {BULLPEN_TIERS.map((tier) => usage[tier.share] > 0 && <i key={tier.share} className={tier.key}
+                        style={{ width: pct(usage[tier.share]) }} title={`${tier.label} ${pct(usage[tier.share])}`} />)}
+                    </Box>
+                    <Box className="bullpen-legend">
+                      {BULLPEN_TIERS.map((tier) => <span key={tier.share} className={tier.key}>
+                        {tier.label} {pct(usage[tier.share])}
+                      </span>)}
+                    </Box>
+                  </Box>
+                })}
+              </Box>
+              <Typography className="source-note">{p.engine === 'PLATE_APPEARANCE'
+                ? `타자 한 명 한 명이 타석에 들어서는 방식으로 계산했습니다. 타자별 주자 상황 기록(득점권 포함)을 반영했고, 라인업 9명 중 ${p.split_coverage ? `${game.away.name} ${p.split_coverage.away}명 · ${game.home.name} ${p.split_coverage.home}명` : '일부'}은 본인 기록을 그대로 썼습니다.`
+                : '이번 예측은 이닝 단위로 계산했습니다. 라인업이 발표되고 타자별 기록이 모이면 타석 단위 계산으로 자동 전환됩니다.'}</Typography>
             </>}
             <Typography variant="subtitle2">주요 근거</Typography>
             <ul>{p.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>

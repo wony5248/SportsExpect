@@ -56,6 +56,17 @@ export type Prediction = {
   statistical_expected_total?: number
   display_expected_score?: { away: number; home: number }
   extra_innings?: { rule: string; probability: number }
+  engine?: 'PLATE_APPEARANCE' | 'INNING_RATE'
+  split_coverage?: { home: number; away: number } | null
+  bullpen_usage?: Record<'home' | 'away', {
+    starter_innings: number
+    starter_share: number
+    high_leverage_share: number
+    middle_share: number
+    chase_share: number
+    mop_up_share: number
+    multipliers: Record<'high_leverage' | 'middle' | 'chase' | 'mop_up', number>
+  }>
   score_estimates?: {
     headline: 'MEAN'
     mean: { away: number; home: number }

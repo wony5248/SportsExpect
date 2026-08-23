@@ -167,6 +167,40 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .empty-state { border: 1px dashed rgba(191,233,215,.18); border-radius: 18px; }
 footer { display: flex; flex-wrap: wrap; gap: 10px 24px; margin-top: 48px; padding-top: 24px; border-top: 1px solid rgba(191,233,215,.12); color: #5f786e; font-size: .64rem; font-weight: 700; letter-spacing: .1em; }
 footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
+.bullpen-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 8px; }
+.bullpen-team { display: grid; gap: 7px; padding: 12px; background: rgba(3,16,12,.25); border-radius: 10px; }
+.bullpen-team b { color: #c8d9d2; font-size: .78rem; }
+.bullpen-team > .MuiStack-root small { color: #708a80; font-size: .62rem; }
+.bullpen-bar { display: flex; height: 9px; border-radius: 5px; overflow: hidden; background: rgba(119,155,140,.12); }
+.bullpen-bar i { display: block; height: 100%; }
+.bullpen-bar i.starter { background: #4a8f72; }
+.bullpen-bar i.high { background: #7ee7b8; }
+.bullpen-bar i.middle { background: #9db0a8; }
+.bullpen-bar i.chase { background: #d7b96b; }
+.bullpen-bar i.mop { background: #b57f72; }
+.bullpen-legend { display: flex; flex-wrap: wrap; gap: 3px 10px; }
+.bullpen-legend span { display: inline-flex; align-items: center; gap: 4px; color: #8ba299; font-size: .6rem; font-variant-numeric: tabular-nums; }
+.bullpen-legend span::before { content: ''; width: 7px; height: 7px; border-radius: 2px; }
+.bullpen-legend span.starter::before { background: #4a8f72; }
+.bullpen-legend span.high::before { background: #7ee7b8; }
+.bullpen-legend span.middle::before { background: #9db0a8; }
+.bullpen-legend span.chase::before { background: #d7b96b; }
+.bullpen-legend span.mop::before { background: #b57f72; }
+.date-sheet-trigger { justify-content: flex-start !important; width: 100%; min-height: 46px; padding: 0 14px !important; color: #c8d9d2 !important; border: 1px solid rgba(191,233,215,.2) !important; border-radius: 10px !important; background: #0c231c !important; font-size: .76rem !important; font-weight: 600 !important; text-align: left; }
+.date-sheet .MuiDrawer-paper { max-height: 82vh; border-radius: 18px 18px 0 0; background: #0b201a; background-image: none; }
+.date-sheet-head { padding: 16px 18px 12px; border-bottom: 1px solid rgba(191,233,215,.12); }
+.date-sheet-head b { display: block; color: #dcebe4; font-size: .95rem; }
+.date-sheet-head span { color: #708a80; font-size: .68rem; }
+.date-sheet-head .MuiButton-root { min-width: 44px; height: 44px; color: #8ca49a !important; }
+.date-sheet-list { overflow-y: auto; padding: 8px 10px calc(18px + env(safe-area-inset-bottom)); -webkit-overflow-scrolling: touch; }
+.date-sheet-list button { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px; padding: 10px 12px; border: 0; border-radius: 11px; background: transparent; color: #c2d3cc; font: inherit; text-align: left; }
+.date-sheet-list button span { flex: 0 0 auto; font-size: .86rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.date-sheet-list button small { flex: 1; color: #708a80; font-size: .68rem; }
+.date-sheet-list button svg { color: #7ee7b8; font-size: 1.1rem; }
+.date-sheet-list button.selected { background: rgba(126,231,184,.12); color: #e2f0ea; }
+.date-sheet-list button:active { background: rgba(126,231,184,.2); }
+.date-sheet-empty { padding: 26px 12px; color: #708a80; text-align: center; font-size: .8rem !important; }
+
 @media (max-width: 900px) {
   .page { padding-top: 18px; padding-bottom: 28px; overflow-x: hidden; }
   .masthead { min-height: 0; padding: 14px 0 28px; display: block; }
@@ -177,8 +211,20 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .controls { position: relative; left: auto; right: auto; bottom: auto; width: 100%; margin-top: 26px; display: grid !important; grid-template-columns: 1fr 1fr; gap: 9px !important; }
   .controls > * { width: 100%; min-width: 0; margin: 0 !important; }
   .controls .MuiToggleButtonGroup-root { display: flex; }
-  .controls .MuiToggleButton-root { flex: 1; min-width: 0; }
-  .controls .MuiButton-root { min-height: 40px; white-space: nowrap; }
+  /* Touch targets below 44px are hard to hit accurately on a phone. */
+  .controls .MuiToggleButton-root { flex: 1; min-width: 0; min-height: 44px; }
+  .controls .MuiButton-root { min-height: 44px; white-space: nowrap; }
+  .controls .MuiOutlinedInput-root { min-height: 44px; }
+  .controls .MuiToggleButton-root:active, .controls .MuiButton-root:active { transform: scale(.97); }
+  .controls .MuiToggleButton-root, .controls .MuiButton-root { transition: transform .12s ease, background-color .12s ease; }
+  /* The league and date filters stay reachable while scrolling a long board. */
+  .league-bar { position: sticky; top: 0; z-index: 8; display: flex; gap: 8px; margin: 0 -16px 14px; padding: 9px 16px;
+    background: rgba(7,23,19,.94); backdrop-filter: blur(10px); border-bottom: 1px solid rgba(191,233,215,.1); }
+  .league-bar .MuiToggleButtonGroup-root { flex: 1; display: flex; }
+  .league-bar .MuiToggleButton-root { flex: 1; min-height: 40px; color: #819a90; border-color: rgba(191,233,215,.2); font-size: .78rem; }
+  .league-bar .Mui-selected { color: #7ee7b8 !important; background: rgba(126,231,184,.14) !important; }
+  .game-card:active { border-color: rgba(126,231,184,.24); }
+  .detail-button { min-height: 48px; }
   .section-heading { margin: 32px 0 18px; align-items: flex-end !important; gap: 12px; }
   .season-nav { align-items: stretch; flex-direction: column; gap: 10px; }
   .season-nav select { width: 100%; min-width: 0; }
@@ -209,7 +255,7 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .outcome-label span { font-size: .69rem; }
   .outcome-ranking .confidence { min-height: 34px; min-width: 96px; width: auto; }
   .confidence { width: 100%; min-height: 44px; }
-  .lineup-grid, .market-comparison, .starter-grid, .personal-claude-result { grid-template-columns: 1fr; }
+  .lineup-grid, .market-comparison, .starter-grid, .personal-claude-result, .bullpen-grid { grid-template-columns: 1fr; }
   .personal-claude-result ul, .personal-claude-result p, .personal-claude-result > small { grid-column: auto; }
   .history-list > div { display: grid; }
   .history-list b { text-align: left; }

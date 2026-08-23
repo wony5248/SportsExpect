@@ -3,6 +3,7 @@ import { Alert, Button, Dialog, DialogActions, DialogContent, DialogTitle, Stack
 import LoginRounded from '@mui/icons-material/LoginRounded'
 import { authConfigured, sendMagicLink, signInWithPassword } from '../lib/auth'
 import type { AuthSession } from '../lib/auth'
+import { useMobile } from '../lib/useMobile'
 
 
 export default function LoginDialog({ open, onClose, onSignedIn }: {
@@ -10,6 +11,7 @@ export default function LoginDialog({ open, onClose, onSignedIn }: {
   onClose: () => void
   onSignedIn: (session: AuthSession) => void
 }) {
+  const mobile = useMobile()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
@@ -44,7 +46,7 @@ export default function LoginDialog({ open, onClose, onSignedIn }: {
     }
   }
 
-  return <Dialog open={open} onClose={busy ? undefined : onClose} fullWidth maxWidth="xs">
+  return <Dialog open={open} onClose={busy ? undefined : onClose} fullWidth maxWidth="xs" fullScreen={mobile} className="app-dialog">
     <DialogTitle><Stack direction="row" spacing={1} alignItems="center"><LoginRounded /><span>사용자 로그인</span></Stack></DialogTitle>
     <DialogContent>
       <Stack spacing={2} sx={{ pt: 1 }}>
