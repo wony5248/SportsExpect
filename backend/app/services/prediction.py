@@ -22,7 +22,8 @@ MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-lo
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,
                  lineups: list[Any] | None = None, game_context: dict[str, Any] | None = None,
                  model_runtime: dict[str, Any] | None = None,
-                 bullpens: dict[str, dict[str, Any] | None] | None = None) -> dict[str, Any]:
+                 bullpens: dict[str, dict[str, Any] | None] | None = None,
+                 lineup_tables: dict[str, Any] | None = None) -> dict[str, Any]:
     model_name = (model_runtime or {}).get("model_name") or (
         "KBO_MATCHUP_V14" if game.league == "KBO" else "MLB_MATCHUP_V13"
     )
@@ -73,6 +74,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         # Including the staff plan means a bullpen profile update produces a new input hash,
         # so the next refresh regenerates the prediction instead of reusing a stale one.
         "staff": {"home": home_staff, "away": away_staff},
+        # Split coverage belongs in the hash: adding a hitter's splits changes which engine runs.
+        "split_coverage": (lineup_tables or {}).get("coverage"),
         "lineups": lineup_fingerprint,
     }
     input_hash = hashlib.sha256(json.dumps(input_data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -86,9 +89,15 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     if not (features["home_lineup_confirmed"] and features["away_lineup_confirmed"]):
         team_variance += .02
     team_variance = min(.24, team_variance)
+    # The plate-appearance engine needs both lineups to have collected base-state splits.
+    # Without them the inning-rate model runs instead, rather than the engine guessing hitters.
+    home_table = (lineup_tables or {}).get("home")
+    away_table = (lineup_tables or {}).get("away")
     simulation = simulate_scores(
         home_runs, away_runs, settings.simulations, seed, environment_variance, team_variance,
         league=game.league, home_staff=home_staff, away_staff=away_staff,
+        home_lineup=home_table if away_table is not None else None,
+        away_lineup=away_table if home_table is not None else None,
     )
     # Every headline score-distribution metric must describe the same population. The logistic
     # classifier remains an independent diagnostic, but win probability, expected score,
@@ -130,12 +139,16 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
                 else "extra_innings_simulation_kbo_to_11_two_way_excluding_ties"
             ),
             "extra_innings": simulation["extra_innings"],
+            "engine": simulation["engine"],
+            "split_coverage": (lineup_tables or {}).get("coverage"),
             "bullpen_usage": simulation["bullpen_usage"],
             "staff_plan": {"home": home_staff, "away": away_staff},
             "model": {
                 "name": model_name,
-                "algorithm": ("automatically trained run regressors + " + MODEL_ALGORITHM)
-                if model_runtime else MODEL_ALGORITHM,
+                "algorithm": (("automatically trained run regressors + " if model_runtime else "")
+                              + MODEL_ALGORITHM
+                              + (" + plate-appearance base-out engine driven by collected batter splits"
+                                 if simulation["engine"] == "PLATE_APPEARANCE" else "")),
                 "simulations": settings.simulations,
                 "operating_mode": "AUTO_TRAINED_CHAMPION" if model_runtime else "VERSIONED_BASELINE",
             },

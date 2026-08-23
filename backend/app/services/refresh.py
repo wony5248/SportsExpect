@@ -6,7 +6,7 @@ import time
 from typing import Any, Callable
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, Session
 
 from backend.app.collectors.kbo import KboClient
 from backend.app.collectors.mlb import MlbClient
@@ -16,9 +16,11 @@ from backend.app.database import database_now, init_db, session_scope
 from backend.app.models import CrawlLog, Game, LineupEntry, PitcherStat, Team
 from backend.app.repositories.repository import (
     latest_team_stat,
+    load_batter_splits,
     replace_lineups,
     save_prediction,
     team_stats_fresh,
+    upsert_batter_splits,
     upsert_game,
     upsert_games_bulk,
     upsert_market_consensus,
@@ -27,6 +29,7 @@ from backend.app.repositories.repository import (
     upsert_team_stat,
 )
 from backend.app.services.prediction import predict_game
+from backend.app.services.batting import build_batter_table, league_average_table, lineup_tables
 from backend.app.services.bullpen import load_profiles, seed_league
 from backend.app.services.model_lifecycle import load_champion_runtime
 
@@ -95,6 +98,7 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                 )
                 if lineup_source and lineup_source.data:
                     _enrich_batter_matchups(client, raw, lineup_source.data, errors, "KBO")
+                    _collect_batter_splits(client, lineup_source.data, target_date.year, "KBO", errors)
                     with session_scope() as session:
                         game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
                         if game:
@@ -164,6 +168,7 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
                 )
                 if lineup_source and lineup_source.data:
                     _enrich_batter_matchups(client, raw, lineup_source.data, errors, "MLB")
+                    _collect_batter_splits(client, lineup_source.data, target_date.year, "MLB", errors)
                     with session_scope() as session:
                         game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
                         if game:
@@ -234,6 +239,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 model_runtime=model_runtime,
                 bullpens={"home": bullpen_profiles.get(game.home_team_id),
                           "away": bullpen_profiles.get(game.away_team_id)},
+                lineup_tables=_lineup_split_tables(session, game, league, target_date.year, lineups),
             )
             save_prediction(
                 session, game, result, stage=checkpoint_stage or _prediction_stage(game, captured_at),
@@ -376,6 +382,63 @@ def _team_key(name: str) -> str:
     }
     compact = "".join(character.lower() for character in name if character.isalnum())
     return aliases.get(compact, compact)
+
+
+def _collect_batter_splits(client: KboClient | MlbClient, entries: list[dict[str, Any]],
+                           season: int, league: str, errors: list[str]) -> None:
+    """Fetch base-state splits for lineup hitters we have not stored this season yet.
+
+    One request per hitter, so only genuinely missing hitters are fetched and the result is
+    reused for every later game that hitter appears in.
+    """
+    player_ids = {str(entry["player_id"]) for entry in entries if entry.get("player_id")}
+    if not player_ids:
+        return
+    with session_scope() as session:
+        stored = set(load_batter_splits(session, league, season, sorted(player_ids)))
+    missing = sorted(player_ids - stored)
+    if not missing:
+        return
+    source = _tracked(
+        f"{league.lower()}_batter_splits",
+        "/Record/Player/HitterDetail/Situation.aspx" if league == "KBO"
+        else "/api/v1/people/{id}/stats?stats=statSplits",
+        lambda: client.batter_splits(missing, season), errors,
+    )
+    if not source or not source.data:
+        return
+    with session_scope() as session:
+        upsert_batter_splits(session, league, season, source.data, source.source_url, source.collected_at)
+
+
+def _lineup_split_tables(session: Session, game: Game, league: str, season: int,
+                         lineups: list[LineupEntry]) -> dict[str, Any]:
+    """Build the per-club hitter tables the plate-appearance engine needs.
+
+    A club is only handed to the engine when every one of its nine slots resolves to a hitter
+    with collected splits or, failing that, to the average of the hitters this game does have.
+    """
+    by_side: dict[str, list[dict[str, Any]]] = {"home": [], "away": []}
+    for entry in lineups:
+        if entry.side in by_side and len(by_side[entry.side]) < 9:
+            by_side[entry.side].append({"player_id": entry.player_id})
+    if any(len(rows) < 9 for rows in by_side.values()):
+        return {}
+    player_ids = [str(row["player_id"]) for rows in by_side.values() for row in rows if row["player_id"]]
+    splits = load_batter_splits(session, league, season, player_ids)
+    known = [table for table in (build_batter_table(value) for value in splits.values()) if table is not None]
+    fallback = league_average_table(known)
+    tables: dict[str, Any] = {}
+    coverage: dict[str, int] = {}
+    for side, rows in by_side.items():
+        built = lineup_tables(rows, splits, fallback)
+        if built is None:
+            return {}
+        tables[side], coverage[side] = built
+    # Half a lineup of stand-ins is not a plate-appearance model; fall back to the inning engine.
+    if min(coverage.values()) < 5:
+        return {}
+    return {**tables, "coverage": coverage}
 
 
 def _enrich_batter_matchups(client: KboClient | MlbClient, game: dict[str, Any],

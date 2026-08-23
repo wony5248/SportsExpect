@@ -11,8 +11,9 @@ from sqlalchemy.orm import Session, joinedload
 
 from backend.app.config import KST, settings
 from backend.app.database import database_datetime, database_now
-from backend.app.models import (Game, GameResult, LineupEntry, MarketConsensus, MarketSnapshot, ModelVersion,
-                                PitcherStat, Prediction, PredictionHistory, PredictionSnapshot, Team, TeamStat)
+from backend.app.models import (BatterSplit, Game, GameResult, LineupEntry, MarketConsensus, MarketSnapshot,
+                                ModelVersion, PitcherStat, Prediction, PredictionHistory, PredictionSnapshot,
+                                Team, TeamStat)
 
 
 def upsert_team(session: Session, league: str, code: str, name: str) -> Team:
@@ -140,6 +141,58 @@ def upsert_team_stat(session: Session, team: Team, effective_date: date, raw: di
         for key, value in values.items():
             setattr(stat, key, value)
     return stat
+
+
+BATTER_SPLIT_COUNTS = ("at_bats", "hits", "doubles", "triples", "home_runs", "walks",
+                       "hit_by_pitch", "strikeouts", "sacrifice_flies", "grounded_into_double_play")
+
+
+def upsert_batter_splits(session: Session, league: str, season: int, rows: dict[str, dict[str, Any]],
+                         source_url: str, collected_at: datetime) -> int:
+    """Replace one season's base-state splits for the supplied hitters."""
+    if not rows:
+        return 0
+    existing = {
+        (split.player_id, split.state): split
+        for split in session.scalars(select(BatterSplit).where(
+            BatterSplit.league == league, BatterSplit.season == season,
+            BatterSplit.player_id.in_(list(rows)),
+        )).all()
+    }
+    written = 0
+    for player_id, payload in rows.items():
+        for state, counts in (payload.get("states") or {}).items():
+            values = {field: int(counts.get(field, 0) or 0) for field in BATTER_SPLIT_COUNTS}
+            split = existing.get((player_id, state))
+            if split is None:
+                session.add(BatterSplit(
+                    league=league, season=season, player_id=player_id, state=state,
+                    player_name=payload.get("name"), source=f"{league} official records",
+                    source_url=source_url, collected_at=collected_at, **values))
+            else:
+                for key, value in values.items():
+                    setattr(split, key, value)
+                split.player_name = payload.get("name") or split.player_name
+                split.source_url, split.collected_at = source_url, collected_at
+            written += 1
+    return written
+
+
+def load_batter_splits(session: Session, league: str, season: int,
+                       player_ids: list[str]) -> dict[str, dict[str, dict[str, int]]]:
+    """Return stored splits as {player_id: {state: counts}} for the requested hitters."""
+    if not player_ids:
+        return {}
+    rows = session.scalars(select(BatterSplit).where(
+        BatterSplit.league == league, BatterSplit.season == season,
+        BatterSplit.player_id.in_(player_ids),
+    )).all()
+    output: dict[str, dict[str, dict[str, int]]] = {}
+    for split in rows:
+        output.setdefault(split.player_id, {})[split.state] = {
+            field: getattr(split, field) for field in BATTER_SPLIT_COUNTS
+        }
+    return output
 
 
 def upsert_pitcher(session: Session, game: Game, raw: dict[str, Any], source_url: str, collected_at: datetime) -> PitcherStat:

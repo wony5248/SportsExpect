@@ -17,6 +17,12 @@ TEAM_CODES = {
     "KIA": "HT", "키움": "WO", "롯데": "LT", "두산": "OB", "KT": "KT",
     "SSG": "SK", "삼성": "SS", "NC": "NC", "LG": "LG", "한화": "HH",
 }
+# The 상황별 기록 base-state rows, mapped to the league-neutral state names the engine uses.
+KBO_BASE_STATES = {
+    "주자없음": "BASES_EMPTY", "1루": "RUNNER_1", "2루": "RUNNER_2", "3루": "RUNNER_3",
+    "1,2루": "RUNNER_12", "1,3루": "RUNNER_13", "2,3루": "RUNNER_23", "만루": "BASES_LOADED",
+    "득점권": "SCORING_POSITION",
+}
 
 
 @dataclass
@@ -249,6 +255,27 @@ class KboClient:
             })
         return SourcePayload(output, ", ".join(source_urls), raw.collected_at)
 
+    def batter_splits(self, player_ids: list[str], season: int) -> SourcePayload:
+        """Read each hitter's 상황별 기록 base-state table.
+
+        One page per hitter, so callers should pass only the lineup they are about to predict.
+        A hitter whose page is unavailable is skipped rather than guessed at.
+        """
+        output: dict[str, dict[str, Any]] = {}
+        urls: list[str] = []
+        for player_id in player_ids:
+            path = f"/Record/Player/HitterDetail/Situation.aspx?playerId={player_id}"
+            try:
+                page = self._get_html(path)
+            except httpx.HTTPError:
+                continue
+            urls.append(page.source_url)
+            states = _batter_base_states(page.data)
+            if states:
+                output[player_id] = {"name": _hitter_name(page.data), "states": states}
+        return SourcePayload(output, ", ".join(urls) or f"{self.base_url}/Record/Player/HitterDetail/Situation.aspx",
+                             datetime.now(KST))
+
     def batter_vs_pitcher(self, entries: list[dict[str, Any]], game: dict[str, Any]) -> SourcePayload:
         """Read KBO's WebForms-backed 투수 VS 타자 table for confirmed lineup pairs."""
         path = "/Record/Etc/HitVsPit.aspx"
@@ -376,6 +403,43 @@ def _data_id_table(html: str) -> dict[str, dict[str, str]]:
             result[name] = {cell.get("data-id"): cell.get_text(strip=True) for cell in cells if cell.get("data-id")}
         return result
     raise ValueError("KBO data-id team table schema not found")
+
+
+def _hitter_name(html: str) -> str | None:
+    node = BeautifulSoup(html, "html.parser").select_one("[id$='playerProfile_lblName']")
+    return node.get_text(strip=True) if node else None
+
+
+def _batter_base_states(html: str) -> dict[str, dict[str, int]]:
+    """Pull the base-state rows out of the 상황별 기록 page.
+
+    The page stacks several situational tables that share one header, so rows are matched by
+    their 구분 label instead of by table position.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    states: dict[str, dict[str, int]] = {}
+    for table in soup.select("table"):
+        columns = [th.get_text(strip=True) for th in table.select("thead th")]
+        if not columns or columns[0] != "구분":
+            continue
+        index = {name: position for position, name in enumerate(columns)}
+        for row in table.select("tbody tr"):
+            cells = [cell.get_text(strip=True) for cell in row.select("td")]
+            state = KBO_BASE_STATES.get(cells[0]) if cells else None
+            if not state or state in states:
+                continue
+
+            def count(column: str, cells: list[str] = cells, index: dict[str, int] = index) -> int:
+                position = index.get(column)
+                return _as_int(cells[position], 0) or 0 if position is not None and position < len(cells) else 0
+
+            states[state] = {
+                "at_bats": count("AB"), "hits": count("H"), "doubles": count("2B"),
+                "triples": count("3B"), "home_runs": count("HR"), "walks": count("BB"),
+                "hit_by_pitch": count("HBP"), "strikeouts": count("SO"),
+                "sacrifice_flies": 0, "grounded_into_double_play": count("GDP"),
+            }
+    return states
 
 
 def _pitcher_opponent_split(html: str, opponent: str) -> dict[str, Any]:

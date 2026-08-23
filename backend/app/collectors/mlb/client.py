@@ -10,6 +10,15 @@ from backend.app.collectors.kbo.client import SourcePayload, _as_float, _as_int
 from backend.app.config import KST
 
 
+# StatsAPI situational codes for the eight exact base states plus the scoring-position
+# aggregate, mapped to the same league-neutral names the KBO collector produces.
+MLB_BASE_STATES = {
+    "r0": "BASES_EMPTY", "r1": "RUNNER_1", "r2": "RUNNER_2", "r3": "RUNNER_3",
+    "r12": "RUNNER_12", "r13": "RUNNER_13", "r23": "RUNNER_23", "r123": "BASES_LOADED",
+    "risp": "SCORING_POSITION",
+}
+
+
 class MlbClient:
     """Client for public JSON used by MLB.com Gameday and official stats pages."""
 
@@ -199,6 +208,52 @@ class MlbClient:
                     "value_metric": "OPS", "confirmed": confirmed,
                 })
         return SourcePayload(entries, payload.source_url, payload.collected_at)
+
+    def batter_splits(self, player_ids: list[str], season: int) -> SourcePayload:
+        """Fetch each hitter's official base-state splits for the season.
+
+        One request per hitter covering every state, so callers should pass only the lineup they
+        are about to predict. A hitter the API has no splits for is skipped, never estimated.
+        """
+        output: dict[str, dict[str, Any]] = {}
+        urls: list[str] = []
+
+        def fetch(player_id: str) -> tuple[str, dict[str, Any], str]:
+            payload = self._get_json(f"/api/v1/people/{player_id}/stats", {
+                "stats": "statSplits", "group": "hitting", "season": str(season),
+                "sitCodes": ",".join(MLB_BASE_STATES),
+            })
+            states: dict[str, dict[str, int]] = {}
+            name: str | None = None
+            for group in payload.data.get("stats", []):
+                for split in group.get("splits", []):
+                    state = MLB_BASE_STATES.get((split.get("split") or {}).get("code", ""))
+                    if not state:
+                        continue
+                    name = name or _person_name(split.get("player"))
+                    stat = split.get("stat", {})
+                    states[state] = {
+                        "at_bats": _as_int(stat.get("atBats"), 0) or 0,
+                        "hits": _as_int(stat.get("hits"), 0) or 0,
+                        "doubles": _as_int(stat.get("doubles"), 0) or 0,
+                        "triples": _as_int(stat.get("triples"), 0) or 0,
+                        "home_runs": _as_int(stat.get("homeRuns"), 0) or 0,
+                        "walks": _as_int(stat.get("baseOnBalls"), 0) or 0,
+                        "hit_by_pitch": _as_int(stat.get("hitByPitch"), 0) or 0,
+                        "strikeouts": _as_int(stat.get("strikeOuts"), 0) or 0,
+                        "sacrifice_flies": _as_int(stat.get("sacFlies"), 0) or 0,
+                        "grounded_into_double_play": _as_int(stat.get("groundIntoDoublePlay"), 0) or 0,
+                    }
+            return player_id, {"name": name, "states": states}, payload.source_url
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for future in as_completed([pool.submit(fetch, str(row)) for row in player_ids]):
+                player_id, payload, url = future.result()
+                urls.append(url)
+                if payload["states"]:
+                    output[player_id] = payload
+        return SourcePayload(output, ", ".join(urls) or f"{self.base_url}/api/v1/people/{{id}}/stats?stats=statSplits",
+                             datetime.now(KST))
 
     def batter_vs_pitcher(self, entries: list[dict[str, Any]], game: dict[str, Any]) -> SourcePayload:
         """Fetch official career batter-vs-probable-pitcher totals for uncached lineup pairs."""

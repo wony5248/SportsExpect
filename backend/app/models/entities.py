@@ -122,6 +122,42 @@ class TeamBullpenEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
 
 
+class BatterSplit(Base):
+    """One batter's season line inside a specific base state.
+
+    Both leagues publish the same eight exact base states plus a scoring-position aggregate, so
+    the plate-appearance engine can ask the same question of a KBO and an MLB hitter: what does
+    this batter actually do with the bases loaded, or with a runner on second. Counting stats are
+    stored rather than rates because the exact states are small samples: the engine shrinks each
+    one toward the scoring-position aggregate and then the batter's overall line by sample size.
+    """
+
+    __tablename__ = "batter_splits"
+    __table_args__ = (UniqueConstraint("league", "season", "player_id", "state"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    league: Mapped[str] = mapped_column(String(8), index=True)
+    season: Mapped[int] = mapped_column(Integer, index=True)
+    player_id: Mapped[str] = mapped_column(String(24), index=True)
+    player_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Exact base states BASES_EMPTY, RUNNER_1, RUNNER_2, RUNNER_3, RUNNER_12, RUNNER_13,
+    # RUNNER_23, BASES_LOADED, plus the SCORING_POSITION aggregate used as a shrink target.
+    state: Mapped[str] = mapped_column(String(20))
+    at_bats: Mapped[int] = mapped_column(Integer, default=0)
+    hits: Mapped[int] = mapped_column(Integer, default=0)
+    doubles: Mapped[int] = mapped_column(Integer, default=0)
+    triples: Mapped[int] = mapped_column(Integer, default=0)
+    home_runs: Mapped[int] = mapped_column(Integer, default=0)
+    walks: Mapped[int] = mapped_column(Integer, default=0)
+    hit_by_pitch: Mapped[int] = mapped_column(Integer, default=0)
+    strikeouts: Mapped[int] = mapped_column(Integer, default=0)
+    sacrifice_flies: Mapped[int] = mapped_column(Integer, default=0)
+    grounded_into_double_play: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(80))
+    source_url: Mapped[str] = mapped_column(Text)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class PitcherStat(Base):
     __tablename__ = "pitcher_stats"
     __table_args__ = (UniqueConstraint("game_id", "side"),)

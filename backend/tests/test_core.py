@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta
 import logging
 from types import SimpleNamespace
 import httpx
+import numpy as np
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import Text, create_engine, event, select
@@ -17,13 +18,15 @@ from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services.bullpen import apply_profile_update, derive_profile, load_profiles, seed_league
 from backend.app.services import claude_advisor, personal_claude, runtime_secrets, user_auth
 from backend.app.services.claude_advisor import blend_with_claude
-from backend.app.collectors.kbo.client import (KboClient, _batter_pitcher_split, _data_id_table,
+from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batter_base_states,
+                                               _batter_pitcher_split, _data_id_table, _hitter_name,
                                                _pitcher_opponent_split, _rank_table, _record_rate)
-from backend.app.collectors.mlb.client import MlbClient
+from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient
 from backend.app.collectors.odds import _consensus_event
 from backend.app.services.feature_engineering import _effective_lineup_ops, _lineup_matchup_summary
 from backend.app.services.refresh import (_market_event_date, _market_refresh_due, _months_for_recent,
                                           _prediction_stage, _recent_by_team)
+from backend.app.services.batting import SINGLE, STATE_INDEX, build_batter_table
 from backend.app.services.simulation import simulate_scores
 from backend.app.services.prediction import (blend_classifier_into_means, build_score_estimates,
                                              predict_game, select_primary_score)
@@ -331,6 +334,76 @@ def test_bullpen_profile_updates_are_versioned_and_only_recorded_when_values_mov
         clamped = apply_profile_update(session, team.id, {"high_leverage": .05, "middle": 1.0,
                                                           "chase": 1.1, "mop_up": 9.0}, source="MANUAL")
         assert clamped["multipliers"] == {"high_leverage": .55, "middle": 1.0, "chase": 1.1, "mop_up": 1.60}
+
+
+SITUATION_HTML = """
+<span id='cphContents_cphContents_cphContents_playerProfile_lblName'>테스트타자</span>
+<table class='tbl tt'>
+  <thead><tr><th>구분</th><th>AVG</th><th>AB</th><th>H</th><th>2B</th><th>3B</th><th>HR</th>
+  <th>RBI</th><th>BB</th><th>HBP</th><th>SO</th><th>GDP</th></tr></thead>
+  <tbody>
+    <tr><td>주자없음</td><td>0.281</td><td>196</td><td>55</td><td>10</td><td>0</td><td>14</td>
+        <td>14</td><td>21</td><td>2</td><td>47</td><td>0</td></tr>
+    <tr><td>1루</td><td>0.257</td><td>70</td><td>18</td><td>3</td><td>0</td><td>5</td>
+        <td>11</td><td>4</td><td>0</td><td>22</td><td>0</td></tr>
+    <tr><td>만루</td><td>0.455</td><td>11</td><td>5</td><td>3</td><td>0</td><td>0</td>
+        <td>13</td><td>1</td><td>0</td><td>1</td><td>1</td></tr>
+    <tr><td>득점권</td><td>0.369</td><td>103</td><td>38</td><td>7</td><td>0</td><td>7</td>
+        <td>67</td><td>17</td><td>0</td><td>17</td><td>6</td></tr>
+  </tbody>
+</table>
+"""
+
+
+def test_kbo_situational_page_yields_base_state_counts():
+    states = _batter_base_states(SITUATION_HTML)
+    assert _hitter_name(SITUATION_HTML) == "테스트타자"
+    assert states["BASES_EMPTY"]["at_bats"] == 196
+    assert states["SCORING_POSITION"] == {
+        "at_bats": 103, "hits": 38, "doubles": 7, "triples": 0, "home_runs": 7, "walks": 17,
+        "hit_by_pitch": 0, "strikeouts": 17, "sacrifice_flies": 0, "grounded_into_double_play": 6,
+    }
+    # Rows the page does not carry are simply absent rather than filled in with zeros.
+    assert "RUNNER_23" not in states
+
+
+def test_batter_table_uses_real_splits_and_shrinks_thin_samples():
+    table = build_batter_table(_batter_base_states(SITUATION_HTML))
+    empty, loaded = table[STATE_INDEX["BASES_EMPTY"]], table[STATE_INDEX["BASES_LOADED"]]
+    assert abs(table.sum(axis=1) - 1).max() < 1e-9
+    # 196 at-bats of bases-empty data survives nearly intact: 31 singles in 219 plate appearances.
+    assert abs(empty[SINGLE] - 31 / 219) < .01
+    # This hitter really is better with a runner in scoring position, and that carries through.
+    assert table[STATE_INDEX["RUNNER_2"]][SINGLE] > empty[SINGLE]
+    # Eleven bases-loaded at-bats cannot outvote the scoring-position sample behind it.
+    raw_loaded_single = 2 / 12
+    assert abs(loaded[SINGLE] - raw_loaded_single) > abs(loaded[SINGLE] - table[STATE_INDEX["RUNNER_2"]][SINGLE])
+    # A hitter with almost no season is not modelled at all rather than modelled badly.
+    assert build_batter_table({"BASES_EMPTY": {"at_bats": 8, "hits": 3}}) is None
+
+
+def test_plate_engine_matches_expected_runs_and_obeys_the_ninth_inning_rules():
+    table = build_batter_table(_batter_base_states(SITUATION_HTML))
+    lineup = np.stack([table] * 9)
+    staff = {"starter_multiplier": 1.0, "starter_innings": 5.3,
+             "bullpen": {"high_leverage": .82, "middle": 1.0, "chase": 1.12, "mop_up": 1.28}}
+    mlb = simulate_scores(4.8, 4.2, 20_000, 21, league="MLB", home_staff=staff, away_staff=staff,
+                          home_lineup=lineup, away_lineup=lineup)
+    kbo = simulate_scores(4.8, 4.2, 20_000, 21, league="KBO", home_staff=staff, away_staff=staff,
+                          home_lineup=lineup, away_lineup=lineup)
+    assert mlb["engine"] == "PLATE_APPEARANCE"
+    # Batter-level play still lands on the run totals the team model expects. A club's season
+    # rate counts extra-inning runs, so the full-game mean is the figure being matched.
+    for result in (mlb, kbo):
+        assert abs(result["mean_runs"]["home"] / 4.8 - 1) < .03
+        assert abs(result["mean_runs"]["away"] / 4.2 - 1) < .03
+        assert result["regulation_mean_runs"]["home"] <= result["mean_runs"]["home"]
+    assert mlb["tie_probability"] == 0
+    assert kbo["tie_probability"] > 0
+    # The home club skips the ninth whenever it is already ahead, close to the real rate.
+
+    # One lineup without collected splits is enough to fall back to the inning-rate model.
+    assert simulate_scores(4.8, 4.2, 5_000, 21, league="MLB", home_lineup=lineup)["engine"] == "INNING_RATE"
 
 
 def test_dense_intervals_are_tighter_than_central_80_band():

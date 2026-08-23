@@ -107,8 +107,15 @@ def highest_density_interval(values: np.ndarray, mass: float = DENSE_INTERVAL_MA
 def simulate_scores(home_expected: float, away_expected: float, simulations: int, seed: int,
                     environment_variance: float = .08, team_variance: float = .12,
                     league: str = "MLB", home_staff: dict[str, Any] | None = None,
-                    away_staff: dict[str, Any] | None = None) -> dict[str, Any]:
+                    away_staff: dict[str, Any] | None = None, home_lineup: np.ndarray | None = None,
+                    away_lineup: np.ndarray | None = None) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
+    if home_lineup is not None and away_lineup is not None:
+        # Both lineups have collected splits, so play the game out plate appearance by plate
+        # appearance instead of drawing inning run totals.
+        return _summarize(*_plate_appearance_game(
+            rng, home_expected, away_expected, simulations, league, home_staff, away_staff,
+            home_lineup, away_lineup))
     # A shared gamma run environment creates realistic over-dispersion and correlation
     # (weather/umpire/park conditions affect both clubs) while preserving expected means.
     variance = min(.18, max(.02, environment_variance))
@@ -205,6 +212,7 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
         away[indices] += away_inning_runs
         home[indices] += home_inning_runs
         tied = home == away
+
     if league == "MLB" and tied.any():
         # Beyond the practical cap, decide by relative extra-inning scoring rates.
         indices = np.flatnonzero(tied)
@@ -219,6 +227,53 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
         extra_home_columns.append(home_column)
         away[indices] += away_column[indices]
         home[indices] += home_column[indices]
+    if extra_away_columns:
+        away_innings = np.concatenate([away_innings, np.stack(extra_away_columns, axis=1)], axis=1)
+        home_innings = np.concatenate([home_innings, np.stack(extra_home_columns, axis=1)], axis=1)
+    usage = {"home": _bullpen_usage(home_staff_profile, home_tier_counts),
+             "away": _bullpen_usage(away_staff_profile, away_tier_counts)}
+    return _summarize(home_innings, away_innings, home, away, simulations, league, usage, "INNING_RATE")
+
+
+def _plate_appearance_game(rng: np.random.Generator, home_expected: float, away_expected: float,
+                           simulations: int, league: str, home_staff: dict[str, Any] | None,
+                           away_staff: dict[str, Any] | None, home_lineup: np.ndarray,
+                           away_lineup: np.ndarray) -> tuple[Any, ...]:
+    from backend.app.services.plate_engine import simulate_game
+
+    max_extra = MLB_MAX_EXTRA_INNINGS if league == "MLB" else KBO_MAX_EXTRA_INNINGS
+    played = simulate_game(
+        rng, simulations,
+        {"tables": home_lineup, "staff": home_staff or {}, "expected_runs": home_expected},
+        {"tables": away_lineup, "staff": away_staff or {}, "expected_runs": away_expected},
+        league, {"max_extra": max_extra})
+    home, away = played["home"], played["away"]
+    if league == "MLB":
+        # Beyond the practical cap, decide the handful still tied by relative scoring strength.
+        tied = np.flatnonzero(home == away)
+        if tied.size:
+            home_walkoff = rng.random(tied.size) < home_expected / max(home_expected + away_expected, 1e-9)
+            home[tied] += home_walkoff
+            away[tied] += ~home_walkoff
+    usage = {side: _plate_usage(played["tier_counts"][side], (home_staff if side == "home" else away_staff) or {})
+             for side in ("home", "away")}
+    return (played["home_innings"], played["away_innings"], home, away, simulations, league, usage,
+            "PLATE_APPEARANCE")
+
+
+def _plate_usage(counts: dict[str, int], staff: dict[str, Any]) -> dict[str, Any]:
+    innings = max(1, sum(counts.values()))
+    bullpen = {**DEFAULT_BULLPEN, **(staff.get("bullpen") or {})}
+    return {
+        "starter_innings": round(float(staff.get("starter_innings") or LEAGUE_AVERAGE_STARTER_INNINGS), 1),
+        "starter_share": round(counts.get("starter", 0) / innings, 4),
+        **{f"{tier}_share": round(counts.get(tier, 0) / innings, 4) for tier in BULLPEN_TIERS},
+        "multipliers": {tier: round(bullpen[tier], 3) for tier in BULLPEN_TIERS},
+    }
+
+
+def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndarray, away: np.ndarray,
+               simulations: int, league: str, bullpen_usage: dict[str, Any], engine: str) -> dict[str, Any]:
     total = home + away
     home_win_probability = float(np.mean(home > away))
     away_win_probability = float(np.mean(away > home))
@@ -230,10 +285,12 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     away_two_way = away_win_probability / decided_probability if decided_probability else .5
 
     def trajectory_of(index: int) -> tuple[tuple[int, int], ...]:
-        pairs = list(zip(away_innings[index].tolist(), home_innings[index].tolist(), strict=True))
-        for away_column, home_column in zip(extra_away_columns, extra_home_columns, strict=True):
-            if away_column[index] >= 0:
-                pairs.append((int(away_column[index]), int(home_column[index])))
+        # A half-inning that was never played is stored as -1 and simply ends the scorebook line.
+        pairs = []
+        for away_runs, home_runs in zip(away_innings[index].tolist(), home_innings[index].tolist(), strict=True):
+            if away_runs < 0 and home_runs < 0:
+                break
+            pairs.append((max(away_runs, 0), max(home_runs, 0)))
         return tuple(pairs)
 
     score_counts = Counter(zip(home.tolist(), away.tolist(), strict=False))
@@ -284,20 +341,21 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
         }
         for line in (6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13)
     }
+    regulation = slice(0, 9)
+    extras_played = (away_innings[:, 9:] >= 0).any(axis=1) if away_innings.shape[1] > 9 else np.zeros(1, dtype=bool)
     result = {
-        # Regulation means before extras, so a test can confirm that redistributing runs across
-        # innings by pitcher changed the shape of the game and not its expected total.
+        "engine": engine,
+        # A club's season run rate counts extra-inning runs, so the full-game mean is what the
+        # engines calibrate against; the regulation mean is kept alongside it as a diagnostic.
+        "mean_runs": {"home": round(float(home.mean()), 3), "away": round(float(away.mean()), 3)},
         "regulation_mean_runs": {
-            "home": round(float(home_innings.sum(axis=1).mean()), 3),
-            "away": round(float(away_innings.sum(axis=1).mean()), 3),
+            "home": round(float(np.maximum(home_innings[:, regulation], 0).sum(axis=1).mean()), 3),
+            "away": round(float(np.maximum(away_innings[:, regulation], 0).sum(axis=1).mean()), 3),
         },
-        "bullpen_usage": {
-            "home": _bullpen_usage(home_staff_profile, home_tier_counts),
-            "away": _bullpen_usage(away_staff_profile, away_tier_counts),
-        },
+        "bullpen_usage": bullpen_usage,
         "extra_innings": {
             "rule": "MLB_GHOST_RUNNER_UNTIL_DECIDED" if league == "MLB" else "KBO_MAX_11_TIES_STAND",
-            "probability": float(np.mean(extra_away_columns[0] >= 0)) if extra_away_columns else 0.0,
+            "probability": float(extras_played.mean()) if away_innings.shape[1] > 9 else 0.0,
         },
         "home_win_probability": home_win_probability,
         "away_win_probability": away_win_probability,
