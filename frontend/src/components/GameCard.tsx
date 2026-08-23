@@ -49,6 +49,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   )
   const homeFavored = !p || p.home_win_probability >= p.away_win_probability
   const ranking = p && coherent ? rankedOutcomes(p, game) : null
+  const handicap = p && coherent ? handicapSides(p, game) : null
   const requestPersonalAnalysis = async () => {
     if (!signedIn) { onRequireLogin(); return }
     setPersonalBusy(true); setPersonalError(null)
@@ -174,13 +175,13 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
               <Typography variant="subtitle2">시장 기준점과 비교</Typography>
               <Box className="market-comparison">
                 <Box><span>시장 총점 기준</span><strong>{game.market.total_line ?? '—'}</strong><small>북메이커 {game.market.bookmaker_count}곳의 중간값</small></Box>
-                <Box><span>시장 핸디캡 (마핸)</span><strong>{game.market.home_spread == null ? '—'
-                  : game.market.home_spread < 0 ? `${game.home.name} ${game.market.home_spread}`
-                  : game.market.home_spread > 0 ? `${game.away.name} ${-game.market.home_spread}`
-                  : '핸디 없음'}</strong><small>{game.market.home_spread == null ? '아직 수집 전'
-                  : game.market.home_spread === 0 ? '시장도 대등하게 평가'
-                  : (game.market.home_spread < 0) === (p.home_win_probability >= p.away_win_probability)
-                    ? '우리 모델과 같은 팀' : '우리 모델과 다른 팀'}</small></Box>
+                <Box><span>시장 핸디캡 (마핸)</span><strong>{game.market.home_spread != null && game.market.home_spread !== 0
+                  ? `${game.market.home_spread < 0 ? game.home.name : game.away.name} ${-Math.abs(game.market.home_spread)}`
+                  : handicap?.fromMarket ? `${handicap.minusTeam} 우세`
+                  : game.market.home_spread === 0 ? '핸디 없음' : '—'}</strong><small>{!handicap?.fromMarket
+                  ? game.market.home_spread === 0 ? '시장도 대등하게 평가' : '아직 수집 전'
+                  : `${game.market.home_spread == null ? '핸디 배당이 없어 승패 배당 기준 · ' : ''}${handicap.modelAgrees
+                    ? '우리 모델과 같은 팀' : '우리 모델과 다른 팀'}`}</small></Box>
                 <Box><span>홈 승률</span><strong>{pct(p.home_win_probability)} <i>/</i> {game.market.home_implied_probability == null ? '—' : pct(game.market.home_implied_probability)}</strong><small>우리 모델 / 시장 (수수료 제외)</small></Box>
                 <Box><span>총점 시각차</span><strong>{game.market.model_total_difference == null ? '—' : `${game.market.model_total_difference > 0 ? '+' : ''}${game.market.model_total_difference}`}</strong><small>우리 평균 총점이 시장 기준보다 {game.market.model_total_difference == null ? '—' : game.market.model_total_difference > 0 ? '높음' : game.market.model_total_difference < 0 ? '낮음' : '같음'}</small></Box>
               </Box>
@@ -393,6 +394,31 @@ type RankedOutcome = { label: string; probability: number; note?: string }
 
 type MarketVerdict = { market: string; pick: string; probability: number; actual: string; hit: boolean | null }
 
+// 마핸/플핸 is a market label: the team laying the runs is whoever the book made favorite,
+// not whoever our simulation happens to like. KBO books rarely publish a run line, so fall back
+// to the moneyline gap, and only to our own model when the market says nothing at all.
+function handicapSides(p: NonNullable<Game['prediction']>, game: Game) {
+  const spread = game.market?.home_spread
+  const homeImplied = game.market?.home_implied_probability
+  const awayImplied = game.market?.away_implied_probability
+  const impliedGap = homeImplied != null && awayImplied != null ? homeImplied - awayImplied : null
+  const marketHomeMinus = spread != null && spread !== 0 ? spread < 0
+    : impliedGap != null && Math.abs(impliedGap) >= .01 ? impliedGap > 0
+    : null
+  const modelHomeFavored = p.home_win_probability >= p.away_win_probability
+  const homeMinus = marketHomeMinus ?? modelHomeFavored
+  return {
+    homeMinus,
+    minusTeam: homeMinus ? game.home.name : game.away.name,
+    plusTeam: homeMinus ? game.away.name : game.home.name,
+    minusProbability: homeMinus ? p.handicap.home_minus_1_5 : p.handicap.away_minus_1_5,
+    plusProbability: homeMinus ? p.handicap.away_plus_1_5 : p.handicap.home_plus_1_5,
+    fromMarket: marketHomeMinus != null,
+    modelAgrees: homeMinus === modelHomeFavored,
+    modelFavorite: modelHomeFavored ? game.home.name : game.away.name,
+  }
+}
+
 function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
                         ranking: ReturnType<typeof rankedOutcomes>): MarketVerdict[] {
   const result = game.result
@@ -401,7 +427,6 @@ function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
   const total = result.home_score + result.away_score
   const homeFavored = p.home_win_probability >= p.away_win_probability
   const favorite = homeFavored ? game.home.name : game.away.name
-  const underdog = homeFavored ? game.away.name : game.home.name
   const rows: MarketVerdict[] = [{
     market: '승패',
     pick: `${favorite} 승`,
@@ -409,17 +434,16 @@ function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
     actual: margin === 0 ? '무승부' : `${margin > 0 ? game.home.name : game.away.name} 승`,
     hit: margin === 0 ? null : (margin > 0) === homeFavored,
   }]
-  const favoriteMinus = homeFavored ? p.handicap.home_minus_1_5 : p.handicap.away_minus_1_5
-  const underdogPlus = homeFavored ? p.handicap.away_plus_1_5 : p.handicap.home_plus_1_5
-  if (typeof favoriteMinus === 'number' && typeof underdogPlus === 'number') {
-    const favoriteCovered = (homeFavored ? margin : -margin) >= 2
-    const pickFavorite = favoriteMinus >= underdogPlus
+  const handicap = handicapSides(p, game)
+  if (typeof handicap.minusProbability === 'number' && typeof handicap.plusProbability === 'number') {
+    const minusCovered = (handicap.homeMinus ? margin : -margin) >= 2
+    const pickMinus = handicap.minusProbability >= handicap.plusProbability
     rows.push({
       market: '핸디캡 ±1.5',
-      pick: pickFavorite ? `마핸 ${favorite} -1.5` : `플핸 ${underdog} +1.5`,
-      probability: Math.max(favoriteMinus, underdogPlus),
-      actual: favoriteCovered ? `${favorite} 2점차 이상 승` : `${underdog} 승 또는 1점차 패`,
-      hit: pickFavorite === favoriteCovered,
+      pick: pickMinus ? `마핸 ${handicap.minusTeam} -1.5` : `플핸 ${handicap.plusTeam} +1.5`,
+      probability: Math.max(handicap.minusProbability, handicap.plusProbability),
+      actual: minusCovered ? `${handicap.minusTeam} 2점차 이상 승` : `${handicap.plusTeam} 승 또는 1점차 패`,
+      hit: pickMinus === minusCovered,
     })
   }
   const totals = ranking.line != null ? p.totals[String(ranking.line)] : undefined
@@ -441,27 +465,21 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game): {
   line: number | null
   lineSource: '시장' | '모델'
 } {
-  const homeFavored = p.home_win_probability >= p.away_win_probability
-  const favorite = homeFavored ? game.home.name : game.away.name
-  const underdog = homeFavored ? game.away.name : game.home.name
   const outcomes: RankedOutcome[] = [
     { label: `${game.home.name} 승`, probability: p.home_win_probability },
     { label: `${game.away.name} 승`, probability: p.away_win_probability },
   ]
-  const favoriteMinus = homeFavored ? p.handicap.home_minus_1_5 : p.handicap.away_minus_1_5
-  const underdogPlus = homeFavored ? p.handicap.away_plus_1_5 : p.handicap.home_plus_1_5
-  const marketSpread = game.market?.home_spread
-  const marketFavorite = marketSpread == null || marketSpread === 0 ? null
-    : marketSpread < 0 ? game.home.name : game.away.name
-  const marketNote = marketFavorite == null ? ''
-    : marketFavorite === favorite ? ' · 시장 마핸 일치' : ` · 시장 마핸은 ${marketFavorite}`
-  if (typeof favoriteMinus === 'number') outcomes.push({
-    label: `마핸 · ${favorite} -1.5`, probability: favoriteMinus,
-    note: `${favorite}가 2점차 이상으로 이김${marketNote}`,
+  const handicap = handicapSides(p, game)
+  const handicapNote = !handicap.fromMarket ? ' · 시장 핸디가 없어 우리 모델 기준'
+    : handicap.modelAgrees ? ' · 시장이 꼽은 마핸 팀'
+    : ` · 시장 마핸이지만 우리 모델은 ${handicap.modelFavorite} 우세로 봄`
+  if (typeof handicap.minusProbability === 'number') outcomes.push({
+    label: `마핸 · ${handicap.minusTeam} -1.5`, probability: handicap.minusProbability,
+    note: `${handicap.minusTeam}가 2점차 이상으로 이김${handicapNote}`,
   })
-  if (typeof underdogPlus === 'number') outcomes.push({
-    label: `플핸 · ${underdog} +1.5`, probability: underdogPlus,
-    note: `${underdog}가 이기거나 1점차로 짐${marketNote}`,
+  if (typeof handicap.plusProbability === 'number') outcomes.push({
+    label: `플핸 · ${handicap.plusTeam} +1.5`, probability: handicap.plusProbability,
+    note: `${handicap.plusTeam}가 이기거나 1점차로 짐${handicapNote}`,
   })
   const marketLine = game.market?.total_line
   let line: number | null = marketLine != null && p.totals[String(marketLine)] ? marketLine : null

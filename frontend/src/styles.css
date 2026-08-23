@@ -44,7 +44,7 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .probability-block { padding: 18px; background: rgba(3,16,12,.32); border-radius: 14px; }
 .result-comparison { margin-bottom: 16px; padding: 14px 16px; background: rgba(246,200,107,.07); border: 1px solid rgba(246,200,107,.17); border-radius: 12px; }
 .result-comparison-heading { gap: 12px; margin-bottom: 12px; }.result-comparison-heading b { color: #e5c887; font-size: .75rem; }.result-comparison-heading span { color: #826f49; font-size: .58rem; text-align: right; }
-.result-comparison-grid { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 10px; align-items: stretch; }
+.result-comparison-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: stretch; }
 .result-score, .result-verdict { min-width: 0; padding: 9px 11px; border-radius: 9px; background: rgba(3,16,12,.26); }
 .result-score { display: grid; gap: 2px; }.result-score span, .result-verdict span { color: #8d8063; font-size: .61rem; }.result-score strong { color: #f6c86b; font-size: 1.12rem; }.result-score.predicted strong { color: #c7d8d1; }.result-score i { color: #826f49; font-style: normal; }.result-score small, .result-verdict small { color: #6f765f; font-size: .54rem; }
 .result-verdict { display: grid; align-content: center; gap: 3px; }.result-verdict b { font-size: .72rem; }.result-verdict.correct b { color: #7ee7b8; }.result-verdict.incorrect b { color: #f29b8e; }.result-verdict.neutral b, .result-verdict.unavailable b { color: #d0b879; }
