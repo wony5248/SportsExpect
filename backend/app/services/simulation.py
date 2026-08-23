@@ -51,6 +51,29 @@ def validate_simulation_summary(summary: dict[str, Any]) -> None:
             raise ValueError("dense intervals must be ordered with a valid probability mass")
 
 
+# Relief tiers, ordered worst-to-best at suppressing runs. A manager does not empty the bullpen
+# at random: the closer/setup group (필승조) protects a close late game, the chase group (추격조)
+# holds the line while the club is behind but still within reach, and the mop-up group (등봉조)
+# eats innings once the game is decided. These league-wide defaults apply until a per-team
+# profile replaces them; see services/bullpen.py.
+BULLPEN_TIERS = ("high_leverage", "middle", "chase", "mop_up")
+DEFAULT_BULLPEN = {"high_leverage": .82, "middle": 1.00, "chase": 1.12, "mop_up": 1.28}
+# Typical share of relief innings by tier. Only a starting point for the mean normalizer, which
+# is replaced with the usage the leverage rules actually produce for this matchup.
+BULLPEN_USAGE_MIX = {"high_leverage": .34, "middle": .40, "chase": .16, "mop_up": .10}
+# Starters do not all last their season average; this spread turns the average into a workload.
+STARTER_EXIT_SPREAD = 1.2
+LEAGUE_AVERAGE_STARTER_INNINGS = 5.3
+# Leverage rules, read from the pitching club's own point of view.
+# From the sixth inning on, a tie, a lead of up to three, or a one-run deficit is the classic
+# save/hold situation the best arms are held back for.
+LATE_INNING_INDEX = 5
+HIGH_LEVERAGE_LEAD = (-1, 3)
+# Behind by two to five late: still one swing from level, so the chase group works.
+CHASE_LEAD = (-5, -2)
+# Six runs either way and the game is over as a contest; the mop-up group finishes it.
+BLOWOUT_MARGIN = 6
+
 # KBO regular-season games end after inning 11 with no tiebreaker; ties stand.
 KBO_MAX_EXTRA_INNINGS = 2
 # MLB extras start every half-inning with an automatic runner on second base. Empirically that
@@ -83,7 +106,8 @@ def highest_density_interval(values: np.ndarray, mass: float = DENSE_INTERVAL_MA
 
 def simulate_scores(home_expected: float, away_expected: float, simulations: int, seed: int,
                     environment_variance: float = .08, team_variance: float = .12,
-                    league: str = "MLB") -> dict[str, Any]:
+                    league: str = "MLB", home_staff: dict[str, Any] | None = None,
+                    away_staff: dict[str, Any] | None = None) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
     # A shared gamma run environment creates realistic over-dispersion and correlation
     # (weather/umpire/park conditions affect both clubs) while preserving expected means.
@@ -102,14 +126,63 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     home_weights = np.array([.108, .106, .105, .108, .110, .112, .114, .117, .120])
     away_weights /= away_weights.sum()
     home_weights /= home_weights.sum()
-    home_innings = rng.poisson(home_expected * shared_environment[:, None] * home_environment[:, None] * home_weights[None, :])
-    away_innings = rng.poisson(away_expected * shared_environment[:, None] * away_environment[:, None] * away_weights[None, :])
+    # Who is on the mound depends on the score, so innings are drawn one at a time. The away
+    # staff suppresses home scoring and vice versa.
+    home_rate = home_expected * shared_environment * home_environment
+    away_rate = away_expected * shared_environment * away_environment
+    away_staff_profile = _staff_profile(away_staff, rng, simulations)
+    home_staff_profile = _staff_profile(home_staff, rng, simulations)
+
+    def play_nine(calibrating: bool, home_scale: float = 1.0, away_scale: float = 1.0
+                  ) -> tuple[np.ndarray, np.ndarray, Counter[str], Counter[str]]:
+        home_line = np.zeros((simulations, 9), dtype=np.int64)
+        away_line = np.zeros((simulations, 9), dtype=np.int64)
+        home_total = np.zeros(simulations, dtype=np.int64)
+        away_total = np.zeros(simulations, dtype=np.int64)
+        away_tiers: Counter[str] = Counter()
+        home_tiers: Counter[str] = Counter()
+        for inning in range(9):
+            # Top half: the away club bats against the home staff. Each staff reads its own
+            # scoreboard, so leading by two calls for different arms than trailing by two.
+            home_multiplier, home_used = _inning_multiplier(
+                home_staff_profile, inning, home_total - away_total, calibrating)
+            home_tiers.update(home_used)
+            away_runs = rng.poisson(away_rate * away_scale * away_weights[inning] * home_multiplier)
+            away_line[:, inning] = away_runs
+            away_total += away_runs
+            # Bottom half, with the top half already on the board.
+            away_multiplier, away_used = _inning_multiplier(
+                away_staff_profile, inning, away_total - home_total, calibrating)
+            away_tiers.update(away_used)
+            home_runs = rng.poisson(home_rate * home_scale * home_weights[inning] * away_multiplier)
+            if inning == 8:
+                # The home club does not bat in the ninth while ahead, and a walk-off ends the
+                # inning the moment the winning run scores. Both cap home scoring in a way a
+                # plain nine-inning draw cannot reproduce.
+                deficit = away_total - home_total
+                home_runs = np.where(deficit >= 0, np.minimum(home_runs, deficit + 1), 0)
+            home_line[:, inning] = home_runs
+            home_total += home_runs
+        return home_line, away_line, home_tiers, away_tiers
+
+    # A neutral pass first. It measures two things the rules make impossible to know upfront:
+    # how often each relief tier is actually called on, and how much the ninth-inning rules
+    # trim home scoring. Both feed corrections so the pitcher plan changes the shape of the
+    # game while each club still lands on its expected run total.
+    calibration_home_line, calibration_away_line, calibration_home, calibration_away = play_nine(calibrating=True)
+    _apply_realized_normalizer(home_staff_profile, calibration_home)
+    _apply_realized_normalizer(away_staff_profile, calibration_away)
+    home_scale = _rate_correction(home_expected, calibration_home_line)
+    away_scale = _rate_correction(away_expected, calibration_away_line)
+    home_innings, away_innings, home_tier_counts, away_tier_counts = play_nine(False, home_scale, away_scale)
     home = home_innings.sum(axis=1)
     away = away_innings.sum(axis=1)
     # League-accurate extra innings. MLB plays the automatic-runner tiebreaker until every game
     # is decided; KBO plays innings 10-11 without a tiebreaker and lets remaining ties stand.
-    home_extra_rate = home_expected * shared_environment * home_environment * EXTRA_INNING_WEIGHT
-    away_extra_rate = away_expected * shared_environment * away_environment * EXTRA_INNING_WEIGHT
+    # Extra innings are the definition of high leverage: both managers are down to their best
+    # available arms, so the high-leverage multiplier applies for the rest of the game.
+    home_extra_rate = home_rate * EXTRA_INNING_WEIGHT * _normalized_tier(away_staff_profile, "high_leverage")
+    away_extra_rate = away_rate * EXTRA_INNING_WEIGHT * _normalized_tier(home_staff_profile, "high_leverage")
     ghost_bonus = MLB_GHOST_RUNNER_BONUS if league == "MLB" else 0.0
     max_extra_innings = MLB_MAX_EXTRA_INNINGS if league == "MLB" else KBO_MAX_EXTRA_INNINGS
     extra_away_columns: list[np.ndarray] = []
@@ -212,6 +285,16 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
         for line in (6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13)
     }
     result = {
+        # Regulation means before extras, so a test can confirm that redistributing runs across
+        # innings by pitcher changed the shape of the game and not its expected total.
+        "regulation_mean_runs": {
+            "home": round(float(home_innings.sum(axis=1).mean()), 3),
+            "away": round(float(away_innings.sum(axis=1).mean()), 3),
+        },
+        "bullpen_usage": {
+            "home": _bullpen_usage(home_staff_profile, home_tier_counts),
+            "away": _bullpen_usage(away_staff_profile, away_tier_counts),
+        },
         "extra_innings": {
             "rule": "MLB_GHOST_RUNNER_UNTIL_DECIDED" if league == "MLB" else "KBO_MAX_11_TIES_STAND",
             "probability": float(np.mean(extra_away_columns[0] >= 0)) if extra_away_columns else 0.0,
@@ -247,6 +330,91 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     }
     validate_simulation_summary(result)
     return result
+
+
+def _staff_profile(staff: dict[str, Any] | None, rng: np.random.Generator, simulations: int) -> dict[str, Any]:
+    """Resolve one club's pitching plan: starter workload plus per-tier relief multipliers."""
+    staff = staff or {}
+    bullpen = {**DEFAULT_BULLPEN, **(staff.get("bullpen") or {})}
+    starter_multiplier = float(staff.get("starter_multiplier", 1.0))
+    starter_innings = float(staff.get("starter_innings") or LEAGUE_AVERAGE_STARTER_INNINGS)
+    # The multipliers describe how runs are distributed across innings, not how many are
+    # scored: dividing by the whole-game average keeps each club's expected total intact.
+    relief_blend = sum(BULLPEN_USAGE_MIX[tier] * bullpen[tier] for tier in BULLPEN_USAGE_MIX)
+    starter_share = min(1.0, max(.2, starter_innings / 9))
+    normalizer = starter_share * starter_multiplier + (1 - starter_share) * relief_blend
+    exit_inning = np.clip(np.rint(rng.normal(starter_innings, STARTER_EXIT_SPREAD, simulations)), 2, 9)
+    return {
+        "starter_multiplier": starter_multiplier, "starter_innings": starter_innings,
+        "bullpen": bullpen, "normalizer": max(.3, normalizer), "exit_inning": exit_inning.astype(np.int64),
+    }
+
+
+def _rate_correction(target: float, calibration_line: np.ndarray) -> float:
+    """Scale a club's rate so the ninth-inning rules do not silently lower its expected runs.
+
+    A club's season run rate already counts the home ninths it never batted, so the simulation
+    has to bat harder in the innings it does play to reproduce that rate.
+    """
+    realized = float(calibration_line.sum(axis=1).mean())
+    if realized <= 0:
+        return 1.0
+    return float(np.clip(target / realized, .8, 1.35))
+
+
+def _apply_realized_normalizer(profile: dict[str, Any], counts: Counter[str]) -> None:
+    """Replace the assumed usage mix with the tier shares the leverage rules actually produced."""
+    innings = sum(counts.values())
+    if not innings:
+        return
+    weighted = counts["starter"] * profile["starter_multiplier"] + sum(
+        counts[tier] * profile["bullpen"][tier] for tier in BULLPEN_TIERS)
+    profile["normalizer"] = max(.3, weighted / innings)
+
+
+def _normalized_tier(profile: dict[str, Any], tier: str) -> float:
+    return profile["bullpen"][tier] / profile["normalizer"]
+
+
+def _relief_tier(inning: int, lead: np.ndarray) -> dict[str, np.ndarray]:
+    """Which relief group warms up, judged from the pitching club's own scoreboard position."""
+    late = inning >= LATE_INNING_INDEX
+    decided = np.abs(lead) >= BLOWOUT_MARGIN
+    high_leverage = late & ~decided & (lead >= HIGH_LEVERAGE_LEAD[0]) & (lead <= HIGH_LEVERAGE_LEAD[1])
+    chase = late & ~decided & (lead >= CHASE_LEAD[0]) & (lead <= CHASE_LEAD[1])
+    return {
+        "mop_up": decided,
+        "high_leverage": high_leverage,
+        "chase": chase,
+        "middle": ~decided & ~high_leverage & ~chase,
+    }
+
+
+def _inning_multiplier(profile: dict[str, Any], inning: int, lead: np.ndarray,
+                       calibrating: bool = False) -> tuple[np.ndarray, dict[str, int]]:
+    """Pick starter or relief tier per simulation, then scale the inning's run rate."""
+    bullpen = profile["bullpen"]
+    tiers = _relief_tier(inning, lead)
+    relief = np.full(lead.size, bullpen["middle"], dtype=float)
+    for tier in ("chase", "mop_up", "high_leverage"):
+        relief[tiers[tier]] = bullpen[tier]
+    starter_in = inning < profile["exit_inning"]
+    multiplier = np.ones(lead.size) if calibrating else (
+        np.where(starter_in, profile["starter_multiplier"], relief) / profile["normalizer"])
+    counts = {"starter": int(np.count_nonzero(starter_in))}
+    counts.update({tier: int(np.count_nonzero(~starter_in & mask)) for tier, mask in tiers.items()})
+    return multiplier, counts
+
+
+def _bullpen_usage(profile: dict[str, Any], counts: Counter[str]) -> dict[str, Any]:
+    innings = max(1, counts["starter"] + sum(counts[tier] for tier in BULLPEN_TIERS))
+    usage = {f"{tier}_share": round(counts[tier] / innings, 4) for tier in BULLPEN_TIERS}
+    return {
+        "starter_innings": round(profile["starter_innings"], 1),
+        "starter_share": round(counts["starter"] / innings, 4),
+        **usage,
+        "multipliers": {tier: round(profile["bullpen"][tier], 3) for tier in BULLPEN_TIERS},
+    }
 
 
 def _mode_payload(counts: Counter[Any], simulations: int) -> dict[str, Any]:

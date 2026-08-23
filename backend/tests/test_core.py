@@ -6,13 +6,15 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import Text, create_engine, event
+from sqlalchemy import Text, create_engine, event, select
 from sqlalchemy.orm import Session
 from backend.app.config import KST, database_url_from_environment
 from backend.app.database.base import Base
-from backend.app.models import Game, GameResult, ModelVersion, Prediction, PredictionSnapshot, Team, UserClaudeSetting
+from backend.app.models import (Game, GameResult, ModelVersion, Prediction, PredictionSnapshot, Team,
+                                TeamBullpenEvent, UserClaudeSetting)
 from backend.app.repositories.repository import _prediction_changes, game_cards, game_dates
 from backend.app.services.backtest import walk_forward_backtest
+from backend.app.services.bullpen import apply_profile_update, derive_profile, load_profiles, seed_league
 from backend.app.services import claude_advisor, personal_claude, runtime_secrets, user_auth
 from backend.app.services.claude_advisor import blend_with_claude
 from backend.app.collectors.kbo.client import (KboClient, _batter_pitcher_split, _data_id_table,
@@ -279,6 +281,58 @@ def test_simulation_is_reproducible_and_coherent():
         assert mode["probability"] == round(mode["count"] / 20_000, 4)
 
 
+def test_pitcher_plan_reshapes_the_game_without_moving_expected_runs():
+    ace = {"starter_multiplier": .72, "starter_innings": 6.8,
+           "bullpen": {"high_leverage": .70, "middle": .92, "chase": 1.02, "mop_up": 1.15}}
+    opener = {"starter_multiplier": 1.35, "starter_innings": 4.0,
+              "bullpen": {"high_leverage": .95, "middle": 1.12, "chase": 1.25, "mop_up": 1.40}}
+    neutral = simulate_scores(4.6, 4.2, 40_000, 11, league="MLB")
+    with_ace = simulate_scores(4.6, 4.2, 40_000, 11, league="MLB", away_staff=ace)
+    with_opener = simulate_scores(4.6, 4.2, 40_000, 11, league="MLB", away_staff=opener)
+    # The plan decides when runs score, never how many: every profile keeps the target mean.
+    for result in (neutral, with_ace, with_opener):
+        assert abs(result["regulation_mean_runs"]["home"] / 4.6 - 1) < .03
+        assert abs(result["regulation_mean_runs"]["away"] / 4.2 - 1) < .03
+    # A starter who works deep leaves fewer innings for the bullpen.
+    assert with_ace["bullpen_usage"]["away"]["starter_share"] > neutral["bullpen_usage"]["away"]["starter_share"]
+    assert with_opener["bullpen_usage"]["away"]["starter_share"] < neutral["bullpen_usage"]["away"]["starter_share"]
+    usage = neutral["bullpen_usage"]["away"]
+    assert abs(sum(usage[key] for key in ("starter_share", "high_leverage_share", "middle_share",
+                                          "chase_share", "mop_up_share")) - 1) < 1e-6
+    # Close late innings call the high-leverage group far more often than a decided game does.
+    assert usage["high_leverage_share"] > usage["mop_up_share"]
+
+
+def test_bullpen_profile_updates_are_versioned_and_only_recorded_when_values_move():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        team = Team(league="KBO", code="BP", name="Bullpen")
+        session.add(team); session.flush()
+        derived = derive_profile(SimpleNamespace(era=4.20, whip=1.30), league_era=4.60)
+        assert derived["high_leverage"] < derived["middle"] < derived["chase"] < derived["mop_up"]
+        first = apply_profile_update(session, team.id, derived, source="DERIVED")
+        assert first == {"created": True, "changed": True, "revision": 1, "multipliers": derived}
+        # Re-applying the same derived values must not manufacture a change event.
+        assert apply_profile_update(session, team.id, derived, source="DERIVED")["changed"] is False
+        # A Claude-supplied replacement bumps the revision and records what moved.
+        claude = {"high_leverage": .68, "middle": .95, "chase": 1.10, "mop_up": 1.30}
+        update = apply_profile_update(session, team.id, claude, source="CLAUDE", note="마무리 교체")
+        assert update["revision"] == 2 and update["changed"] is True
+        events = session.scalars(select(TeamBullpenEvent).order_by(TeamBullpenEvent.revision)).all()
+        assert [event.source for event in events] == ["DERIVED", "CLAUDE"]
+        assert events[1].changes["high_leverage"] == [derived["high_leverage"], .68]
+        session.commit()
+        stored = load_profiles(session, "KBO")[team.id]
+        assert (stored["high_leverage"], stored["source"], stored["revision"]) == (.68, "CLAUDE", 2)
+        # A derived reseed must never overwrite a real source.
+        assert seed_league(session, "KBO")["unchanged_or_skipped"] == 1
+        # Values outside the guard band are clamped rather than trusted.
+        clamped = apply_profile_update(session, team.id, {"high_leverage": .05, "middle": 1.0,
+                                                          "chase": 1.1, "mop_up": 9.0}, source="MANUAL")
+        assert clamped["multipliers"] == {"high_leverage": .55, "middle": 1.0, "chase": 1.1, "mop_up": 1.60}
+
+
 def test_dense_intervals_are_tighter_than_central_80_band():
     result = simulate_scores(5.2, 4.1, 20_000, 42)
     for interval, quantiles in (
@@ -406,7 +460,7 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     score = after["payload"]["display_expected_score"]
     assert after["expected_total"] == round(score["away"] + score["home"], 1)
     assert after["statistical_expected_total"] == round(after["home_expected_runs"] + after["away_expected_runs"], 2)
-    assert after["payload"]["summary_schema_version"] == 7
+    assert after["payload"]["summary_schema_version"] == 8
     assert after["payload"]["coherence_valid"] is True
     assert after["payload"]["primary_score"] == after["payload"]["top_scores"][0]
     estimates = after["payload"]["score_estimates"]

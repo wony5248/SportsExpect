@@ -90,6 +90,12 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         ) - (
             home_matchup_era - _v(getattr(home_pitcher, "era", None), 4.5)
         ),
+        # Run-rate multipliers and workload for the inning-by-inning pitcher plan. The multiplier
+        # is relative to the club's own staff, so it shapes when runs score, not how many.
+        "home_starter_multiplier": _starter_multiplier(home_pitcher, home, league),
+        "away_starter_multiplier": _starter_multiplier(away_pitcher, away, league),
+        "home_starter_innings": _clip(_v(getattr(home_pitcher, "avg_start_innings", None), 5.3), 3.0, 7.5),
+        "away_starter_innings": _clip(_v(getattr(away_pitcher, "avg_start_innings", None), 5.3), 3.0, 7.5),
         "park_factor": park_factors.get(stadium or "", 1.0),
         "lineup_strength_diff": lineup_diff,
         "home_lineup_index": home_lineup_index,
@@ -321,6 +327,13 @@ def _effective_pitcher_era(pitcher: Any | None, team_era: float) -> float:
     confirmation_factor = 1.0 if bool(getattr(pitcher, "confirmed", False)) else .35
     credibility = confirmation_factor * (.35 + .65 * sample_credibility)
     return (1 - credibility) * team_era + credibility * skill_estimate
+
+
+def _starter_multiplier(pitcher: Any | None, team: Any, league: str) -> float:
+    """How this starter suppresses runs relative to their own staff (below 1.0 is better)."""
+    league_era = 4.60 if league == "KBO" else 4.10
+    team_era = max(_v(getattr(team, "era", None), league_era), 1.5)
+    return _clip(_effective_pitcher_era(pitcher, team_era) / team_era, .55, 1.70)
 
 
 def _bullpen_proxy(team: Any, pitcher: Any | None) -> float:

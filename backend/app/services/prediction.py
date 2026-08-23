@@ -6,6 +6,7 @@ from statistics import NormalDist
 from typing import Any
 
 from backend.app.config import settings
+from backend.app.services.bullpen import staff_payload
 from backend.app.services.feature_engineering import build_features, expected_runs, logistic_probability
 from backend.app.services.model_lifecycle import predict_with_runtime
 from backend.app.services.simulation import simulate_scores
@@ -13,15 +14,17 @@ from backend.app.services.simulation import simulate_scores
 
 MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-loss classifier blended into "
                    "simulation means + validated overdispersed correlated gamma-Poisson score distribution "
+                   "+ inning-by-inning pitcher plan (starter workload, then leverage-tiered relief) "
                    "+ league-accurate extra innings "
                    "(MLB ghost-runner tiebreaker until decided, KBO ties stand after inning 11)")
 
 
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,
                  lineups: list[Any] | None = None, game_context: dict[str, Any] | None = None,
-                 model_runtime: dict[str, Any] | None = None) -> dict[str, Any]:
+                 model_runtime: dict[str, Any] | None = None,
+                 bullpens: dict[str, dict[str, Any] | None] | None = None) -> dict[str, Any]:
     model_name = (model_runtime or {}).get("model_name") or (
-        "KBO_MATCHUP_V13" if game.league == "KBO" else "MLB_MATCHUP_V12"
+        "KBO_MATCHUP_V14" if game.league == "KBO" else "MLB_MATCHUP_V13"
     )
     features = build_features(home, away, home_pitcher, away_pitcher, game.stadium, game.league, lineups,
                               getattr(game, "game_date", None), game_context)
@@ -40,6 +43,10 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     # probability blend so the displayed favorite reflects both, while every headline metric
     # still comes from the single simulated score population.
     home_runs, away_runs = blend_classifier_into_means(logistic, home_runs, away_runs)
+    home_staff = staff_payload((bullpens or {}).get("home"), float(features["home_starter_multiplier"]),
+                               float(features["home_starter_innings"]))
+    away_staff = staff_payload((bullpens or {}).get("away"), float(features["away_starter_multiplier"]),
+                               float(features["away_starter_innings"]))
     lineup_fingerprint = [
         (getattr(item, "side", None), getattr(item, "batting_order", None), getattr(item, "player_id", None),
          getattr(item, "player_name", None), getattr(item, "position", None), getattr(item, "value", None),
@@ -55,7 +62,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     ]
     input_data = {
         "game": game.external_id,
-        "simulation_summary_schema": 7,
+        "simulation_summary_schema": 8,
         "features": features,
         "home_expected": round(base_home_runs, 6),
         "away_expected": round(base_away_runs, 6),
@@ -63,6 +70,9 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "model_checksum": (model_runtime or {}).get("checksum"),
         "pitchers": [(getattr(away_pitcher, "player_id", None), getattr(away_pitcher, "name", None)),
                      (getattr(home_pitcher, "player_id", None), getattr(home_pitcher, "name", None))],
+        # Including the staff plan means a bullpen profile update produces a new input hash,
+        # so the next refresh regenerates the prediction instead of reusing a stale one.
+        "staff": {"home": home_staff, "away": away_staff},
         "lineups": lineup_fingerprint,
     }
     input_hash = hashlib.sha256(json.dumps(input_data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
@@ -78,7 +88,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     team_variance = min(.24, team_variance)
     simulation = simulate_scores(
         home_runs, away_runs, settings.simulations, seed, environment_variance, team_variance,
-        league=game.league,
+        league=game.league, home_staff=home_staff, away_staff=away_staff,
     )
     # Every headline score-distribution metric must describe the same population. The logistic
     # classifier remains an independent diagnostic, but win probability, expected score,
@@ -102,7 +112,9 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "input_hash": input_hash,
         "input_payload": input_data,
         "home_win_probability": round(home_probability, 4),
-        "away_win_probability": round(away_probability, 4),
+        # Derive the complement from the rounded value: two-way probabilities that are rounded
+        # independently can each be correct yet fail to add up on screen.
+        "away_win_probability": round(1 - round(home_probability, 4), 4),
         "home_expected_runs": round(home_runs, 2),
         "away_expected_runs": round(away_runs, 2),
         # The displayed total is derived from the same one-decimal expected scores shown in the UI.
@@ -111,13 +123,15 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "statistical_expected_total": round(round(home_runs, 2) + round(away_runs, 2), 2),
         "confidence": confidence,
         "payload": {
-            "summary_schema_version": 7,
+            "summary_schema_version": 8,
             "coherence_valid": True,
             "probability_source": (
                 "extra_innings_simulation_mlb_tiebreaker_no_ties" if game.league == "MLB"
                 else "extra_innings_simulation_kbo_to_11_two_way_excluding_ties"
             ),
             "extra_innings": simulation["extra_innings"],
+            "bullpen_usage": simulation["bullpen_usage"],
+            "staff_plan": {"home": home_staff, "away": away_staff},
             "model": {
                 "name": model_name,
                 "algorithm": ("automatically trained run regressors + " + MODEL_ALGORITHM)

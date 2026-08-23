@@ -5,18 +5,20 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi import Body, Depends, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, SecretStr
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from backend.app.config import KST, settings
 from backend.app.database import SessionLocal, init_db
+from backend.app.models import Team
 from backend.app.repositories.repository import game_cards, game_dates, game_detail, performance_metrics
 from backend.app.services.operations import LockUnavailable, backup_database, operational_status
 from backend.app.services.backtest import walk_forward_backtest
+from backend.app.services.bullpen import TIERS, apply_profile_update, load_profiles
 from backend.app.services.jobs import run_cron_refresh, run_full_refresh
 from backend.app.services.model_lifecycle import lifecycle_status
 from backend.app.services.claude_advisor import clear_claude_cache
@@ -164,6 +166,55 @@ def cron_refresh(
     except LockUnavailable as exc:
         # A concurrent full/nearby run is expected occasionally; Cron can safely retry later.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+class BullpenTierUpdate(BaseModel):
+    """One team's relief profile. Multipliers are relative to that club's own staff average."""
+
+    team_code: str = Field(min_length=1, max_length=8)
+    high_leverage: float = Field(ge=.3, le=2.0)
+    middle: float = Field(ge=.3, le=2.0)
+    chase: float = Field(ge=.3, le=2.0)
+    mop_up: float = Field(ge=.3, le=2.0)
+    high_leverage_arms: list[str] = Field(default_factory=list, max_length=12)
+    middle_arms: list[str] = Field(default_factory=list, max_length=12)
+    chase_arms: list[str] = Field(default_factory=list, max_length=12)
+    mop_up_arms: list[str] = Field(default_factory=list, max_length=12)
+    note: str | None = Field(default=None, max_length=300)
+
+
+@app.post("/api/v1/admin/bullpen", dependencies=[Depends(require_admin)])
+def update_bullpen(league: str = Query(pattern="^(KBO|MLB)$"),
+                   source: str = Query(default="CLAUDE", pattern="^(CLAUDE|OFFICIAL|MANUAL)$"),
+                   updates: list[BullpenTierUpdate] = Body(...),
+                   session: Session = Depends(get_session)):
+    """Replace bullpen leverage profiles. Predictions pick the change up on the next refresh
+    because the staff plan is part of each prediction's input hash."""
+    teams = {team.code: team.id for team in session.scalars(select(Team).where(Team.league == league)).all()}
+    unknown = [row.team_code for row in updates if row.team_code not in teams]
+    if unknown:
+        raise HTTPException(status_code=404, detail=f"Unknown {league} team codes: {unknown}")
+    applied = []
+    for row in updates:
+        result = apply_profile_update(
+            session, teams[row.team_code],
+            {tier: getattr(row, tier) for tier in TIERS},
+            source=source, note=row.note,
+            arms={tier: getattr(row, f"{tier}_arms") for tier in TIERS},
+        )
+        applied.append({"team_code": row.team_code, **result})
+    session.commit()
+    changed = [row for row in applied if row["changed"]]
+    return {"league": league, "source": source, "submitted": len(applied), "changed": len(changed),
+            "teams": applied}
+
+
+@app.get("/api/v1/admin/bullpen", dependencies=[Depends(require_admin)])
+def read_bullpen(league: str = Query(pattern="^(KBO|MLB)$"), session: Session = Depends(get_session)):
+    codes = {team.id: team.code for team in session.scalars(select(Team).where(Team.league == league)).all()}
+    return {"league": league, "teams": [
+        {"team_code": codes.get(team_id), **profile} for team_id, profile in load_profiles(session, league).items()
+    ]}
 
 
 @app.post("/api/v1/admin/backup", dependencies=[Depends(require_admin)])

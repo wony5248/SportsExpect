@@ -27,6 +27,7 @@ from backend.app.repositories.repository import (
     upsert_team_stat,
 )
 from backend.app.services.prediction import predict_game
+from backend.app.services.bullpen import load_profiles, seed_league
 from backend.app.services.model_lifecycle import load_champion_runtime
 
 
@@ -195,6 +196,10 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
             query = query.where(Game.external_id.in_(game_ids))
         games = session.scalars(query).all()
         model_runtime = load_champion_runtime(session, league)
+        # Seed any team that has no profile yet, then read them all back, so a bullpen update
+        # made since the last refresh reaches this slate's predictions.
+        seed_league(session, league, target_date)
+        bullpen_profiles = load_profiles(session, league)
         all_day_games = session.scalars(select(Game).where(Game.game_date == target_date, Game.league == league)).all()
         team_ids = {team_id for day_game in all_day_games for team_id in (day_game.home_team_id, day_game.away_team_id)}
         stats_by_team = {team_id: latest_team_stat(session, team_id, target_date) for team_id in team_ids}
@@ -227,6 +232,8 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
             result = predict_game(
                 game, home, away, by_side.get("home"), by_side.get("away"), lineups, context,
                 model_runtime=model_runtime,
+                bullpens={"home": bullpen_profiles.get(game.home_team_id),
+                          "away": bullpen_profiles.get(game.away_team_id)},
             )
             save_prediction(
                 session, game, result, stage=checkpoint_stage or _prediction_stage(game, captured_at),

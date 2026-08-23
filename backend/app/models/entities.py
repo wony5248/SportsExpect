@@ -77,6 +77,51 @@ class TeamStat(Base):
     team: Mapped[Team] = relationship()
 
 
+class TeamBullpen(Base):
+    """Per-team relief profile by leverage tier, kept separate from the daily stat snapshot.
+
+    Values are run-rate multipliers against the club's own staff average (below 1.0 suppresses
+    runs). The simulation only reads the multipliers, so a Claude-assisted or official update
+    can replace them without the model needing to know how they were produced. Every change
+    bumps `revision` and records what moved, so a mid-season bullpen shake-up is auditable.
+    """
+
+    __tablename__ = "team_bullpen"
+    __table_args__ = (UniqueConstraint("team_id"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"), index=True)
+    high_leverage_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    middle_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    chase_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    mop_up_multiplier: Mapped[float] = mapped_column(Float, default=1.0)
+    # Named arms per tier when a source supplies them; empty until a roster feed fills them in.
+    high_leverage_arms: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    middle_arms: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    chase_arms: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    mop_up_arms: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    source: Mapped[str] = mapped_column(String(16), default="DERIVED")
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    team: Mapped[Team] = relationship()
+
+
+class TeamBullpenEvent(Base):
+    """Append-only history of bullpen profile changes, so an update is never silent."""
+
+    __tablename__ = "team_bullpen_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id"), index=True)
+    revision: Mapped[int] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(16))
+    changes: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+
+
 class PitcherStat(Base):
     __tablename__ = "pitcher_stats"
     __table_args__ = (UniqueConstraint("game_id", "side"),)

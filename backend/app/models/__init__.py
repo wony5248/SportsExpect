@@ -15,6 +15,8 @@ from backend.app.models.entities import (
     PredictionSnapshot,
     RuntimeSecret,
     Team,
+    TeamBullpen,
+    TeamBullpenEvent,
     TeamStat,
     UserClaudeSetting,
 )
@@ -22,6 +24,6 @@ from backend.app.models.entities import (
 __all__ = [
     "CrawlLog", "Game", "GameResult", "LineupEntry", "MarketConsensus", "MarketSnapshot", "ModelArtifact",
     "ModelLifecycleEvent", "ModelRegistry", "ModelVersion", "PitcherStat",
-    "Prediction", "PredictionHistory", "PredictionSnapshot", "RuntimeSecret", "Team", "TeamStat",
+    "Prediction", "PredictionHistory", "PredictionSnapshot", "RuntimeSecret", "Team", "TeamBullpen", "TeamBullpenEvent", "TeamStat",
     "UserClaudeSetting",
 ]
