@@ -70,15 +70,15 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
       </Box>
       {game.result && <Box className="result-comparison">
         <Stack direction="row" justifyContent="space-between" alignItems="baseline" className="result-comparison-heading">
-          <b>실제 결과와 경기 전 예측{judgedVerdicts.length ? ` · 마켓 ${verdictHits}/${judgedVerdicts.length} 적중` : ''}</b>
-          <span>{resultComparison ? `저장 예측 · ${new Date(resultComparison.createdAt).toLocaleString('ko-KR')}` : '경기 전 저장 예측 없음'}</span>
+          <b>경기 전 예측은 맞았을까{judgedVerdicts.length ? ` · ${judgedVerdicts.length}개 중 ${verdictHits}개 적중` : ''}</b>
+          <span>{resultComparison ? `${new Date(resultComparison.createdAt).toLocaleString('ko-KR')}에 저장한 예측` : '경기 전 저장한 예측 없음'}</span>
         </Stack>
         <Box className="result-comparison-grid">
           <Box className="result-score actual"><span>실제 최종</span><strong>{game.result.away_score} <i>:</i> {game.result.home_score}</strong><small>{game.away.name} : {game.home.name}</small></Box>
           {resultComparison ? <>
-            <Box className="result-score predicted"><span>시뮬레이션 최빈 점수</span><strong>{stat(resultComparison.awayExpected, 0)} <i>:</i> {stat(resultComparison.homeExpected, 0)}</strong><small>{game.away.name} : {game.home.name}{p?.extra_innings ? '' : ' · 9이닝 구모델'}</small></Box>
-            <Box className={`result-verdict ${resultComparison.verdictClass}`}><b>{resultComparison.verdict}</b><span>{resultComparison.favorite}</span><small>최빈 점수 기준 팀당 오차 {stat(resultComparison.runsMae, 1)}점</small></Box>
-          </> : <Box className="result-verdict unavailable"><b>비교할 예측 없음</b><span>경기 시작 전에 저장된 시뮬레이션 예측이 없습니다.</span></Box>}
+            <Box className="result-score predicted"><span>가장 많이 나온 점수</span><strong>{stat(resultComparison.awayExpected, 0)} <i>:</i> {stat(resultComparison.homeExpected, 0)}</strong><small>{game.away.name} : {game.home.name}{p?.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
+            <Box className={`result-verdict ${resultComparison.verdictClass}`}><b>{resultComparison.verdict}</b><span>{resultComparison.favorite}</span><small>이 점수 기준 팀당 {stat(resultComparison.runsMae, 1)}점 차이</small></Box>
+          </> : <Box className="result-verdict unavailable"><b>비교할 예측 없음</b><span>경기 시작 전에 저장해 둔 예측이 없습니다.</span></Box>}
         </Box>
         {verdicts && verdicts.length > 0 && <Box className="market-verdicts">
           {verdicts.map((verdict) => <Box key={verdict.market} className={`market-verdict ${verdict.hit == null ? 'neutral' : verdict.hit ? 'hit' : 'miss'}`}>
@@ -94,45 +94,45 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           <Stack direction="row" justifyContent="space-between" alignItems="baseline">
             <Box><span className={`probability${homeFavored ? '' : ' accent'}`}>{pct(p.away_win_probability)}</span><small>{game.away.name}{homeFavored ? '' : ' · 우세'}</small></Box>
             <Typography className="metric-label">{p.extra_innings
-              ? game.league === 'MLB' ? '연장 승부치기 포함 승률' : '연장 11회 · 무승부 제외 승률'
-              : '9이닝 동점 제외 승률'}</Typography>
+              ? game.league === 'MLB' ? '이길 확률 · 연장 승부치기까지 포함' : '이길 확률 · 무승부 제외'
+              : '이길 확률 · 무승부 제외'}</Typography>
             <Box textAlign="right"><span className={`probability${homeFavored ? ' accent' : ''}`}>{pct(p.home_win_probability)}</span><small>{game.home.name}{homeFavored ? ' · 우세' : ''}</small></Box>
           </Stack>
           <Box className="probability-track"><i style={{ width: pct(p.away_win_probability) }} /><b style={{ width: pct(p.home_win_probability) }} /></Box>
         </Box>
 
         <Box className="score-row">
-          <Box className="primary"><span>시뮬레이션 평균 스코어</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>{weightedScore ? `최빈 5개 가중 ${stat(weightedScore.away, 1)} : ${stat(weightedScore.home, 1)} (표본 ${pct(weightedScore.coverage_probability)})` : `평균 총점 ${stat(statisticalExpectedTotal, 1)}점`}</small></Box>
+          <Box className="primary"><span>예상 점수 · 평균</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>{weightedScore ? `자주 나온 5개 점수 평균 ${stat(weightedScore.away, 1)} : ${stat(weightedScore.home, 1)} (전체의 ${pct(weightedScore.coverage_probability)})` : `평균 총점 ${stat(statisticalExpectedTotal, 1)}점`}</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>{p.model.simulations.toLocaleString()}회 최빈 스코어</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}{p.extra_innings ? '' : ' · 9이닝 구모델'}</small></Box>
+          <Box><span>가장 많이 나온 점수</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>{ranking ? '가장 많이 나온 결과 1위' : modeOutcome ? '가장 많이 나온 결과' : '승률이 높은 결과'}</span><strong>{ranking ? ranking.outcomes[0].label : modeOutcome ? outcomeLabel(modeOutcome.value, game) : favoriteLabel(p, game)}</strong><small>{ranking ? `${pct(ranking.outcomes[0].probability)}${ranking.outcomes[0].note ? ` · ${ranking.outcomes[0].note}` : ''}` : modeOutcome ? modeFrequency(modeOutcome) : pct(Math.max(p.home_win_probability, p.away_win_probability))}</small></Box>
+          <Box><span>{ranking ? '가장 유력한 결과' : modeOutcome ? '가장 많이 나온 결과' : '확률이 높은 결과'}</span><strong>{ranking ? ranking.outcomes[0].label : modeOutcome ? outcomeLabel(modeOutcome.value, game) : favoriteLabel(p, game)}</strong><small>{ranking ? `${pct(ranking.outcomes[0].probability)}${ranking.outcomes[0].note ? ` · ${ranking.outcomes[0].note}` : ''}` : modeOutcome ? modeFrequency(modeOutcome) : pct(Math.max(p.home_win_probability, p.away_win_probability))}</small></Box>
         </Box>
 
         {p.top_scores?.length ? <Box className="score-candidates">
-          <span>유력 최종 스코어 TOP 3</span>
+          <span>나올 만한 최종 점수 3가지</span>
           <Stack direction="row" flexWrap="wrap" gap={.8}>
             {p.top_scores.slice(0, 3).map((score, index) => <b key={`${score.away}-${score.home}`} className={index === 0 ? 'top' : ''}>
               <small className="rank">{index + 1}위</small>{score.away} : {score.home}<small>{score.probability == null ? '—' : pctFine(score.probability)}</small>
             </b>)}
-            {modeTotal ? <b className="mode-total">최빈 총점 {modeTotal.value}점<small>{pctFine(modeTotal.probability)}</small></b> : null}
+            {modeTotal ? <b className="mode-total">총점은 {modeTotal.value}점이 최다<small>{pctFine(modeTotal.probability)}</small></b> : null}
           </Stack>
         </Box> : null}
 
         {p.team_dense_intervals && p.total_dense_interval && p.game_shape ? <Box className="forecast-range">
           <Stack direction="row" justifyContent="space-between" alignItems="baseline">
-            <span>확률 집중 득점 구간</span>
-            <small className="range-caption">분포가 가장 몰린 최단 범위 · 세로선은 평균</small>
+            <span>팀별 예상 득점대</span>
+            <small className="range-caption">가장 자주 나온 점수대 · 세로선은 평균</small>
           </Stack>
           <ScoreRangeBar name={game.away.name} interval={p.team_dense_intervals.away} mean={meanScore?.away}
             scale={rangeScale(p.team_dense_intervals, meanScore)} />
           <ScoreRangeBar name={game.home.name} interval={p.team_dense_intervals.home} mean={meanScore?.home}
             scale={rangeScale(p.team_dense_intervals, meanScore)} />
-          <small>총점 집중 {p.total_dense_interval.low}–{p.total_dense_interval.high}점 ({pct(p.total_dense_interval.mass)}) · 최종 1점차 이내 {pct(p.game_shape.one_run_probability)} · 5점차 이상 {pct(p.game_shape.blowout_probability)}{p.extra_innings ? ` · 연장 진입 ${pct(p.extra_innings.probability)}` : ''}{p.extra_innings && game.league !== 'MLB' && p.tie_probability > 0 ? ` · 11회 무승부 ${pctFine(p.tie_probability)}` : ''}</small>
+          <small>총점 {p.total_dense_interval.low}–{p.total_dense_interval.high}점 ({pct(p.total_dense_interval.mass)}) · 1점차 이내 접전 {pct(p.game_shape.one_run_probability)} · 5점차 이상 대승 {pct(p.game_shape.blowout_probability)}{p.extra_innings ? ` · 연장 갈 확률 ${pct(p.extra_innings.probability)}` : ''}{p.extra_innings && game.league !== 'MLB' && p.tie_probability > 0 ? ` · 무승부 ${pctFine(p.tie_probability)}` : ''}</small>
         </Box> : p.team_quantiles && p.total_quantiles && p.game_shape ? <Box className="forecast-range">
-          <span>시뮬레이션 중앙 80% 득점 구간</span>
+          <span>팀별 예상 득점대 · 중간 80%</span>
           <b>{game.away.name} {stat(p.team_quantiles.away.p10, 0)}–{stat(p.team_quantiles.away.p90, 0)}점 · {game.home.name} {stat(p.team_quantiles.home.p10, 0)}–{stat(p.team_quantiles.home.p90, 0)}점</b>
-          <small>총점 중앙 80% {stat(p.total_quantiles.p10, 0)}–{stat(p.total_quantiles.p90, 0)}점 · 최종 1점차 이내 {pct(p.game_shape.one_run_probability)} · 5점차 이상 {pct(p.game_shape.blowout_probability)}</small>
+          <small>총점 {stat(p.total_quantiles.p10, 0)}–{stat(p.total_quantiles.p90, 0)}점 · 1점차 이내 접전 {pct(p.game_shape.one_run_probability)} · 5점차 이상 대승 {pct(p.game_shape.blowout_probability)}</small>
         </Box> : null}
 
         {predictedScore?.inning_line?.length ? <InningLine
@@ -143,10 +143,10 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
 
         {ranking && <Box className="outcome-ranking">
           <Stack direction="row" justifyContent="space-between" alignItems="center" className="ranking-heading">
-            <b>많이 나온 결과 순위</b>
+            <b>유력한 결과 순위</b>
             <Chip icon={<VerifiedRounded />} label={completenessLabel(p.confidence_label)} size="small" className={`confidence ${p.confidence_label.toLowerCase()}`} />
           </Stack>
-          <small className="ranking-note">승패 · 핸디캡 ±1.5 · 총점 {ranking.line != null ? `${ranking.line} (${ranking.lineSource} 기준점)` : '기준점 미수집'} · {p.model.simulations.toLocaleString()}회 시뮬레이션 빈도순</small>
+          <small className="ranking-note">{p.model.simulations.toLocaleString()}번 돌려본 결과를 확률 높은 순으로 · 승패 / 핸디캡 ±1.5 / 총점 {ranking.line != null ? `${ranking.line} 기준 (${ranking.lineSource})` : '기준점 없음'}</small>
           {ranking.outcomes.map((outcome, index) => <Box key={outcome.label} className={`outcome-row${index === 0 ? ' top' : ''}`}>
             <i>{index + 1}</i>
             <Box className="outcome-label"><span>{outcome.label}</span>{outcome.note && <small>{outcome.note}</small>}</Box>
@@ -162,26 +162,26 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
               <Starter team={game.away} /><Starter team={game.home} />
             </Box>
             {game.market && <>
-              <Typography variant="subtitle2">시장 기준점 비교</Typography>
+              <Typography variant="subtitle2">시장 기준점과 비교</Typography>
               <Box className="market-comparison">
-                <Box><span>컨센서스 기준 총점</span><strong>{game.market.total_line ?? '—'}</strong><small>{game.market.bookmaker_count}개 북메이커 중앙값</small></Box>
-                <Box><span>시장 런라인 (마핸)</span><strong>{game.market.home_spread == null ? '—'
+                <Box><span>시장 총점 기준</span><strong>{game.market.total_line ?? '—'}</strong><small>북메이커 {game.market.bookmaker_count}곳의 중간값</small></Box>
+                <Box><span>시장 핸디캡 (마핸)</span><strong>{game.market.home_spread == null ? '—'
                   : game.market.home_spread < 0 ? `${game.home.name} ${game.market.home_spread}`
                   : game.market.home_spread > 0 ? `${game.away.name} ${-game.market.home_spread}`
-                  : '스프레드 0'}</strong><small>{game.market.home_spread == null ? '수집 전'
-                  : game.market.home_spread === 0 ? '시장 균형 평가'
+                  : '핸디 없음'}</strong><small>{game.market.home_spread == null ? '아직 수집 전'
+                  : game.market.home_spread === 0 ? '시장도 대등하게 평가'
                   : (game.market.home_spread < 0) === (p.home_win_probability >= p.away_win_probability)
-                    ? '모델 우세팀과 일치' : '모델 우세팀과 불일치'}</small></Box>
-                <Box><span>홈 승률 비교</span><strong>{pct(p.home_win_probability)} <i>/</i> {game.market.home_implied_probability == null ? '—' : pct(game.market.home_implied_probability)}</strong><small>모델 / 마진 제거 시장 확률</small></Box>
-                <Box><span>분포 평균 총점 차이</span><strong>{game.market.model_total_difference == null ? '—' : `${game.market.model_total_difference > 0 ? '+' : ''}${game.market.model_total_difference}`}</strong><small>시뮬레이션 평균 - 시장 기준점</small></Box>
+                    ? '우리 모델과 같은 팀' : '우리 모델과 다른 팀'}</small></Box>
+                <Box><span>홈 승률</span><strong>{pct(p.home_win_probability)} <i>/</i> {game.market.home_implied_probability == null ? '—' : pct(game.market.home_implied_probability)}</strong><small>우리 모델 / 시장 (수수료 제외)</small></Box>
+                <Box><span>총점 시각차</span><strong>{game.market.model_total_difference == null ? '—' : `${game.market.model_total_difference > 0 ? '+' : ''}${game.market.model_total_difference}`}</strong><small>우리 평균 총점이 시장 기준보다 {game.market.model_total_difference == null ? '—' : game.market.model_total_difference > 0 ? '높음' : game.market.model_total_difference < 0 ? '낮음' : '같음'}</small></Box>
               </Box>
-              <Typography className="source-note">{game.market.provider} · {new Date(game.market.collected_at).toLocaleString('ko-KR')} · 시장 정보는 비교용이며 추천이 아닙니다.</Typography>
+              <Typography className="source-note">{game.market.provider} · {new Date(game.market.collected_at).toLocaleString('ko-KR')} · 시장 정보는 비교용으로만 보여드리며 베팅 추천이 아닙니다.</Typography>
             </>}
             <Typography variant="subtitle2">주요 근거</Typography>
             <ul>{p.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
             <Box className="personal-claude-panel">
               <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1}>
-                <Box><Typography variant="subtitle2">내 Claude 보조 분석</Typography><small>공용 예측은 바꾸지 않고 내 화면에만 표시됩니다.</small></Box>
+                <Box><Typography variant="subtitle2">내 Claude 보조 분석</Typography><small>위 예측은 그대로 두고 내 화면에만 따로 보여드립니다.</small></Box>
                 <Button variant="outlined" size="small" startIcon={personalBusy ? <CircularProgress size={14} /> : <AutoAwesomeRounded />}
                   onClick={() => void requestPersonalAnalysis()} disabled={personalBusy}>
                   {signedIn ? personalAnalysis ? '다시 분석' : '개인 분석 실행' : '로그인 후 사용'}
@@ -190,18 +190,18 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
               {personalError && <Alert severity="error" sx={{ mt: 1.5 }}>{personalError}</Alert>}
               {personalAnalysis && <Box className="personal-claude-result">
                 <Box><span>{game.away.name}</span><strong>{pct(personalAnalysis.personalized.away_win_probability)}</strong><small>{stat(personalAnalysis.personalized.away_expected_runs, 1)}점</small></Box>
-                <Box><span>개인 보정 예상</span><strong>{stat(personalAnalysis.personalized.away_expected_runs, 1)} : {stat(personalAnalysis.personalized.home_expected_runs, 1)}</strong><small>가중치 {stat(personalAnalysis.blend_weight * 100, 1)}%</small></Box>
+                <Box><span>내 분석 반영 점수</span><strong>{stat(personalAnalysis.personalized.away_expected_runs, 1)} : {stat(personalAnalysis.personalized.home_expected_runs, 1)}</strong><small>반영 비율 {stat(personalAnalysis.blend_weight * 100, 1)}%</small></Box>
                 <Box><span>{game.home.name}</span><strong>{pct(personalAnalysis.personalized.home_win_probability)}</strong><small>{stat(personalAnalysis.personalized.home_expected_runs, 1)}점</small></Box>
                 <ul>{personalAnalysis.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>
                 {personalAnalysis.caution && <p>{personalAnalysis.caution}</p>}
                 <small>{personalAnalysis.model} · {personalAnalysis.disclaimer}</small>
               </Box>}
             </Box>
-            <Typography className="source-note">화면의 평균 스코어는 시뮬레이션 분포의 평균, 최빈 스코어·총점·승패 결과는 같은 분포의 각 최빈값이며 최빈 5개 가중 스코어는 그 중간 추정치입니다. 분포 평균 총점 {stat(statisticalExpectedTotal, 2)}점 · 확률과 구간도 같은 시뮬레이션에서 계산합니다. {p.extra_innings
+            <Typography className="source-note">이 경기를 {p.model.simulations.toLocaleString()}번 가상으로 치러본 결과입니다. 평균 점수는 그 {p.model.simulations.toLocaleString()}번의 평균이고, 가장 많이 나온 점수는 실제로 제일 자주 나온 최종 점수입니다. 승률·득점대·총점도 모두 같은 계산에서 나옵니다. 평균 총점은 {stat(statisticalExpectedTotal, 2)}점입니다. {p.extra_innings
               ? game.league === 'MLB'
-                ? '연장은 MLB 승부치기 룰(무사 2루 자동 주자)로 승패가 날 때까지 시뮬레이션하므로 무승부가 없습니다.'
-                : '연장은 KBO 룰대로 11회까지만 승부치기 없이 시뮬레이션하며 11회 후 동점은 무승부로 남기고 양자 승률에서 제외합니다.'
-              : '9이닝 동점 표본은 양자 승률 계산에서 제외합니다.'}</Typography>
+                ? '연장은 실제 MLB 규정대로 승부치기(무사 2루 주자)를 적용해 승부가 날 때까지 치르기 때문에 무승부가 없습니다.'
+                : '연장은 실제 KBO 규정대로 승부치기 없이 11회까지만 치르고, 그래도 동점이면 무승부로 두고 승률 계산에서 뺍니다.'
+              : '동점으로 끝난 경우는 승률 계산에서 뺍니다.'}</Typography>
             <Typography variant="subtitle2">최근 10경기</Typography>
             <Box className="comparison"><Compare team={game.away} /><Compare team={game.home} /></Box>
             <Typography variant="subtitle2">{lineupTitle(game)}</Typography>
@@ -210,7 +210,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
               <Lineup team={game.home.name} entries={game.lineups.home} />
             </Box>
             {game.prediction_timeline.length > 0 && <>
-              <Typography variant="subtitle2">예측 변화 타임라인</Typography>
+              <Typography variant="subtitle2">예측이 바뀌어 온 과정</Typography>
               <Box className="history-list timeline">
                 {game.prediction_timeline.slice(-6).reverse().map((item) => <Box key={`${item.captured_at}-${item.stage}`}>
                   <span><i>{stageLabel(item.stage)}</i>{new Date(item.captured_at).toLocaleString('ko-KR')}</span>
@@ -218,13 +218,13 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
                 </Box>)}
               </Box>
             </>}
-            <Typography variant="subtitle2">가장 자주 나온 정수 스코어</Typography>
+            <Typography variant="subtitle2">자주 나온 최종 점수</Typography>
             <Stack direction="row" flexWrap="wrap" gap={1} className="score-chips">
-              {p.top_scores.slice(0, 5).map((score) => <Chip key={`${score.away}-${score.home}`} label={`${game.away.name} ${score.away} : ${score.home} ${game.home.name} · ${score.count == null ? '' : `${score.count.toLocaleString()}회 · `}${score.probability == null ? '—' : pct(score.probability)}`} />)}
+              {p.top_scores.slice(0, 5).map((score) => <Chip key={`${score.away}-${score.home}`} label={`${game.away.name} ${score.away} : ${score.home} ${game.home.name} · ${score.count == null ? '' : `${score.count.toLocaleString()}번 · `}${score.probability == null ? '—' : pct(score.probability)}`} />)}
             </Stack>
             <Divider sx={{ my: 2 }} />
-            <Typography className="source-note">모델 {p.model.name} · {p.model.simulations.toLocaleString()}회 시뮬레이션 · {new Date(p.created_at).toLocaleString('ko-KR')}</Typography>
-            <Typography className="source-note">최근 데이터 갱신 {new Date(game.freshness.last_updated_at).toLocaleString('ko-KR')} · {p.disclaimer}</Typography>
+            <Typography className="source-note">{p.model.name} 모델 · {p.model.simulations.toLocaleString()}번 계산 · 예측 생성 {new Date(p.created_at).toLocaleString('ko-KR')}</Typography>
+            <Typography className="source-note">데이터 마지막 갱신 {new Date(game.freshness.last_updated_at).toLocaleString('ko-KR')} · {p.disclaimer}</Typography>
           </Box>
         </Collapse>
       </> : <Box className="no-prediction">{predictionUnavailableMessage(game, Boolean(p))}</Box>}
@@ -263,8 +263,8 @@ function InningLine({ away, home, score }: {
   const innings = score.inning_line ?? []
   return <Box className="inning-forecast">
     <Stack direction="row" justifyContent="space-between" alignItems="baseline" className="inning-heading">
-      <b>최빈 스코어의 이닝 흐름</b>
-      <small>{score.count == null ? '가장 많이 나온 최종 스코어 기준' : `${score.count.toLocaleString()}회 나온 최빈 스코어 중 이 흐름 ${score.trajectory_count?.toLocaleString() ?? '최다'}회`}</small>
+      <b>이렇게 흘러갈 가능성이 큽니다</b>
+      <small>{score.count == null ? '가장 많이 나온 최종 점수 기준' : `이 점수로 끝난 ${score.count.toLocaleString()}번 중 이 이닝 흐름이 ${score.trajectory_count?.toLocaleString() ?? '가장 많이'}번`}</small>
     </Stack>
     <Box className="inning-scroll">
       <table>
@@ -290,25 +290,25 @@ function TeamName({ team, side }: { team: Team; side: string }) {
 
 function Starter({ team }: { team: Team }) {
   const p = team.starter
-  return <Box><small>{team.name}</small><strong>{p?.name ?? '미정'}</strong><span>ERA {stat(p?.era)} · FIP {stat(p?.fip)} · WHIP {stat(p?.whip)}</span><span>{p?.opponent_innings ? `상대 ${stat(p.opponent_innings, 1)}이닝 · ERA ${stat(p.opponent_era)} · WHIP ${stat(p.opponent_whip)}` : '현재 상대팀 상대 기록 없음'}</span><span>{p?.rest_days != null ? `${p.rest_days}일 휴식` : '휴식 정보 수집 전'}{p?.recent_pitches != null ? ` · 최근 5일 ${p.recent_pitches}구` : ''}</span></Box>
+  return <Box><small>{team.name}</small><strong>{p?.name ?? '미정'}</strong><span>ERA {stat(p?.era)} · FIP {stat(p?.fip)} · WHIP {stat(p?.whip)}</span><span>{p?.opponent_innings ? `오늘 상대팀 상대로 ${stat(p.opponent_innings, 1)}이닝 · ERA ${stat(p.opponent_era)} · WHIP ${stat(p.opponent_whip)}` : '오늘 상대팀과 맞붙은 기록 없음'}</span><span>{p?.rest_days != null ? `${p.rest_days}일 쉬고 등판` : '휴식일 정보 없음'}{p?.recent_pitches != null ? ` · 최근 5일 ${p.recent_pitches}구` : ''}</span></Box>
 }
 
 function Compare({ team }: { team: Team }) {
   const recent = team.stats?.recent?.['10']
   const value = recent ? recent.win_rate * 100 : 0
-  return <Box><Stack direction="row" justifyContent="space-between"><b>{team.name}</b><span>{recent ? `${recent.wins}승 · ${stat(recent.avg_runs, 1)} 득점` : '—'}</span></Stack><LinearProgress variant="determinate" value={value} /></Box>
+  return <Box><Stack direction="row" justifyContent="space-between"><b>{team.name}</b><span>{recent ? `${recent.wins}승 · 경기당 ${stat(recent.avg_runs, 1)}득점` : '—'}</span></Stack><LinearProgress variant="determinate" value={value} /></Box>
 }
 
 function lineupTitle(game: Game) {
   const entries = [...game.lineups.away, ...game.lineups.home]
   if (!entries.length) return '라인업 발표 전'
-  return entries.every((item) => item.confirmed) ? '확정 라인업' : '예상 라인업 · 발표 후 자동 갱신'
+  return entries.every((item) => item.confirmed) ? '발표된 라인업' : '예상 라인업 · 발표되면 자동으로 바뀝니다'
 }
 
 function Lineup({ team, entries }: { team: string; entries: Game['lineups']['away'] }) {
   return <Box>
     <b>{team}</b>
-    {entries.length ? <ol>{entries.map((entry) => <li key={`${entry.order}-${entry.name}`}><span>{entry.name}</span><small>{entry.matchup_plate_appearances ? `${entry.position ?? '—'} · 상대 OPS ${stat(entry.matchup_ops, 3)} (${entry.matchup_plate_appearances}PA)` : entry.position ?? '—'}</small></li>)}</ol> : <p>발표 전</p>}
+    {entries.length ? <ol>{entries.map((entry) => <li key={`${entry.order}-${entry.name}`}><span>{entry.name}</span><small>{entry.matchup_plate_appearances ? `${entry.position ?? '—'} · 오늘 선발 상대 OPS ${stat(entry.matchup_ops, 3)} (${entry.matchup_plate_appearances}타석)` : entry.position ?? '—'}</small></li>)}</ol> : <p>발표 전</p>}
   </Box>
 }
 
@@ -321,15 +321,15 @@ function completenessLabel(label: NonNullable<Game['prediction']>['confidence_la
 }
 
 function predictionUnavailableMessage(game: Game, hasPrediction: boolean) {
-  if (game.status === 'CANCELLED') return '취소된 경기로 예측 지표를 표시하지 않습니다.'
-  if (hasPrediction && game.result) return '이전 형식의 저장 예측은 위 핵심 비교만 표시합니다. 상세 지표는 현재 예측 형식에서 제공합니다.'
-  if (hasPrediction) return '이전 예측 형식은 정합성 검증 후 다시 표시됩니다. 다음 데이터 갱신을 기다려 주세요.'
+  if (game.status === 'CANCELLED') return '취소된 경기라 예측을 표시하지 않습니다.'
+  if (hasPrediction && game.result) return '예전 방식으로 저장된 예측이라 위 비교만 보여드립니다. 자세한 지표는 최신 예측부터 제공됩니다.'
+  if (hasPrediction) return '예전 방식으로 저장된 예측이라 확인 후 다시 표시됩니다. 다음 갱신을 기다려 주세요.'
   if (game.status === 'SCHEDULED') {
     return game.away.stats && game.home.stats
-      ? '경기와 팀 기록은 수집됐지만 예측 생성이 아직 완료되지 않았습니다. 다음 자동 갱신 후 표시됩니다.'
-      : '예측에 필요한 시즌 팀 기록이 아직 수집되지 않았습니다. 다음 자동 갱신 후 표시됩니다.'
+      ? '경기 일정과 팀 기록은 모았지만 예측 계산이 아직 끝나지 않았습니다. 다음 갱신 때 표시됩니다.'
+      : '예측에 필요한 시즌 팀 기록을 아직 모으는 중입니다. 다음 갱신 때 표시됩니다.'
   }
-  return '경기 시작 전에 저장된 예측이 없습니다.'
+  return '경기 시작 전에 저장해 둔 예측이 없습니다.'
 }
 
 function completedGameComparison(game: Game, expectedScore: { away: number; home: number } | undefined) {
@@ -348,8 +348,8 @@ function completedGameComparison(game: Game, expectedScore: { away: number; home
     awayExpected: expectedScore.away,
     homeExpected: expectedScore.home,
     createdAt: prediction.created_at,
-    favorite: `${favoriteTeam} 우세 ${pct(favoriteProbability)}`,
-    verdict: winnerCorrect == null ? '무승부 · 승패 비교 제외' : winnerCorrect ? '우세팀 적중' : '우세팀 미적중',
+    favorite: `${favoriteTeam} 우세로 봤음 ${pct(favoriteProbability)}`,
+    verdict: winnerCorrect == null ? '무승부 · 비교 제외' : winnerCorrect ? '승패 맞힘' : '승패 틀림',
     verdictClass: winnerCorrect == null ? 'neutral' : winnerCorrect ? 'correct' : 'incorrect',
     runsMae: (Math.abs(expectedScore.away - result.away_score) + Math.abs(expectedScore.home - result.home_score)) / 2,
   }
@@ -382,9 +382,9 @@ function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
     const pickFavorite = favoriteMinus >= underdogPlus
     rows.push({
       market: '핸디캡 ±1.5',
-      pick: pickFavorite ? `${favorite} -1.5` : `${underdog} +1.5`,
+      pick: pickFavorite ? `마핸 ${favorite} -1.5` : `플핸 ${underdog} +1.5`,
       probability: Math.max(favoriteMinus, underdogPlus),
-      actual: favoriteCovered ? `${favorite} -1.5 성공` : `${underdog} +1.5 성공`,
+      actual: favoriteCovered ? `${favorite} 2점차 이상 승` : `${underdog} 승 또는 1점차 패`,
       hit: pickFavorite === favoriteCovered,
     })
   }
@@ -392,10 +392,10 @@ function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
   if (ranking.line != null && totals) {
     const pickOver = totals.over >= totals.under
     rows.push({
-      market: `총점 ${ranking.line} (${ranking.lineSource})`,
+      market: `총점 ${ranking.line} 기준`,
       pick: pickOver ? `오버 ${ranking.line}` : `언더 ${ranking.line}`,
       probability: Math.max(totals.over, totals.under),
-      actual: total === ranking.line ? `동일 ${total}점` : `${total > ranking.line ? '오버' : '언더'} (${total}점)`,
+      actual: total === ranking.line ? `기준점과 같은 ${total}점` : `${total > ranking.line ? '오버' : '언더'} (${total}점)`,
       hit: total === ranking.line ? null : (total > ranking.line) === pickOver,
     })
   }
@@ -422,12 +422,12 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game): {
   const marketNote = marketFavorite == null ? ''
     : marketFavorite === favorite ? ' · 시장 마핸 일치' : ` · 시장 마핸은 ${marketFavorite}`
   if (typeof favoriteMinus === 'number') outcomes.push({
-    label: `핸디 승 · ${favorite} -1.5`, probability: favoriteMinus,
-    note: `${favorite} 2점차 이상 승리${marketNote}`,
+    label: `마핸 · ${favorite} -1.5`, probability: favoriteMinus,
+    note: `${favorite}가 2점차 이상으로 이김${marketNote}`,
   })
   if (typeof underdogPlus === 'number') outcomes.push({
-    label: `핸디 패 · ${underdog} +1.5`, probability: underdogPlus,
-    note: `${favorite} 1점차 승부 또는 ${underdog} 승리${marketNote}`,
+    label: `플핸 · ${underdog} +1.5`, probability: underdogPlus,
+    note: `${underdog}가 이기거나 1점차로 짐${marketNote}`,
   })
   const marketLine = game.market?.total_line
   let line: number | null = marketLine != null && p.totals[String(marketLine)] ? marketLine : null
@@ -439,27 +439,27 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game): {
   }
   const totals = line != null ? p.totals[String(line)] : undefined
   if (line != null && totals) {
-    const pushNote = totals.push ? ` · 동일 ${pct(totals.push)}` : ''
-    outcomes.push({ label: `오버 ${line}`, probability: totals.over, note: `총점 ${line} 초과${pushNote}` })
-    outcomes.push({ label: `언더 ${line}`, probability: totals.under, note: `총점 ${line} 미만${pushNote}` })
+    const pushNote = totals.push ? ` · 정확히 ${line}점일 확률 ${pct(totals.push)}` : ''
+    outcomes.push({ label: `오버 ${line}`, probability: totals.over, note: `두 팀 합계가 ${line}점보다 많음${pushNote}` })
+    outcomes.push({ label: `언더 ${line}`, probability: totals.under, note: `두 팀 합계가 ${line}점보다 적음${pushNote}` })
   }
   if (game.league !== 'MLB' && p.tie_probability > 0) {
-    outcomes.push({ label: '무승부', probability: p.tie_probability, note: '연장 11회 후 동점' })
+    outcomes.push({ label: '무승부', probability: p.tie_probability, note: '연장 11회까지 가도 동점' })
   }
   outcomes.sort((a, b) => b.probability - a.probability)
   return { outcomes, line, lineSource }
 }
 
 function modeFrequency(mode: { count?: number; probability?: number | null } | null | undefined) {
-  if (!mode) return '빈도 정보 없음'
-  if (mode.count == null) return mode.probability == null ? '빈도 정보 없음' : pct(mode.probability)
-  return `${mode.count.toLocaleString()}회${mode.probability == null ? '' : ` · ${pct(mode.probability)}`}`
+  if (!mode) return '횟수 정보 없음'
+  if (mode.count == null) return mode.probability == null ? '횟수 정보 없음' : pct(mode.probability)
+  return `${mode.count.toLocaleString()}번 나옴${mode.probability == null ? '' : ` · ${pct(mode.probability)}`}`
 }
 
 function outcomeLabel(outcome: 'HOME_WIN' | 'AWAY_WIN' | 'TIE', game: Game) {
   if (outcome === 'HOME_WIN') return `${game.home.name} 승`
   if (outcome === 'AWAY_WIN') return `${game.away.name} 승`
-  return game.league === 'MLB' ? '동점' : '무승부 (연장 11회)'
+  return game.league === 'MLB' ? '동점' : '무승부'
 }
 
 function favoriteLabel(prediction: NonNullable<Game['prediction']>, game: Game) {
