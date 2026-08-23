@@ -257,7 +257,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
                 ? `타자 한 명 한 명이 타석에 들어서는 방식으로 계산했습니다. 타자별 주자 상황 기록(득점권 포함)을 반영했고, 라인업 9명 중 ${p.split_coverage ? `${game.away.name} ${p.split_coverage.away}명 · ${game.home.name} ${p.split_coverage.home}명` : '일부'}은 본인 기록을 그대로 썼습니다.`
                 : '이번 예측은 이닝 단위로 계산했습니다. 라인업이 발표되고 타자별 기록이 모이면 타석 단위 계산으로 자동 전환됩니다.'}</Typography>
             </>}
-            {p.pregame_context && <>
+            {p.pregame_context && Object.keys(p.pregame_context).length > 0 && <>
               <Typography variant="subtitle2">당일 경기 컨텍스트</Typography>
               <Box className="market-comparison">
                 <ContextWeather prediction={p} />
