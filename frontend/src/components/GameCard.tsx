@@ -102,7 +102,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>
 
         <Box className="score-row">
-          <Box><span>시뮬레이션 평균 스코어</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>{weightedScore ? `최빈 5개 가중 ${stat(weightedScore.away, 1)} : ${stat(weightedScore.home, 1)} (표본 ${pct(weightedScore.coverage_probability)})` : `평균 총점 ${stat(statisticalExpectedTotal, 1)}점`}</small></Box>
+          <Box className="primary"><span>시뮬레이션 평균 스코어</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>{weightedScore ? `최빈 5개 가중 ${stat(weightedScore.away, 1)} : ${stat(weightedScore.home, 1)} (표본 ${pct(weightedScore.coverage_probability)})` : `평균 총점 ${stat(statisticalExpectedTotal, 1)}점`}</small></Box>
           <Divider orientation="vertical" flexItem />
           <Box><span>{p.model.simulations.toLocaleString()}회 최빈 스코어</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}</small></Box>
           <Divider orientation="vertical" flexItem />
@@ -112,16 +112,22 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         {p.top_scores?.length ? <Box className="score-candidates">
           <span>유력 최종 스코어 TOP 3</span>
           <Stack direction="row" flexWrap="wrap" gap={.8}>
-            {p.top_scores.slice(0, 3).map((score) => <b key={`${score.away}-${score.home}`}>
-              {score.away} : {score.home}<small>{score.probability == null ? '—' : pctFine(score.probability)}</small>
+            {p.top_scores.slice(0, 3).map((score, index) => <b key={`${score.away}-${score.home}`} className={index === 0 ? 'top' : ''}>
+              <small className="rank">{index + 1}위</small>{score.away} : {score.home}<small>{score.probability == null ? '—' : pctFine(score.probability)}</small>
             </b>)}
             {modeTotal ? <b className="mode-total">최빈 총점 {modeTotal.value}점<small>{pctFine(modeTotal.probability)}</small></b> : null}
           </Stack>
         </Box> : null}
 
         {p.team_dense_intervals && p.total_dense_interval && p.game_shape ? <Box className="forecast-range">
-          <span>확률 집중 득점 구간 · 분포가 가장 몰린 최단 범위</span>
-          <b>{game.away.name} {p.team_dense_intervals.away.low}–{p.team_dense_intervals.away.high}점 ({pct(p.team_dense_intervals.away.mass)}) · {game.home.name} {p.team_dense_intervals.home.low}–{p.team_dense_intervals.home.high}점 ({pct(p.team_dense_intervals.home.mass)})</b>
+          <Stack direction="row" justifyContent="space-between" alignItems="baseline">
+            <span>확률 집중 득점 구간</span>
+            <small className="range-caption">분포가 가장 몰린 최단 범위 · 세로선은 평균</small>
+          </Stack>
+          <ScoreRangeBar name={game.away.name} interval={p.team_dense_intervals.away} mean={meanScore?.away}
+            scale={rangeScale(p.team_dense_intervals, meanScore)} />
+          <ScoreRangeBar name={game.home.name} interval={p.team_dense_intervals.home} mean={meanScore?.home}
+            scale={rangeScale(p.team_dense_intervals, meanScore)} />
           <small>총점 집중 {p.total_dense_interval.low}–{p.total_dense_interval.high}점 ({pct(p.total_dense_interval.mass)}) · 최종 1점차 이내 {pct(p.game_shape.one_run_probability)} · 5점차 이상 {pct(p.game_shape.blowout_probability)}{p.extra_innings ? ` · 연장 진입 ${pct(p.extra_innings.probability)}` : ''}{p.extra_innings && game.league !== 'MLB' && p.tie_probability > 0 ? ` · 11회 무승부 ${pctFine(p.tie_probability)}` : ''}</small>
         </Box> : p.team_quantiles && p.total_quantiles && p.game_shape ? <Box className="forecast-range">
           <span>시뮬레이션 중앙 80% 득점 구간</span>
@@ -159,6 +165,13 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
               <Typography variant="subtitle2">시장 기준점 비교</Typography>
               <Box className="market-comparison">
                 <Box><span>컨센서스 기준 총점</span><strong>{game.market.total_line ?? '—'}</strong><small>{game.market.bookmaker_count}개 북메이커 중앙값</small></Box>
+                <Box><span>시장 런라인 (마핸)</span><strong>{game.market.home_spread == null ? '—'
+                  : game.market.home_spread < 0 ? `${game.home.name} ${game.market.home_spread}`
+                  : game.market.home_spread > 0 ? `${game.away.name} ${-game.market.home_spread}`
+                  : '스프레드 0'}</strong><small>{game.market.home_spread == null ? '수집 전'
+                  : game.market.home_spread === 0 ? '시장 균형 평가'
+                  : (game.market.home_spread < 0) === (p.home_win_probability >= p.away_win_probability)
+                    ? '모델 우세팀과 일치' : '모델 우세팀과 불일치'}</small></Box>
                 <Box><span>홈 승률 비교</span><strong>{pct(p.home_win_probability)} <i>/</i> {game.market.home_implied_probability == null ? '—' : pct(game.market.home_implied_probability)}</strong><small>모델 / 마진 제거 시장 확률</small></Box>
                 <Box><span>분포 평균 총점 차이</span><strong>{game.market.model_total_difference == null ? '—' : `${game.market.model_total_difference > 0 ? '+' : ''}${game.market.model_total_difference}`}</strong><small>시뮬레이션 평균 - 시장 기준점</small></Box>
               </Box>
@@ -217,6 +230,29 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
       </> : <Box className="no-prediction">{predictionUnavailableMessage(game, Boolean(p))}</Box>}
     </article>
   )
+}
+
+function rangeScale(intervals: NonNullable<NonNullable<Game['prediction']>['team_dense_intervals']>,
+                    mean: { away: number; home: number } | undefined) {
+  return Math.max(intervals.away.high, intervals.home.high, mean?.away ?? 0, mean?.home ?? 0) + 2
+}
+
+function ScoreRangeBar({ name, interval, mean, scale }: {
+  name: string
+  interval: { low: number; high: number; mass: number }
+  mean: number | undefined
+  scale: number
+}) {
+  const left = (interval.low / scale) * 100
+  const width = Math.max(3, ((interval.high - interval.low + 1) / scale) * 100)
+  return <Box className="range-bar">
+    <b>{name}</b>
+    <Box className="range-track">
+      <i style={{ left: `${left}%`, width: `${width}%` }} />
+      {typeof mean === 'number' && <em style={{ left: `${Math.min(99, (mean / scale) * 100)}%` }} />}
+    </Box>
+    <span>{interval.low}–{interval.high}점 <small>({pct(interval.mass)})</small></span>
+  </Box>
 }
 
 function InningLine({ away, home, score }: {
@@ -380,11 +416,18 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game): {
   ]
   const favoriteMinus = homeFavored ? p.handicap.home_minus_1_5 : p.handicap.away_minus_1_5
   const underdogPlus = homeFavored ? p.handicap.away_plus_1_5 : p.handicap.home_plus_1_5
+  const marketSpread = game.market?.home_spread
+  const marketFavorite = marketSpread == null || marketSpread === 0 ? null
+    : marketSpread < 0 ? game.home.name : game.away.name
+  const marketNote = marketFavorite == null ? ''
+    : marketFavorite === favorite ? ' · 시장 마핸 일치' : ` · 시장 마핸은 ${marketFavorite}`
   if (typeof favoriteMinus === 'number') outcomes.push({
-    label: `핸디 승 · ${favorite} -1.5`, probability: favoriteMinus, note: `${favorite} 2점차 이상 승리`,
+    label: `핸디 승 · ${favorite} -1.5`, probability: favoriteMinus,
+    note: `${favorite} 2점차 이상 승리${marketNote}`,
   })
   if (typeof underdogPlus === 'number') outcomes.push({
-    label: `핸디 패 · ${underdog} +1.5`, probability: underdogPlus, note: `${favorite} 1점차 승부 또는 ${underdog} 승리`,
+    label: `핸디 패 · ${underdog} +1.5`, probability: underdogPlus,
+    note: `${favorite} 1점차 승부 또는 ${underdog} 승리${marketNote}`,
   })
   const marketLine = game.market?.total_line
   let line: number | null = marketLine != null && p.totals[String(marketLine)] ? marketLine : null

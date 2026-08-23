@@ -648,14 +648,18 @@ def test_market_consensus_removes_two_way_margin_and_uses_median_lines():
             {"key": "a", "markets": [
                 {"key": "h2h", "outcomes": [{"name": "KIA Tigers", "price": 1.8}, {"name": "Kiwoom Heroes", "price": 2.1}]},
                 {"key": "totals", "outcomes": [{"name": "Over", "point": 8.5}, {"name": "Under", "point": 8.5}]},
+                {"key": "spreads", "outcomes": [{"name": "KIA Tigers", "point": -1.5}, {"name": "Kiwoom Heroes", "point": 1.5}]},
             ]},
             {"key": "b", "markets": [
                 {"key": "h2h", "outcomes": [{"name": "KIA Tigers", "price": 1.9}, {"name": "Kiwoom Heroes", "price": 2.0}]},
                 {"key": "totals", "outcomes": [{"name": "Over", "point": 9.5}, {"name": "Under", "point": 9.5}]},
+                {"key": "spreads", "outcomes": [{"name": "KIA Tigers", "point": -1.5}, {"name": "Kiwoom Heroes", "point": 1.5}]},
             ]},
         ],
     }
     row = _consensus_event(event)
     assert row["bookmaker_count"] == 2
     assert row["total_line"] == 9.0
+    # The home team's median run-line point: negative means the market's -1.5 favorite is home.
+    assert row["home_spread"] == -1.5
     assert abs(row["home_implied_probability"] + row["away_implied_probability"] - 1) < 1e-9
