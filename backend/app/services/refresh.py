@@ -16,6 +16,7 @@ from backend.app.config import KST, settings
 from backend.app.database import SessionLocal, database_now, init_db, session_scope
 from backend.app.models import CrawlLog, Game, GameResult, LineupEntry, PitcherStat, Team
 from backend.app.repositories.repository import (
+    fresh_batter_split_ids,
     latest_team_stat,
     load_batter_splits,
     replace_lineups,
@@ -406,6 +407,7 @@ def _team_key(name: str) -> str:
 # covered the inning-rate engine handles it, which is a degraded forecast rather than a failed one.
 SPLIT_FETCH_BUDGET = 40
 SPLIT_DEADLINE_SECONDS = 120
+BATTER_SPLIT_REFRESH_HOURS = 24
 
 
 def _split_budget() -> dict[str, Any]:
@@ -578,35 +580,38 @@ def _resolve_kbo_player_ids(client: KboClient, entries: list[dict[str, Any]], ga
 def _collect_batter_splits(client: KboClient | MlbClient, entries: list[dict[str, Any]],
                            season: int, league: str, errors: list[str],
                            budget: dict[str, Any] | None = None) -> None:
-    """Fetch base-state splits for lineup hitters we have not stored this season yet.
+    """Fetch missing or day-old base-state splits for lineup hitters.
 
-    One request per hitter, so only genuinely missing hitters are fetched and the result is
-    reused for every later game that hitter appears in.
+    One request per hitter is required. Fresh rows are reused throughout the day, while the
+    twice-hourly split cron and pregame refreshes replace records once they are 24 hours old.
     """
     player_ids = {str(entry["player_id"]) for entry in entries if entry.get("player_id")}
     if not player_ids:
         return
 
-    def stored_ids() -> set[str]:
+    def fresh_ids() -> set[str]:
         with session_scope() as session:
-            return set(load_batter_splits(session, league, season, sorted(player_ids)))
+            return fresh_batter_split_ids(
+                session, league, season, sorted(player_ids),
+                max_age=timedelta(hours=BATTER_SPLIT_REFRESH_HOURS),
+            )
 
-    stored = _optional(stored_ids, None, "batter splits", errors)
-    if stored is None:
+    fresh = _optional(fresh_ids, None, "batter splits", errors)
+    if fresh is None:
         return
-    missing = sorted(player_ids - stored)
-    if not missing:
+    due = sorted(player_ids - fresh)
+    if not due:
         return
     if budget is not None:
         if budget["remaining"] <= 0 or time.monotonic() > budget["deadline"]:
             return
-        missing = missing[:budget["remaining"]]
-        budget["remaining"] -= len(missing)
+        due = due[:budget["remaining"]]
+        budget["remaining"] -= len(due)
     source = _tracked(
         f"{league.lower()}_batter_splits",
         "/Record/Player/HitterDetail/Situation.aspx" if league == "KBO"
         else "/api/v1/people/{id}/stats?stats=statSplits",
-        lambda: client.batter_splits(missing, season), errors,
+        lambda: client.batter_splits(due, season), errors,
     )
     if not source or not source.data:
         return

@@ -200,6 +200,21 @@ def load_batter_splits(session: Session, league: str, season: int,
     return output
 
 
+def fresh_batter_split_ids(session: Session, league: str, season: int,
+                           player_ids: list[str], *, max_age: timedelta,
+                           now: datetime | None = None) -> set[str]:
+    """Return hitters whose stored base-state splits are still inside the refresh TTL."""
+    if not player_ids:
+        return set()
+    cutoff = database_datetime((now or database_now()) - max_age)
+    return set(session.scalars(select(BatterSplit.player_id).where(
+        BatterSplit.league == league,
+        BatterSplit.season == season,
+        BatterSplit.player_id.in_(player_ids),
+        BatterSplit.collected_at >= cutoff,
+    ).distinct()).all())
+
+
 def upsert_pitcher(session: Session, game: Game, raw: dict[str, Any], source_url: str, collected_at: datetime) -> PitcherStat:
     stat = session.scalar(select(PitcherStat).where(PitcherStat.game_id == game.id, PitcherStat.side == raw["side"]))
     values = {key: raw.get(key) for key in (

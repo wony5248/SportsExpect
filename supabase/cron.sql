@@ -98,8 +98,8 @@ select cron.schedule('dugout-kbo-tomorrow', '10 4 * * *',
 select cron.schedule('dugout-mlb-tomorrow', '20 15 * * *',
   $$select public.invoke_dugout_refresh('MLB', 'tomorrow')$$);
 
--- Batter base-state splits. One lineup's worth of hitters per run, so the queue drains over
--- several passes instead of pushing the full refresh past its function timeout.
+-- Batter base-state splits. Missing or 24-hour-old hitters are refreshed; one lineup's worth
+-- per run keeps each serverless invocation inside its timeout while the queue drains in passes.
 select cron.schedule('dugout-kbo-splits', '9,39 * * * *',
   $$select public.invoke_dugout_refresh('KBO', 'splits')$$);
 select cron.schedule('dugout-mlb-splits', '24,54 * * * *',
