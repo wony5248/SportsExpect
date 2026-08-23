@@ -255,6 +255,47 @@ class KboClient:
             })
         return SourcePayload(output, ", ".join(source_urls), raw.collected_at)
 
+    def hitter_directory(self, team_codes: list[str]) -> SourcePayload:
+        """Map hitter names to official player ids, one team at a time.
+
+        The lineup feed carries names only, but the hitter record pages link every player id.
+        A name that appears twice on one club is dropped rather than guessed at.
+        """
+        path = "/Record/Player/HitterBasic/Basic1.aspx"
+        team_control = "ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$ddlTeam$ddlTeam"
+        pager_prefix = "ctl00$ctl00$ctl00$cphContents$cphContents$cphContents$ucPager$btnNo"
+        directory: dict[str, dict[str, str]] = {}
+        urls: list[str] = []
+        for code in team_codes:
+            names: dict[str, str | None] = {}
+            try:
+                initial = self._get_html(path)
+                urls.append(initial.source_url)
+                page = self._webforms_post(initial.data, path, team_control, "", {team_control: code})
+                for page_number in (1, 2, 3):
+                    soup = BeautifulSoup(page, "html.parser")
+                    rows = soup.select("a[href*='playerId=']")
+                    if not rows:
+                        break
+                    for anchor in rows:
+                        name = anchor.get_text(strip=True)
+                        match = re.search(r"playerId=(\d+)", anchor.get("href", ""))
+                        if not name or not match:
+                            continue
+                        # Two hitters with the same name on one club cannot be told apart by
+                        # the lineup feed, so neither gets an id.
+                        names[name] = None if name in names and names[name] != match.group(1) else match.group(1)
+                    pager = soup.select_one(f"[id$='btnNo{page_number + 1}']")
+                    if pager is None:
+                        break
+                    page = self._webforms_post(page, path, f"{pager_prefix}{page_number + 1}", "",
+                                               {team_control: code})
+            except httpx.HTTPError:
+                continue
+            directory[code] = {name: player_id for name, player_id in names.items() if player_id}
+        return SourcePayload(directory, ", ".join(dict.fromkeys(urls)) or f"{self.base_url}{path}",
+                             datetime.now(KST))
+
     def batter_splits(self, player_ids: list[str], season: int) -> SourcePayload:
         """Read each hitter's 상황별 기록 base-state table.
 

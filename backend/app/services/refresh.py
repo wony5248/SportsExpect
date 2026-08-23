@@ -100,6 +100,7 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                 )
                 if lineup_source and lineup_source.data:
                     _enrich_batter_matchups(client, raw, lineup_source.data, errors, "KBO")
+                    _resolve_kbo_player_ids(client, lineup_source.data, raw, errors)
                     _collect_batter_splits(client, lineup_source.data, target_date.year, "KBO", errors, split_budget)
                     with session_scope() as session:
                         game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
@@ -443,6 +444,30 @@ def _optional(action: Callable[[], Any], default: Any, label: str, errors: list[
     except SQLAlchemyError as exc:
         errors.append(f"{label} 사용 불가(마이그레이션 대기 중일 수 있음): {type(exc).__name__}")
         return default
+
+
+def _resolve_kbo_player_ids(client: KboClient, entries: list[dict[str, Any]], game: dict[str, Any],
+                            errors: list[str]) -> None:
+    """Fill KBO lineup entries' player ids from the official hitter directory.
+
+    The KBO lineup feed carries names only. The record pages link every hitter's official id,
+    so names are resolved against the two clubs actually playing; an unresolved or ambiguous
+    name simply stays id-less and that hitter is not modelled individually.
+    """
+    if all(entry.get("player_id") for entry in entries):
+        return
+    team_codes = [str(game.get("away_code")), str(game.get("home_code"))]
+    source = _tracked(
+        f"kbo_hitter_directory_{game['external_id']}", "/Record/Player/HitterBasic/Basic1.aspx",
+        lambda: client.hitter_directory(team_codes), errors,
+    )
+    if not source or not source.data:
+        return
+    by_side = {"away": source.data.get(team_codes[0], {}), "home": source.data.get(team_codes[1], {})}
+    for entry in entries:
+        if not entry.get("player_id"):
+            entry["player_id"] = by_side.get(str(entry.get("side")), {}).get(
+                str(entry.get("player_name", "")).strip())
 
 
 def _collect_batter_splits(client: KboClient | MlbClient, entries: list[dict[str, Any]],

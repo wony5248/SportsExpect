@@ -51,6 +51,9 @@ class Settings:
     stale_after_minutes: int = int(os.getenv("STALE_AFTER_MINUTES", "360"))
     odds_api_key: str | None = os.getenv("ODDS_API_KEY")
     odds_api_regions: str = os.getenv("ODDS_API_REGIONS", "us")
+    # US books rarely post a KBO run line, so the KBO call defaults to eu (Pinnacle) plus us.
+    # Each extra region multiplies The Odds API credit cost of that call.
+    odds_api_regions_kbo: str = os.getenv("ODDS_API_REGIONS_KBO", "eu,us")
     # Used exclusively to encrypt user-owned provider keys at rest.
     secret_encryption_key: str | None = os.getenv("SECRET_ENCRYPTION_KEY")
     # Claude runtime safety limits are application policy, not deployment knobs.

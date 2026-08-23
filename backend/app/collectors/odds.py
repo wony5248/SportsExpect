@@ -25,10 +25,11 @@ class OddsClient:
         if not settings.odds_api_key:
             return SourcePayload([], "https://the-odds-api.com", datetime.now(KST))
         sport = "baseball_kbo" if league == "KBO" else "baseball_mlb"
+        regions = settings.odds_api_regions_kbo if league == "KBO" else settings.odds_api_regions
         # spreads (the run line) reveals which club the market makes the -1.5 favorite.
-        # Note: each extra market raises The Odds API credit cost per request.
+        # Note: each extra market or region raises The Odds API credit cost per request.
         response = self.client.get(f"/v4/sports/{sport}/odds", params={
-            "apiKey": settings.odds_api_key, "regions": settings.odds_api_regions,
+            "apiKey": settings.odds_api_key, "regions": regions,
             "markets": "h2h,spreads,totals", "oddsFormat": "decimal", "dateFormat": "iso",
         })
         if response.is_error:
