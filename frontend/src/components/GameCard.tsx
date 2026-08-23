@@ -241,7 +241,11 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             <b>유력한 결과 순위</b>
             <Chip icon={<VerifiedRounded />} label={completenessLabel(p.confidence_label)} size="small" className={`confidence ${p.confidence_label.toLowerCase()}`} />
           </Stack>
-          <small className="ranking-note">{p.model.simulations.toLocaleString()}번 돌려본 결과를 확률 높은 순으로 · 승패 / 핸디캡 ±1.5 / 총점 {ranking.line != null ? `${ranking.line} 기준 (${ranking.lineSource})` : '기준점 없음'}</small>
+          <small className="ranking-note">{p.model.simulations.toLocaleString()}번 돌려본 결과를 확률 높은 순으로 · 승패 / 핸디캡 ±1.5 / 총점 {ranking.line != null
+            ? ranking.lineSource === '시장'
+              ? `${ranking.line} 기준 (실제 배당 사이트 기준점)`
+              : `${ranking.line} 기준 (배당 기준점 없어 모델이 대신 계산)`
+            : '기준점 없음'}</small>
           {ranking.outcomes.map((outcome, index) => <Box key={outcome.label} className={`outcome-row${index === 0 ? ' top' : ''}`}>
             <i>{index + 1}</i>
             <Box className="outcome-label"><span>{outcome.label}</span>{outcome.note && <small>{outcome.note}</small>}</Box>
@@ -632,13 +636,17 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game, includeR
     note: `${handicap.plusTeam}가 이기거나 1점차로 짐${handicapNote}`,
     hit: margin == null ? undefined : (handicap.homeMinus ? margin : -margin) < 2, actual,
   })
+  // The total line is always the Odds API's real market number when we have collected one for
+  // this game; the simulation only ever answers "over or under THAT line". A model-derived line
+  // is a fallback for the rare game with no market data, never a substitute for a real one.
   const marketLine = game.market?.total_line
   let line: number | null = marketLine != null && p.totals[String(marketLine)] ? marketLine : null
   let lineSource: '시장' | '모델' = '시장'
   if (line == null) {
-    // Anchoring the line at the median plus a half run guaranteed "under" won every time: under
-    // is then exactly the probability of landing at or below the median. Pick the line the model
-    // itself considers even instead, so the split carries information rather than the skew.
+    // No market line for this game (odds not collected, or the book's line falls outside our
+    // supported range). Anchoring at the median plus a flat half run guaranteed "under" won
+    // every time here too - under was then just the probability of landing at or below the
+    // median. Use the line the model itself treats as even money instead.
     line = fairTotalLine(p)
     lineSource = '모델'
   }

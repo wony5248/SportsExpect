@@ -346,7 +346,10 @@ class ModelLifecycleEvent(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     league: Mapped[str] = mapped_column(String(8), index=True)
-    event_type: Mapped[str] = mapped_column(String(24), index=True)
+    # Long enough for every current decision constant, including "WAITING_FOR_LIVE_VALIDATION"
+    # (27 chars) which previously overflowed varchar(24) and crashed lifecycle evaluation
+    # whenever a league had fewer live samples than the validation minimum.
+    event_type: Mapped[str] = mapped_column(String(40), index=True)
     candidate_model_version_id: Mapped[int | None] = mapped_column(
         ForeignKey("model_versions.id"), nullable=True,
     )

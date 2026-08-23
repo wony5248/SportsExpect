@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from backend.app.config import KST, database_url_from_environment, settings
 from backend.app.database.base import Base
 from backend.app.models import (Game, GameResult, ModelVersion, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
-                                TeamBullpenEvent, UserClaudeSetting)
+                                ModelLifecycleEvent, TeamBullpenEvent, UserClaudeSetting)
 from backend.app.repositories.repository import _prediction_changes, game_cards, game_dates
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services.bullpen import apply_profile_update, derive_profile, load_profiles, seed_league
@@ -781,6 +781,17 @@ def test_optional_enrichment_degrades_instead_of_failing_the_refresh():
     with pytest.raises(ZeroDivisionError):
         _optional(lambda: 1 / 0, {}, "bullpen profiles", errors)
     assert _optional(lambda: {"ok": 1}, {}, "bullpen profiles", errors) == {"ok": 1}
+
+
+def test_lifecycle_event_type_column_fits_every_decision_constant():
+    """WAITING_FOR_LIVE_VALIDATION (27 chars) once overflowed a varchar(24) column and crashed
+    every lifecycle evaluation for a league without 40+ live samples. Guard the real constants
+    used in run_model_lifecycle against whatever width the column currently has."""
+    decision_constants = ["WAITING_FOR_DATA", "WAITING_FOR_LIVE_VALIDATION", "NO_NEW_DATA",
+                         "PROMOTED", "REJECTED", "ROLLED_BACK"]
+    column_length = ModelLifecycleEvent.__table__.c.event_type.type.length
+    for value in decision_constants:
+        assert len(value) <= column_length, f"{value} ({len(value)} chars) exceeds column width {column_length}"
 
 
 def test_mlb_never_reports_a_tied_score_and_branches_beat_the_raw_mode():
