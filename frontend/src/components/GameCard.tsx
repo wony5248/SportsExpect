@@ -70,6 +70,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const isFinal = game.status === 'FINAL'
   const homeFavored = !p || p.home_win_probability >= p.away_win_probability
   const ranking = p && coherent ? rankedOutcomes(p, game, isFinal) : null
+  const marginShape = p && coherent ? marginBuckets(p) : null
   const topOutcome = ranking?.outcomes[0]
   const handicap = p && coherent ? handicapSides(p, game) : null
   const requestPersonalAnalysis = async () => {
@@ -180,6 +181,22 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             {modeTotal ? <b className="mode-total">총점은 {modeTotal.value}점이 최다<small>{pctFine(modeTotal.probability)}</small></b> : null}
           </Stack>
         </Box> : null}
+
+        {marginShape && <Box className="margin-shape">
+          <Stack direction="row" justifyContent="space-between" alignItems="baseline">
+            <span>어떤 경기가 될까</span>
+            <small>{marginShape.headline}</small>
+          </Stack>
+          <Box className="margin-bar">
+            {marginShape.buckets.map((bucket) => <i key={bucket.key} className={bucket.key}
+              style={{ width: pct(bucket.share) }} title={`${bucket.label} ${pct(bucket.share)}`} />)}
+          </Box>
+          <Box className="margin-legend">
+            {marginShape.buckets.map((bucket) => <span key={bucket.key} className={bucket.key}>
+              {bucket.label} {pct(bucket.share)}
+            </span>)}
+          </Box>
+        </Box>}
 
         {p.outcome_scores && <Box className="branch-scores">
           <span>이기는 쪽이 갈릴 때 예상되는 점수</span>
@@ -619,9 +636,11 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game, includeR
   let line: number | null = marketLine != null && p.totals[String(marketLine)] ? marketLine : null
   let lineSource: '시장' | '모델' = '시장'
   if (line == null) {
-    const target = p.total_quantiles?.p50 ?? p.statistical_expected_total ?? p.expected_total
-    const half = Math.min(12.5, Math.max(6.5, Math.round(target - .5) + .5))
-    if (p.totals[String(half)]) { line = half; lineSource = '모델' }
+    // Anchoring the line at the median plus a half run guaranteed "under" won every time: under
+    // is then exactly the probability of landing at or below the median. Pick the line the model
+    // itself considers even instead, so the split carries information rather than the skew.
+    line = fairTotalLine(p)
+    lineSource = '모델'
   }
   const totals = line != null ? p.totals[String(line)] : undefined
   if (line != null && totals) {
@@ -638,6 +657,40 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game, includeR
   }
   outcomes.sort((a, b) => b.probability - a.probability)
   return { outcomes, line, lineSource }
+}
+
+/** The half-run total the model itself treats as even money, which is what a book would post. */
+function fairTotalLine(p: NonNullable<Game['prediction']>) {
+  const lines = Object.keys(p.totals)
+    .map(Number)
+    .filter((line) => Number.isFinite(line) && !Number.isInteger(line))
+  if (!lines.length) return null
+  return lines.reduce((best, line) => {
+    const gap = (value: number) => Math.abs(p.totals[String(value)].over - p.totals[String(value)].under)
+    return gap(line) < gap(best) ? line : best
+  })
+}
+
+/** How the game is likely to feel, which separates matchups far better than an exact score.
+ *  Across a single slate the one-run-or-two share ranges from 43% to 59% and the blowout share
+ *  from 17% to 36%, while the most likely exact score is 2-3 or 3-4 in almost every game. */
+function marginBuckets(p: NonNullable<Game['prediction']>) {
+  const margins = p.frequency_tables?.margins
+  if (!margins) return null
+  const runs = Object.entries(margins)
+  const total = runs.reduce((sum, [, count]) => sum + count, 0)
+  if (!total) return null
+  const share = (test: (margin: number) => boolean) =>
+    runs.filter(([margin]) => test(Math.abs(Number(margin)))).reduce((sum, [, count]) => sum + count, 0) / total
+  const buckets = [
+    { key: 'close', label: '접전 1~2점차', share: share((margin) => margin >= 1 && margin <= 2) },
+    { key: 'clear', label: '3~4점차', share: share((margin) => margin >= 3 && margin <= 4) },
+    { key: 'blowout', label: '5점차 이상', share: share((margin) => margin >= 5) },
+  ]
+  const level = share((margin) => margin === 0)
+  if (level > 0) buckets.push({ key: 'level', label: '무승부', share: level })
+  const leading = buckets.reduce((best, bucket) => bucket.share > best.share ? bucket : best)
+  return { buckets, headline: `${leading.label} 가능성이 가장 큼` }
 }
 
 function selectRepresentativeScore(
