@@ -32,7 +32,12 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const [personalError, setPersonalError] = useState<string | null>(null)
   const p = game.prediction
   const coherent = Boolean(p && (p.summary_schema_version ?? 0) >= 2 && p.coherence_valid === true)
-  const predictedScore = p?.top_scores?.[0] ?? p?.primary_score
+  const predictedScore = p ? ((p.summary_schema_version ?? 0) >= 10 && p.primary_score
+    ? p.primary_score
+    : selectRepresentativeScore(p)) : undefined
+  const displayedScoreCandidates = p?.top_scores?.length
+    ? prioritizeScoreCandidates(p.top_scores, predictedScore)
+    : []
   const expectedScore = predictedScore ? { away: predictedScore.away, home: predictedScore.home } : p?.display_expected_score ?? (p ? {
     away: Number(p.away_expected_runs.toFixed(1)), home: Number(p.home_expected_runs.toFixed(1)),
   } : undefined)
@@ -49,6 +54,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   )
   const homeFavored = !p || p.home_win_probability >= p.away_win_probability
   const ranking = p && coherent ? rankedOutcomes(p, game) : null
+  const topOutcome = ranking?.outcomes[0]
   const handicap = p && coherent ? handicapSides(p, game) : null
   const requestPersonalAnalysis = async () => {
     if (!signedIn) { onRequireLogin(); return }
@@ -75,7 +81,12 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <span>{game.league === 'MLB'
           ? `한국 ${shortDate(game.date)} ${game.time ?? '시간 미정'} KST · 미국 현지 ${shortDate(game.venue_date)} · ${game.stadium ?? '구장 미정'}`
           : `${game.time ?? '시간 미정'} KST · ${game.stadium ?? '구장 미정'}`}</span>
-        <Stack direction="row" spacing={.7}><Chip size="small" label={game.freshness.status === 'FRESH' ? '최신' : '갱신 필요'} className={`freshness ${game.freshness.status.toLowerCase()}`} /><Chip size="small" label={game.status === 'SCHEDULED' ? '경기 예정' : game.status} className={`status ${game.status.toLowerCase()}`} /></Stack>
+        <Stack direction="row" spacing={.7}>
+          {isReplay && <Chip size="small" label="과거 재현 · 이닝 득점률 엔진" className="engine-chip replay" />}
+          {!isReplay && p?.engine === 'PLATE_APPEARANCE' && <Chip size="small" label="타석별 시뮬레이션 엔진" className="engine-chip plate" />}
+          <Chip size="small" label={game.freshness.status === 'FRESH' ? '최신' : '갱신 필요'} className={`freshness ${game.freshness.status.toLowerCase()}`} />
+          <Chip size="small" label={game.status === 'SCHEDULED' ? '경기 예정' : game.status} className={`status ${game.status.toLowerCase()}`} />
+        </Stack>
       </Stack>
       <Box className="matchup">
         <TeamName team={game.away} side="AWAY" />
@@ -94,21 +105,17 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <Box className="result-comparison-grid">
           <Box className="result-score actual"><span>실제 최종</span><strong>{game.result.away_score} <i>:</i> {game.result.home_score}</strong><small>{game.away.name} : {game.home.name}</small></Box>
           {resultComparison ? <>
-            <Box className="result-score predicted"><span>가장 많이 나온 점수</span><strong>{stat(resultComparison.awayExpected, 0)} <i>:</i> {stat(resultComparison.homeExpected, 0)}</strong><small>{game.away.name} : {game.home.name}{p?.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
+            <Box className="result-score predicted"><span>가장 확률 높은 점수</span><strong>{stat(resultComparison.awayExpected, 0)} <i>:</i> {stat(resultComparison.homeExpected, 0)}</strong><small>{game.away.name} : {game.home.name}{p?.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
             <Box className={`result-verdict ${resultComparison.verdictClass}`}><b>{resultComparison.verdict}</b><span>{resultComparison.favorite}</span><small>이 점수 기준 팀당 {stat(resultComparison.runsMae, 1)}점 차이</small></Box>
           </> : <Box className="result-verdict unavailable"><b>비교할 예측 없음</b><span>경기 시작 전에 저장해 둔 예측이 없습니다.</span></Box>}
         </Box>
-        {isReplay && <Alert severity="info" className="replay-disclosure">
-          이 값은 당시 실시간으로 저장한 예측이 아니라, 경기 시작 전까지의 데이터만 복원해 현재 모델로 다시 돌린 과거 재현입니다. 실전 예측 성과와 분리해 집계합니다.
-        </Alert>}
-        {evaluation && <SimulationEvaluation evaluation={evaluation} />}
-        {legacyReplayEvaluation && <>
-          <Alert severity="info" className="replay-disclosure">
-            당시 실전 예측은 그대로 보존했습니다. 다만 구형 예측에는 전체 시뮬레이션 빈도표가 저장되지 않아,
-            아래 횟수는 경기 시작 전 데이터만 복원해 현재 모델로 다시 계산한 별도 과거 재현입니다.
-          </Alert>
-          <SimulationEvaluation evaluation={legacyReplayEvaluation} title="현재 모델 과거 재현에서 실제 결과가 나온 횟수" />
-        </>}
+        {evaluation && <SimulationEvaluation evaluation={evaluation} title={isReplay
+          ? '과거 재현 · 이닝 득점률 엔진에서 실제 결과가 나온 횟수'
+          : undefined} />}
+        {legacyReplayEvaluation && <SimulationEvaluation
+          evaluation={legacyReplayEvaluation}
+          title="과거 재현 · 이닝 득점률 엔진에서 실제 결과가 나온 횟수"
+        />}
         {verdicts && verdicts.length > 0 && <Box className="market-verdicts">
           {verdicts.map((verdict) => <Box key={verdict.market} className={`market-verdict ${verdict.hit == null ? 'neutral' : verdict.hit ? 'hit' : 'miss'}`}>
             <span>{verdict.market}</span>
@@ -133,16 +140,27 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <Box className="score-row">
           <Box className="primary"><span>예상 점수 · 평균</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>{weightedScore ? `자주 나온 5개 점수 평균 ${stat(weightedScore.away, 1)} : ${stat(weightedScore.home, 1)} (전체의 ${pct(weightedScore.coverage_probability)})` : `평균 총점 ${stat(statisticalExpectedTotal, 1)}점`}</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>가장 많이 나온 점수</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
+          <Box><span>가장 확률 높은 점수</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>{ranking ? '가장 유력한 결과' : modeOutcome ? '가장 많이 나온 결과' : '확률이 높은 결과'}</span><strong>{ranking ? ranking.outcomes[0].label : modeOutcome ? outcomeLabel(modeOutcome.value, game) : favoriteLabel(p, game)}</strong><small>{ranking ? `${pct(ranking.outcomes[0].probability)}${ranking.outcomes[0].note ? ` · ${ranking.outcomes[0].note}` : ''}` : modeOutcome ? modeFrequency(modeOutcome) : pct(Math.max(p.home_win_probability, p.away_win_probability))}</small></Box>
+          <Box className={`headline-outcome${topOutcome?.hit == null ? '' : topOutcome.hit ? ' hit' : ' miss'}`}>
+            <Box className="headline-outcome-heading">
+              <span>{ranking ? '가장 유력한 결과' : modeOutcome ? '가장 많이 나온 결과' : '확률이 높은 결과'}</span>
+              {topOutcome?.hit != null && <span className="headline-outcome-verdict" aria-label={topOutcome.hit ? '실제 결과 적중' : '실제 결과 미적중'}>
+                <i aria-hidden="true">{topOutcome.hit ? '✓' : '×'}</i>{topOutcome.hit ? '적중' : '미적중'}
+              </span>}
+            </Box>
+            <strong>{topOutcome?.label ?? (modeOutcome ? outcomeLabel(modeOutcome.value, game) : favoriteLabel(p, game))}</strong>
+            <small>{topOutcome
+              ? `${pct(topOutcome.probability)}${topOutcome.note ? ` · ${topOutcome.note}` : ''}${topOutcome.actual ? ` · ${topOutcome.actual}` : ''}`
+              : modeOutcome ? modeFrequency(modeOutcome) : pct(Math.max(p.home_win_probability, p.away_win_probability))}</small>
+          </Box>
         </Box>
 
-        {p.top_scores?.length ? <Box className="score-candidates">
-          <span>나올 만한 최종 점수 3가지</span>
+        {displayedScoreCandidates.length ? <Box className="score-candidates">
+          <span>확률과 경기 흐름을 함께 본 최종 점수 3가지</span>
           <Stack direction="row" flexWrap="wrap" gap={.8}>
-            {p.top_scores.slice(0, 3).map((score, index) => <b key={`${score.away}-${score.home}`} className={index === 0 ? 'top' : ''}>
-              <small className="rank">{index + 1}위</small>{score.away} : {score.home}<small>{score.probability == null ? '—' : pctFine(score.probability)}</small>
+            {displayedScoreCandidates.map((score, index) => <b key={`${score.away}-${score.home}`} className={index === 0 ? 'top' : ''}>
+              <small className="rank">{index === 0 ? '선정' : `${index + 1}위`}</small>{score.away} : {score.home}<small>{score.probability == null ? '—' : pctFine(score.probability)}</small>
             </b>)}
             {modeTotal ? <b className="mode-total">총점은 {modeTotal.value}점이 최다<small>{pctFine(modeTotal.probability)}</small></b> : null}
           </Stack>
@@ -251,7 +269,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
                 <small>{personalAnalysis.model} · {personalAnalysis.disclaimer}</small>
               </Box>}
             </Box>
-            <Typography className="source-note">이 경기를 {p.model.simulations.toLocaleString()}번 가상으로 치러본 결과입니다. 평균 점수는 그 {p.model.simulations.toLocaleString()}번의 평균이고, 가장 많이 나온 점수는 실제로 제일 자주 나온 최종 점수입니다. 승률·득점대·총점도 모두 같은 계산에서 나옵니다. 평균 총점은 {stat(statisticalExpectedTotal, 2)}점입니다. {p.extra_innings
+            <Typography className="source-note">이 경기를 {p.model.simulations.toLocaleString()}번 가상으로 치러본 결과입니다. 평균 점수는 그 {p.model.simulations.toLocaleString()}번의 평균이고, 가장 확률 높은 점수는 시뮬레이션 빈도·경기별 평균 득점·예상 총점·우세 팀 방향을 함께 반영해 상위 후보에서 고릅니다. 승률·득점대·총점도 모두 같은 계산에서 나옵니다. 평균 총점은 {stat(statisticalExpectedTotal, 2)}점입니다. {p.extra_innings
               ? game.league === 'MLB'
                 ? '연장은 실제 MLB 규정대로 승부치기(무사 2루 주자)를 적용해 승부가 날 때까지 치르기 때문에 무승부가 없습니다.'
                 : '연장은 실제 KBO 규정대로 승부치기 없이 11회까지만 치르고, 그래도 동점이면 무승부로 두고 승률 계산에서 뺍니다.'
@@ -431,7 +449,7 @@ function completedGameComparison(game: Game, expectedScore: { away: number; home
   }
 }
 
-type RankedOutcome = { label: string; probability: number; note?: string }
+type RankedOutcome = { label: string; probability: number; note?: string; hit?: boolean; actual?: string }
 
 type MarketVerdict = { market: string; pick: string; probability: number; actual: string; hit: boolean | null }
 
@@ -506,9 +524,14 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game): {
   line: number | null
   lineSource: '시장' | '모델'
 } {
+  const result = game.result
+  const actual = result ? `실제 ${result.away_score} : ${result.home_score}` : undefined
+  const margin = result ? result.home_score - result.away_score : null
   const outcomes: RankedOutcome[] = [
-    { label: `${game.home.name} 승`, probability: p.home_win_probability },
-    { label: `${game.away.name} 승`, probability: p.away_win_probability },
+    { label: `${game.home.name} 승`, probability: p.home_win_probability,
+      hit: margin == null ? undefined : margin > 0, actual },
+    { label: `${game.away.name} 승`, probability: p.away_win_probability,
+      hit: margin == null ? undefined : margin < 0, actual },
   ]
   const handicap = handicapSides(p, game)
   const handicapNote = !handicap.fromMarket ? ' · 시장 핸디가 없어 우리 모델 기준'
@@ -517,10 +540,12 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game): {
   if (typeof handicap.minusProbability === 'number') outcomes.push({
     label: `마핸 · ${handicap.minusTeam} -1.5`, probability: handicap.minusProbability,
     note: `${handicap.minusTeam}가 2점차 이상으로 이김${handicapNote}`,
+    hit: margin == null ? undefined : (handicap.homeMinus ? margin : -margin) >= 2, actual,
   })
   if (typeof handicap.plusProbability === 'number') outcomes.push({
     label: `플핸 · ${handicap.plusTeam} +1.5`, probability: handicap.plusProbability,
     note: `${handicap.plusTeam}가 이기거나 1점차로 짐${handicapNote}`,
+    hit: margin == null ? undefined : (handicap.homeMinus ? margin : -margin) < 2, actual,
   })
   const marketLine = game.market?.total_line
   let line: number | null = marketLine != null && p.totals[String(marketLine)] ? marketLine : null
@@ -533,14 +558,47 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game): {
   const totals = line != null ? p.totals[String(line)] : undefined
   if (line != null && totals) {
     const pushNote = totals.push ? ` · 정확히 ${line}점일 확률 ${pct(totals.push)}` : ''
-    outcomes.push({ label: `오버 ${line}`, probability: totals.over, note: `두 팀 합계가 ${line}점보다 많음${pushNote}` })
-    outcomes.push({ label: `언더 ${line}`, probability: totals.under, note: `두 팀 합계가 ${line}점보다 적음${pushNote}` })
+    const actualTotal = result ? result.home_score + result.away_score : null
+    outcomes.push({ label: `오버 ${line}`, probability: totals.over, note: `두 팀 합계가 ${line}점보다 많음${pushNote}`,
+      hit: actualTotal == null ? undefined : actualTotal > line, actual })
+    outcomes.push({ label: `언더 ${line}`, probability: totals.under, note: `두 팀 합계가 ${line}점보다 적음${pushNote}`,
+      hit: actualTotal == null ? undefined : actualTotal < line, actual })
   }
   if (game.league !== 'MLB' && p.tie_probability > 0) {
-    outcomes.push({ label: '무승부', probability: p.tie_probability, note: '연장 11회까지 가도 동점' })
+    outcomes.push({ label: '무승부', probability: p.tie_probability, note: '연장 11회까지 가도 동점',
+      hit: margin == null ? undefined : margin === 0, actual })
   }
   outcomes.sort((a, b) => b.probability - a.probability)
   return { outcomes, line, lineSource }
+}
+
+function selectRepresentativeScore(p: NonNullable<Game['prediction']>) {
+  if (!p.top_scores.length) return p.primary_score
+  const evidence = (score: NonNullable<Game['prediction']>['top_scores'][number]) =>
+    score.probability ?? score.count ?? 0
+  const maxEvidence = Math.max(...p.top_scores.map(evidence)) || 1
+  const expectedTotal = p.home_expected_runs + p.away_expected_runs
+  const favoriteStrength = Math.min(1, Math.abs(p.home_win_probability - .5) / .15)
+  const favoredHome = p.home_win_probability >= .5
+  const fit = (score: NonNullable<Game['prediction']>['top_scores'][number]) => {
+    const teamError = Math.abs(score.home - p.home_expected_runs) + Math.abs(score.away - p.away_expected_runs)
+    const frequencyFit = evidence(score) / maxEvidence
+    const teamFit = 1 / (1 + teamError / 2)
+    const totalFit = 1 / (1 + Math.abs(score.home + score.away - expectedTotal) / 2)
+    const directionMatches = score.home === score.away ? null : (score.home > score.away) === favoredHome
+    const rawDirectionFit = directionMatches == null ? .4 : directionMatches ? 1 : 0
+    const directionFit = (1 - favoriteStrength) * .5 + favoriteStrength * rawDirectionFit
+    return .50 * frequencyFit + .25 * teamFit + .15 * totalFit + .10 * directionFit
+  }
+  return p.top_scores.reduce((best, score) => fit(score) > fit(best) ? score : best)
+}
+
+function prioritizeScoreCandidates(
+  scores: NonNullable<Game['prediction']>['top_scores'],
+  selected: NonNullable<Game['prediction']>['top_scores'][number] | undefined,
+) {
+  if (!selected) return scores.slice(0, 3)
+  return [selected, ...scores.filter((score) => score.away !== selected.away || score.home !== selected.home)].slice(0, 3)
 }
 
 function modeFrequency(mode: { count?: number; probability?: number | null } | null | undefined) {
