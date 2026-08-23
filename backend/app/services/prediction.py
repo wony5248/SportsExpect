@@ -63,7 +63,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     ]
     input_data = {
         "game": game.external_id,
-        "simulation_summary_schema": 8,
+        "simulation_summary_schema": 9,
         "features": features,
         "home_expected": round(base_home_runs, 6),
         "away_expected": round(base_away_runs, 6),
@@ -132,7 +132,7 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "statistical_expected_total": round(round(home_runs, 2) + round(away_runs, 2), 2),
         "confidence": confidence,
         "payload": {
-            "summary_schema_version": 8,
+            "summary_schema_version": 9,
             "coherence_valid": True,
             "probability_source": (
                 "extra_innings_simulation_mlb_tiebreaker_no_ties" if game.league == "MLB"

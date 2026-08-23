@@ -533,7 +533,7 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     score = after["payload"]["display_expected_score"]
     assert after["expected_total"] == round(score["away"] + score["home"], 1)
     assert after["statistical_expected_total"] == round(after["home_expected_runs"] + after["away_expected_runs"], 2)
-    assert after["payload"]["summary_schema_version"] == 8
+    assert after["payload"]["summary_schema_version"] == 9
     assert after["payload"]["coherence_valid"] is True
     assert after["payload"]["primary_score"] == after["payload"]["top_scores"][0]
     estimates = after["payload"]["score_estimates"]
