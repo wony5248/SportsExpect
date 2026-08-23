@@ -46,6 +46,8 @@ def upsert_game(session: Session, raw: dict[str, Any], source_url: str, collecte
     else:
         for key, value in values.items():
             setattr(game, key, value)
+    if game.status == "CANCELLED":
+        purge_cancelled_game_pregame_data(session, game, repair=True)
     if raw.get("status") == "FINAL" and raw.get("away_score") is not None and raw.get("home_score") is not None:
         result = session.get(GameResult, game.id)
         if result is None:
@@ -126,6 +128,8 @@ def upsert_games_bulk(session: Session, rows: list[dict[str, Any]], source_url: 
             for result in session.scalars(select(GameResult).where(GameResult.game_id.in_(chunk))).all()
         })
     for raw, game in zip(rows, output, strict=True):
+        if game.status == "CANCELLED":
+            purge_cancelled_game_pregame_data(session, game, repair=True)
         if game.status != "FINAL" or raw.get("status") != "FINAL" or raw.get("away_score") is None or raw.get("home_score") is None:
             continue
         result = results.get(game.id)
@@ -144,6 +148,55 @@ def upsert_games_bulk(session: Session, rows: list[dict[str, Any]], source_url: 
                 result.finalized_at = collected_at
             result.source_url = source_url
     return output
+
+
+def purge_cancelled_game_pregame_data(session: Session, game: Game, *, repair: bool) -> dict[str, Any]:
+    """Keep a cancelled fixture, but invalidate/remove its stale pregame material.
+
+    The schedule row remains useful for travel and doubleheader context.  Starter and lineup
+    snapshots are not: a postponed fixture can be replayed the next day with the same pitcher,
+    which otherwise looks like a duplicate player record.  Immutable prediction snapshots stay
+    for audit, while their parent prediction is excluded from training and UI display.
+    """
+    if session.get(GameResult, game.id) is not None:
+        return {"game_id": game.external_id, "skipped": "HAS_FINAL_RESULT"}
+    pitcher_count = session.scalar(select(func.count(PitcherStat.id)).where(PitcherStat.game_id == game.id)) or 0
+    lineup_count = session.scalar(select(func.count(LineupEntry.id)).where(LineupEntry.game_id == game.id)) or 0
+    predictions = session.scalars(select(Prediction).where(Prediction.game_id == game.id)).all()
+    report = {
+        "game_id": game.external_id, "pitcher_rows": int(pitcher_count), "lineup_rows": int(lineup_count),
+        "predictions_invalidated": sum(bool(row.training_eligible) for row in predictions),
+    }
+    if not repair:
+        return report
+    session.execute(delete(PitcherStat).where(PitcherStat.game_id == game.id))
+    session.execute(delete(LineupEntry).where(LineupEntry.game_id == game.id))
+    for prediction in predictions:
+        if prediction.training_eligible:
+            prediction.training_eligible = False
+        payload = dict(prediction.payload or {})
+        payload.setdefault("cancellation", {
+            "reason": "OFFICIAL_CANCELLED_OR_POSTPONED",
+            "game_id": game.external_id,
+        })
+        prediction.payload = payload
+    game.pregame_context = {}
+    game.context_collected_at = None
+    return report
+
+
+def cancelled_game_pregame_integrity(session: Session, repair: bool = False) -> dict[str, Any]:
+    """Audit or clean all currently cancelled fixtures without deleting their schedule history."""
+    games = session.scalars(select(Game).where(Game.status == "CANCELLED").order_by(Game.game_date, Game.id)).all()
+    rows = [purge_cancelled_game_pregame_data(session, game, repair=repair) for game in games]
+    return {
+        "cancelled_games": len(games), "repair": repair,
+        "pitcher_rows": sum(int(row.get("pitcher_rows", 0)) for row in rows),
+        "lineup_rows": sum(int(row.get("lineup_rows", 0)) for row in rows),
+        "predictions_invalidated": sum(int(row.get("predictions_invalidated", 0)) for row in rows),
+        "skipped_final_results": sum(row.get("skipped") == "HAS_FINAL_RESULT" for row in rows),
+        "samples": rows[:30],
+    }
 
 
 def upsert_team_stat(session: Session, team: Team, effective_date: date, raw: dict[str, Any], recent: dict[str, Any], source_url: str, collected_at: datetime) -> TeamStat:

@@ -13,9 +13,9 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from backend.app.config import KST, database_url_from_environment, settings
 from backend.app.database.base import Base
-from backend.app.models import (Game, GameResult, ModelVersion, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
+from backend.app.models import (Game, GameResult, LineupEntry, ModelVersion, PitcherStat, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
                                 ModelLifecycleEvent, TeamBullpenEvent, UserClaudeSetting)
-from backend.app.repositories.repository import _prediction_changes, game_cards, game_dates
+from backend.app.repositories.repository import _prediction_changes, game_cards, game_dates, upsert_game
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services.bullpen import apply_profile_update, derive_profile, load_profiles, seed_league
 from backend.app.services import claude_advisor, personal_claude, runtime_secrets, user_auth
@@ -129,6 +129,40 @@ def test_pitcher_integrity_distinguishes_same_game_duplicates_from_normal_repeat
     assert len(summary["_same_game_side_rows"]) == 1
     assert len(summary["_same_game_player_rows"]) == 1
     assert len(summary["_repeated_signature_rows"]) == 1
+
+
+def test_cancelled_game_keeps_schedule_but_purges_stale_starter_and_lineup_data():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        away = Team(league="KBO", code="AW", name="Away")
+        home = Team(league="KBO", code="HM", name="Home")
+        model = ModelVersion(name="TEST", algorithm="test", feature_schema={}, checksum="cancel")
+        session.add_all([away, home, model]); session.flush()
+        collected = datetime(2026, 8, 23, 12)
+        game = Game(external_id="RAIN-1", league="KBO", game_date=date(2026, 8, 23),
+                    away_team_id=away.id, home_team_id=home.id, status="SCHEDULED", source="test",
+                    source_url="test", collected_at=collected, pregame_context={"weather": {"available": True}})
+        session.add(game); session.flush()
+        session.add(PitcherStat(game_id=game.id, side="away", player_id="P1", name="Pitcher", confirmed=True,
+                                source="test", source_url="test", collected_at=collected))
+        session.add(LineupEntry(game_id=game.id, side="away", batting_order=1, player_name="Hitter",
+                                confirmed=True, source="test", source_url="test", collected_at=collected))
+        prediction = Prediction(game_id=game.id, model_version_id=model.id, input_hash="cancel-input",
+                                home_win_probability=.5, away_win_probability=.5, home_expected_runs=4,
+                                away_expected_runs=4, confidence=.5, payload={}, training_eligible=True,
+                                created_at=collected)
+        session.add(prediction); session.flush()
+        upsert_game(session, {
+            "external_id": "RAIN-1", "game_date": date(2026, 8, 23), "away_code": "AW", "away_name": "Away",
+            "home_code": "HM", "home_name": "Home", "status": "CANCELLED", "stadium": "Park",
+        }, "official", collected, "KBO")
+        session.flush()
+        assert session.get(Game, game.id).status == "CANCELLED"
+        assert session.scalars(select(PitcherStat).where(PitcherStat.game_id == game.id)).all() == []
+        assert session.scalars(select(LineupEntry).where(LineupEntry.game_id == game.id)).all() == []
+        assert session.get(Prediction, prediction.id).training_eligible is False
+        assert session.get(Game, game.id).pregame_context == {}
 
 
 def test_mlb_weather_adjustment_is_neutral_when_missing_and_capped_when_published():

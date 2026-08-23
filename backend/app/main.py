@@ -15,7 +15,8 @@ from sqlalchemy.orm import Session
 from backend.app.config import KST, settings
 from backend.app.database import SessionLocal, init_db
 from backend.app.models import Team
-from backend.app.repositories.repository import game_cards, game_dates, game_detail, performance_metrics
+from backend.app.repositories.repository import (cancelled_game_pregame_integrity, game_cards, game_dates,
+                                                 game_detail, performance_metrics)
 from backend.app.services.operations import LockUnavailable, backup_database, operational_status
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services.bullpen import TIERS, apply_profile_update, load_profiles
@@ -165,6 +166,15 @@ def refresh(target_date: date = Query(alias="date", default_factory=lambda: date
 def pitcher_data_integrity(repair: bool = Query(default=False), session: Session = Depends(get_session)):
     """Admin-only audit; repair deletes only duplicate rows for one game/team side."""
     report = pitcher_stats_integrity(session, repair=repair)
+    if repair:
+        session.commit()
+    return report
+
+
+@app.post("/api/v1/admin/data-integrity/cancelled-games", dependencies=[Depends(require_admin)])
+def cancelled_game_data_integrity(repair: bool = Query(default=False), session: Session = Depends(get_session)):
+    """Remove stale pregame starters/lineups from officially cancelled or postponed fixtures."""
+    report = cancelled_game_pregame_integrity(session, repair=repair)
     if repair:
         session.commit()
     return report
