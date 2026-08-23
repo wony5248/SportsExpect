@@ -222,8 +222,10 @@ def test_legacy_live_forecast_keeps_original_and_adds_separate_exact_replay():
             origin="LIVE_PREGAME", data_cutoff=target.start_at - timedelta(hours=1),
             home_win_probability=.6, away_win_probability=.4,
             home_expected_runs=5.0, away_expected_runs=3.0, confidence=.5,
-            # Schema 4 forecasts predate stored recipes and full frequency tables.
-            payload={"summary_schema_version": 4, "model": {"name": "MLB_MATCHUP_V10"}},
+            # An exact but outdated live population remains immutable and receives a separate
+            # current replay once the summary/model schema advances.
+            payload={"summary_schema_version": SIMULATION_SUMMARY_SCHEMA_VERSION - 1,
+                     "frequency_tables": {}, "model": {"name": "MLB_MATCHUP_V10"}},
             created_at=target.start_at - timedelta(hours=1),
         ))
         session.add(Prediction(

@@ -63,12 +63,16 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             # a clearly labelled retrospective replay so archive cards can still show exact
             # 20,000-run result frequencies without pretending they came from the old forecast.
             exact_live = [row for row in live_predictions if _has_exact_simulation_population(row)]
-            if exact_live:
-                if any(row.id not in evaluated_prediction_ids for row in exact_live):
+            current_exact_live = [row for row in exact_live if _summary_schema(row) >= SIMULATION_SUMMARY_SCHEMA_VERSION]
+            if current_exact_live:
+                if any(row.id not in evaluated_prediction_ids for row in current_exact_live):
                     evaluated += evaluate_game_predictions(session, game, result)
-                    evaluated_prediction_ids.update(row.id for row in exact_live)
+                    evaluated_prediction_ids.update(row.id for row in current_exact_live)
                 skipped_live += 1
                 continue
+            # Keep an older exact live forecast immutable, but add a separately labelled current
+            # replay. This is how an August 23 schema-10 pregame forecast gains the schema-11 KBO
+            # residual analysis after final without pretending the new model ran before first pitch.
             needs_legacy_replay = True
         existing_replays = [row for row in stored if row.origin == "HISTORICAL_REPLAY"]
         current_replays = [row for row in existing_replays if _is_current_replay(row)]
@@ -232,10 +236,14 @@ def _has_exact_simulation_population(prediction: Prediction) -> bool:
     return isinstance(payload.get("simulation_recipe"), dict) or isinstance(payload.get("frequency_tables"), dict)
 
 
+def _summary_schema(prediction: Prediction) -> int:
+    return int((prediction.payload or {}).get("summary_schema_version") or 0)
+
+
 def _is_current_replay(prediction: Prediction) -> bool:
     payload = prediction.payload or {}
     return (
-        int(payload.get("summary_schema_version") or 0) >= SIMULATION_SUMMARY_SCHEMA_VERSION
+        _summary_schema(prediction) >= SIMULATION_SUMMARY_SCHEMA_VERSION
         and payload.get("coherence_valid") is True
         and payload.get("engine") in {"INNING_RATE", "PLATE_APPEARANCE"}
         and _has_exact_simulation_population(prediction)
