@@ -15,7 +15,7 @@ from backend.app.models import Game, GameResult, Prediction
 # The residual layer is active for forecasts dated August 23, 2026 and later. Earlier
 # predictions remain immutable, but their leakage-safe pregame baselines may seed the EWMA.
 RESIDUAL_FEATURE_START_DATE = date(2026, 8, 23)
-RESIDUAL_POLICY_VERSION = 1
+RESIDUAL_POLICY_VERSION = 2
 RESIDUAL_ENABLED_LEAGUES = {"KBO"}
 EWMA_HALF_LIFE_GAMES = 12.0
 RESIDUAL_WINSOR_LIMIT = 6.0
