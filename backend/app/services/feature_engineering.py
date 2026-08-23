@@ -36,6 +36,9 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
     h_recent_5 = (home.recent or {}).get("5", {})
     a_recent_5 = (away.recent or {}).get("5", {})
     context = game_context or {}
+    residual = context.get("team_residuals") or {}
+    residual_home = residual.get("home") or {}
+    residual_away = residual.get("away") or {}
     (lineup_diff, home_lineup_index, away_lineup_index, home_lineup_confirmed, away_lineup_confirmed,
      home_bvp_adjustment, away_bvp_adjustment, home_bvp_coverage, away_bvp_coverage,
      home_bvp_pa, away_bvp_pa) = _lineup_feature(lineups or [])
@@ -112,6 +115,26 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         "away_lineup_confirmed": away_lineup_confirmed,
         "recent_home_games": int(h_recent.get("games", 0)),
         "recent_away_games": int(a_recent.get("games", 0)),
+        "home_offense_residual_ewma": float(residual_home.get("offense") or 0.0),
+        "away_offense_residual_ewma": float(residual_away.get("offense") or 0.0),
+        "home_defense_residual_ewma": float(residual_home.get("defense") or 0.0),
+        "away_defense_residual_ewma": float(residual_away.get("defense") or 0.0),
+        "home_venue_offense_residual": float(residual_home.get("venue_offense") or 0.0),
+        "away_venue_offense_residual": float(residual_away.get("venue_offense") or 0.0),
+        "home_venue_defense_residual": float(residual_home.get("venue_defense") or 0.0),
+        "away_venue_defense_residual": float(residual_away.get("venue_defense") or 0.0),
+        "home_matchup_residual": float(residual_home.get("matchup") or 0.0),
+        "away_matchup_residual": float(residual_away.get("matchup") or 0.0),
+        "home_residual_run_adjustment": float(residual.get("home_run_adjustment") or 0.0),
+        "away_residual_run_adjustment": float(residual.get("away_run_adjustment") or 0.0),
+        "home_residual_variance_multiplier": float(residual.get("home_variance_multiplier") or 1.0),
+        "away_residual_variance_multiplier": float(residual.get("away_variance_multiplier") or 1.0),
+        "home_residual_games": int(residual_home.get("games") or 0),
+        "away_residual_games": int(residual_away.get("games") or 0),
+        "home_venue_residual_games": int(residual_home.get("venue_games") or 0),
+        "away_venue_residual_games": int(residual_away.get("venue_games") or 0),
+        "home_matchup_residual_games": int(residual_home.get("matchup_games") or 0),
+        "away_matchup_residual_games": int(residual_away.get("matchup_games") or 0),
     }
 
 

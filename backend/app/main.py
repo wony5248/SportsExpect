@@ -101,10 +101,14 @@ def list_games(
     league: str = Query(default="ALL", pattern="^(ALL|KBO|MLB)$"),
     session: Session = Depends(get_session),
 ):
-    # Let Vercel serve repeated four-user dashboard reads without another DB
-    # round trip while keeping scheduled updates visible within one minute.
-    response.headers["Cache-Control"] = "public, max-age=0, s-maxage=60, stale-while-revalidate=300"
-    return {"date": target_date.isoformat(), "league": league, "games": game_cards(session, target_date, league)}
+    cards = game_cards(session, target_date, league)
+    # Never serve a stale live state from the CDN. Scheduled/final boards can still share a
+    # short cache, while an open live board polls the database directly once per minute.
+    response.headers["Cache-Control"] = (
+        "no-store" if any(game["status"] == "LIVE" for game in cards)
+        else "public, max-age=0, s-maxage=60, stale-while-revalidate=300"
+    )
+    return {"date": target_date.isoformat(), "league": league, "games": cards}
 
 
 @app.get("/api/v1/game-dates")

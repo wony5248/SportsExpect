@@ -40,6 +40,9 @@ RUN_TO_RATE_EXPONENT = .55
 # The calibration pass runs at reduced volume purely to find each club's offense scalar.
 CALIBRATION_SIMULATIONS = 4000
 CALIBRATION_ROUNDS = 3
+# The base-out process already supplies substantial batter-to-batter variance. Only part of the
+# game-level team variance is added here, preventing the same uncertainty from being counted twice.
+PLATE_GAME_SHOCK_WEIGHT = .35
 
 
 def playable(plan: dict[str, Any] | None) -> bool:
@@ -48,16 +51,20 @@ def playable(plan: dict[str, Any] | None) -> bool:
 
 
 def simulate_game(rng: np.random.Generator, simulations: int, home: dict[str, Any], away: dict[str, Any],
-                  league: str, extra_innings: dict[str, Any]) -> dict[str, Any]:
+                  league: str, extra_innings: dict[str, Any], home_team_variance: float | None = None,
+                  away_team_variance: float | None = None) -> dict[str, Any]:
     """Play `simulations` complete games and return per-inning run lines for both clubs."""
-    home_scale, away_scale = _calibrate(rng, home, away, league, extra_innings)
-    result = _play(rng, simulations, home, away, league, extra_innings, home_scale, away_scale)
+    home_scale, away_scale = _calibrate(
+        rng, home, away, league, extra_innings, home_team_variance, away_team_variance)
+    result = _play(rng, simulations, home, away, league, extra_innings, home_scale, away_scale,
+                   home_team_variance, away_team_variance)
     result["offense_scale"] = {"home": round(home_scale, 4), "away": round(away_scale, 4)}
     return result
 
 
 def _calibrate(rng: np.random.Generator, home: dict[str, Any], away: dict[str, Any],
-               league: str, extra_innings: dict[str, Any]) -> tuple[float, float]:
+               league: str, extra_innings: dict[str, Any], home_team_variance: float | None,
+               away_team_variance: float | None) -> tuple[float, float]:
     """Find the offense scalars that land both clubs on the run totals the team model expects.
 
     The two are solved together: whether the home club bats in the ninth depends on how many
@@ -65,9 +72,11 @@ def _calibrate(rng: np.random.Generator, home: dict[str, Any], away: dict[str, A
     """
     targets = (float(home["expected_runs"]), float(away["expected_runs"]))
     scales = [1.0, 1.0]
-    for _ in range(CALIBRATION_ROUNDS):
+    rounds = CALIBRATION_ROUNDS + (2 if home_team_variance is not None or away_team_variance is not None else 0)
+    for _ in range(rounds):
         probe = _play(np.random.default_rng(int(rng.integers(2**32))), CALIBRATION_SIMULATIONS,
-                      home, away, league, extra_innings, scales[0], scales[1])
+                      home, away, league, extra_innings, scales[0], scales[1],
+                      home_team_variance, away_team_variance)
         for index, side in enumerate(("home", "away")):
             realized = float(np.maximum(probe[f"{side}_innings"], 0).sum(axis=1).mean())
             if realized > 0:
@@ -76,7 +85,8 @@ def _calibrate(rng: np.random.Generator, home: dict[str, Any], away: dict[str, A
 
 
 def _play(rng: np.random.Generator, simulations: int, home: dict[str, Any], away: dict[str, Any],
-          league: str, extra_innings: dict[str, Any], home_scale: float, away_scale: float) -> dict[str, Any]:
+          league: str, extra_innings: dict[str, Any], home_scale: float, away_scale: float,
+          home_team_variance: float | None, away_team_variance: float | None) -> dict[str, Any]:
     from backend.app.services.simulation import _staff_profile
 
     # The pitcher plan draws one starter exit per simulation, so it is built at this pass's size.
@@ -91,6 +101,8 @@ def _play(rng: np.random.Generator, simulations: int, home: dict[str, Any], away
     away_batter = np.zeros(simulations, dtype=np.int64)
     live = np.ones(simulations, dtype=bool)
     tier_counts = {"home": {}, "away": {}}
+    home_game_scale = _game_scale(rng, simulations, home_team_variance)
+    away_game_scale = _game_scale(rng, simulations, away_team_variance)
 
     for inning in range(max_innings):
         extra = inning >= 9
@@ -98,7 +110,8 @@ def _play(rng: np.random.Generator, simulations: int, home: dict[str, Any], away
         home_multiplier = _staff_multiplier(home_profile, inning, home_total - away_total, extra,
                                             None if extra else tier_counts["home"])
         runs, away_batter = _half_inning(
-            rng, away["tables"], away_batter, away_scale, home_multiplier, live, None)
+            rng, away["tables"], away_batter, away_scale * away_game_scale,
+            home_multiplier, live, None)
         away_total += runs
         away_runs_by_inning.append(np.where(live, runs, -1) if inning >= 9 else runs)
         # Bottom half. From the ninth on, the home club bats only while level or behind, and a
@@ -109,7 +122,8 @@ def _play(rng: np.random.Generator, simulations: int, home: dict[str, Any], away
         away_multiplier = _staff_multiplier(away_profile, inning, away_total - home_total, extra,
                                             None if extra else tier_counts["away"])
         runs, home_batter = _half_inning(
-            rng, home["tables"], home_batter, home_scale, away_multiplier, bats, cap)
+            rng, home["tables"], home_batter, home_scale * home_game_scale,
+            away_multiplier, bats, cap)
         home_total += runs
         # A half-inning that was never played is recorded as -1 so a scorebook can show it as
         # skipped rather than as a scoreless inning.
@@ -124,6 +138,15 @@ def _play(rng: np.random.Generator, simulations: int, home: dict[str, Any], away
         "away_innings": np.stack(away_runs_by_inning, axis=1),
         "home": home_total, "away": away_total, "tier_counts": tier_counts,
     }
+
+
+def _game_scale(rng: np.random.Generator, simulations: int,
+                team_variance: float | None) -> float | np.ndarray:
+    # None deliberately preserves historical plate-engine recipes created before this field.
+    if team_variance is None:
+        return 1.0
+    variance = min(.12, max(.01, float(team_variance) * PLATE_GAME_SHOCK_WEIGHT))
+    return rng.gamma(1 / variance, variance, simulations)
 
 
 def _staff_multiplier(profile: dict[str, Any], inning: int, lead: np.ndarray, extra: bool,
@@ -142,7 +165,8 @@ def _staff_multiplier(profile: dict[str, Any], inning: int, lead: np.ndarray, ex
     return np.power(multiplier, RUN_TO_RATE_EXPONENT)
 
 
-def _half_inning(rng: np.random.Generator, tables: np.ndarray, batter: np.ndarray, offense_scale: float,
+def _half_inning(rng: np.random.Generator, tables: np.ndarray, batter: np.ndarray,
+                 offense_scale: float | np.ndarray,
                  pitcher_multiplier: np.ndarray, active: np.ndarray,
                  run_cap: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
     """Bat until three outs, or until a walk-off caps the inning."""
@@ -159,7 +183,8 @@ def _half_inning(rng: np.random.Generator, tables: np.ndarray, batter: np.ndarra
     while batting.any():
         index = np.flatnonzero(batting)
         state = first[index].astype(np.int64) + 2 * second[index] + 4 * third[index]
-        row = tables[batter[index], state] * _adjustment(pitcher_multiplier[index], offense_scale)
+        active_scale = offense_scale[index] if isinstance(offense_scale, np.ndarray) else offense_scale
+        row = tables[batter[index], state] * _adjustment(pitcher_multiplier[index], active_scale)
         row /= row.sum(axis=1, keepdims=True)
         draw = rng.random(index.size)
         outcome = (np.cumsum(row, axis=1) < draw[:, None]).sum(axis=1).clip(0, row.shape[1] - 1)
@@ -177,7 +202,7 @@ def _half_inning(rng: np.random.Generator, tables: np.ndarray, batter: np.ndarra
     return runs, batter
 
 
-def _adjustment(pitcher_multiplier: np.ndarray, offense_scale: float) -> np.ndarray:
+def _adjustment(pitcher_multiplier: np.ndarray, offense_scale: float | np.ndarray) -> np.ndarray:
     """Scale on-base outcomes; the balance flows into outs so each row still sums to one."""
     factor = pitcher_multiplier * offense_scale
     weights = np.ones((factor.size, 7))

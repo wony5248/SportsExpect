@@ -14,6 +14,7 @@ from backend.app.models import (Game, GameResult, LineupEntry, PitcherStat, Pred
 from backend.app.repositories.repository import save_prediction
 from backend.app.services.prediction import SIMULATION_SUMMARY_SCHEMA_VERSION, predict_game
 from backend.app.services.prediction_evaluation import evaluate_game_predictions
+from backend.app.services.team_residuals import TeamResidualHistory
 
 
 def run_historical_replay(session: Session, league: str, start_date: date | None = None,
@@ -21,7 +22,7 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
     """Recreate archive forecasts using only results and observations available before first pitch."""
     query = select(Game, GameResult).join(GameResult, GameResult.game_id == Game.id).options(
         joinedload(Game.home_team), joinedload(Game.away_team),
-    ).where(Game.league == league, Game.start_at.is_not(None))
+    ).where(Game.league == league, Game.status == "FINAL", Game.start_at.is_not(None))
     if start_date:
         query = query.where(Game.game_date >= start_date)
     if end_date:
@@ -31,11 +32,12 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
     history = session.execute(
         select(Game, GameResult).join(GameResult, GameResult.game_id == Game.id).options(
             joinedload(Game.home_team), joinedload(Game.away_team),
-        ).where(Game.league == league).order_by(Game.start_at, Game.id)
+        ).where(Game.league == league, Game.status == "FINAL").order_by(Game.start_at, Game.id)
     ).all()
     predictions = session.scalars(select(Prediction).join(Game, Game.id == Prediction.game_id).where(
         Game.league == league,
     )).all()
+    residual_history = TeamResidualHistory.from_session(session, league)
     by_game: dict[int, list[Prediction]] = defaultdict(list)
     for prediction in predictions:
         by_game[prediction.game_id].append(prediction)
@@ -109,7 +111,8 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
         prediction_result = predict_game(
             game, home, away, by_side.get("home"), by_side.get("away"), lineups,
             {"home_games_today": 1, "away_games_today": 1,
-             "league_average_runs": league_average_runs},
+             "league_average_runs": league_average_runs,
+             "team_residuals": residual_history.context_for(game)},
             model_runtime=None, bullpens={}, lineup_tables={},
             prediction_context={
                 "origin": "HISTORICAL_REPLAY", "data_cutoff": cutoff.isoformat(),

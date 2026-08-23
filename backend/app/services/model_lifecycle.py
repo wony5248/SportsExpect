@@ -169,7 +169,7 @@ def _training_samples(session: Session, league: str) -> list[dict[str, Any]]:
         .join(Prediction, Prediction.id == PredictionSnapshot.prediction_id)
         .join(Game, Game.id == PredictionSnapshot.game_id)
         .join(GameResult, GameResult.game_id == Game.id)
-        .where(Game.league == league)
+        .where(Game.league == league, Game.status == "FINAL")
         .order_by(Game.start_at, PredictionSnapshot.captured_at)
     ).all()
     by_game: dict[int, dict[str, Any]] = {}

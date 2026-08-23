@@ -10,6 +10,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from backend.app.models import Game, GameResult, MarketSnapshot, Prediction, PredictionSnapshot
+from backend.app.services.team_residuals import (ResidualObservation, apply_residual_adjustment, available_before,
+                                                 baseline_expected_runs, probability_from_run_means,
+                                                 residual_context, RESIDUAL_ENABLED_LEAGUES)
 
 
 EXACT_CHECKPOINT_STAGES = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_15M"}
@@ -18,11 +21,13 @@ EXACT_CHECKPOINT_STAGES = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_
 def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | None = None) -> dict[str, Any]:
     query = select(Prediction, Game, GameResult).join(Game, Game.id == Prediction.game_id).join(
         GameResult, GameResult.game_id == Game.id,
-    ).options(joinedload(Prediction.model_version))
+    ).where(Game.status == "FINAL").options(joinedload(Prediction.model_version))
     if league != "ALL":
         query = query.where(Game.league == league)
     raw = session.execute(query.order_by(Game.game_date, Game.start_at, Prediction.created_at)).all()
-    completed_query = select(func.count(GameResult.game_id)).join(Game, Game.id == GameResult.game_id)
+    completed_query = select(func.count(GameResult.game_id)).join(
+        Game, Game.id == GameResult.game_id,
+    ).where(Game.status == "FINAL")
     if league != "ALL":
         completed_query = completed_query.where(Game.league == league)
     completed_results = int(session.scalar(completed_query) or 0)
@@ -176,6 +181,13 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
             "official_live_metric": False,
             "disclosure": "경기 전 데이터만 사용해 현재 코드로 다시 계산한 회고 성능입니다.",
         },
+        "team_residual_walk_forward": {
+            "official_live": _residual_walk_forward(rows),
+            "historical_replay": _residual_walk_forward(replay_rows),
+            "method": ("Each game is adjusted only from earlier finalized games. The comparison force-applies "
+                       "the August 23 residual policy retrospectively to measure counterfactual lift."),
+            "lower_is_better": ["runs_mae", "runs_rmse", "brier_score", "log_loss", "calibration_error"],
+        },
         "market_consensus_baseline": market_metrics,
         "by_league": {key: _metrics(value, "probability") for key, value in by_league.items()},
         "model_leaderboard": sorted(
@@ -184,6 +196,61 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
         ),
         "paired_model_comparisons": paired_comparisons,
         "by_month": [{"month": key, **_metrics(value, "probability")} for key, value in sorted(by_month.items())],
+    }
+
+
+def _residual_walk_forward(
+    rows: list[tuple[Prediction, Game, GameResult, PredictionSnapshot | None]],
+) -> dict[str, Any]:
+    observations: list[ResidualObservation] = []
+    baseline_rows: list[dict[str, Any]] = []
+    adjusted_rows: list[dict[str, Any]] = []
+    for prediction, game, result, _ in rows:
+        if game.start_at is None or game.league not in RESIDUAL_ENABLED_LEAGUES:
+            continue
+        cutoff = _naive(game.start_at)
+        eligible = [row for row in observations if available_before(row, cutoff)]
+        baseline_home, baseline_away = baseline_expected_runs(prediction)
+        context = residual_context(
+            eligible, game.home_team_id, game.away_team_id, game.game_date,
+            latest_game_id=eligible[-1].game_id if eligible else None, force_enabled=True,
+        )
+        adjusted_home, adjusted_away = apply_residual_adjustment(baseline_home, baseline_away, context)
+        outcome = 1.0 if result.home_score > result.away_score else (
+            .5 if result.home_score == result.away_score else 0.0)
+        baseline_run_probability = probability_from_run_means(baseline_home, baseline_away)
+        adjusted_run_probability = probability_from_run_means(adjusted_home, adjusted_away)
+        probability_shift = _logit(adjusted_run_probability) - _logit(baseline_run_probability)
+        adjusted_probability = _sigmoid(_logit(prediction.home_win_probability) + probability_shift)
+        baseline_rows.append({
+            "probability": prediction.home_win_probability, "outcome": outcome,
+            "home_run_error": baseline_home - result.home_score,
+            "away_run_error": baseline_away - result.away_score,
+        })
+        adjusted_rows.append({
+            "probability": adjusted_probability, "outcome": outcome,
+            "home_run_error": adjusted_home - result.home_score,
+            "away_run_error": adjusted_away - result.away_score,
+        })
+        observations.append(ResidualObservation(
+            game_id=game.id, started_at=cutoff, finalized_at=_naive(result.finalized_at),
+            home_team_id=game.home_team_id, away_team_id=game.away_team_id,
+            home_expected=baseline_home, away_expected=baseline_away,
+            home_actual=result.home_score, away_actual=result.away_score,
+        ))
+    if not baseline_rows:
+        return {"sample_size": 0, "baseline": {"sample_size": 0}, "adjusted": {"sample_size": 0}}
+    baseline_metrics = _metrics(baseline_rows, "probability")
+    adjusted_metrics = _metrics(adjusted_rows, "probability")
+    compared = ("runs_mae", "runs_rmse", "brier_score", "log_loss", "calibration_error")
+    return {
+        "sample_size": len(baseline_rows),
+        "baseline": baseline_metrics,
+        "adjusted": adjusted_metrics,
+        "delta_adjusted_minus_baseline": {
+            key: round(float(adjusted_metrics[key]) - float(baseline_metrics[key]), 5)
+            for key in compared if key in baseline_metrics and key in adjusted_metrics
+        },
     }
 
 

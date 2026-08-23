@@ -26,6 +26,8 @@ CHECKPOINTS = {
 CHECKPOINT_TOLERANCE_MINUTES = 2.5
 REPLAY_START_DATE = date(2026, 1, 1)
 REPLAY_END_DATE = date(2026, 12, 31)
+LIVE_REFRESH_LOOKBACK = timedelta(hours=6)
+LIVE_REFRESH_LOOKAHEAD = timedelta(hours=3)
 
 
 def checkpoint_stage_for_minutes(minutes_to_start: float) -> str | None:
@@ -57,8 +59,11 @@ def run_nearby_refresh(league: str) -> dict[str, Any]:
         games = session.scalars(select(Game).where(
             Game.league == league,
             Game.status.in_(("SCHEDULED", "LIVE")),
-            Game.start_at >= now - timedelta(minutes=30),
-            Game.start_at <= now + timedelta(minutes=180),
+            # Keep polling throughout a normal game, and retain enough headroom for long
+            # extra-inning or delayed starts. Stale SCHEDULED rows stay eligible so the same
+            # job can discover that first pitch already happened.
+            Game.start_at >= now - LIVE_REFRESH_LOOKBACK,
+            Game.start_at <= now + LIVE_REFRESH_LOOKAHEAD,
         )).all()
     grouped: dict[date, set[str]] = {}
     for game in games:
@@ -66,7 +71,7 @@ def run_nearby_refresh(league: str) -> dict[str, Any]:
     results = []
     for game_date, ids in sorted(grouped.items()):
         with job_lock(f"refresh:{league}:{game_date.isoformat()}"):
-            results.append(_operation(league)(game_date, game_ids=ids, trigger="supabase_nearby_30m"))
+            results.append(_operation(league)(game_date, game_ids=ids, trigger="supabase_live_5m"))
     return {"league": league, "scope": "nearby", "matched_games": len(games), "runs": results}
 
 

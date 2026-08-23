@@ -28,6 +28,7 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .game-card { padding: 24px; border: 1px solid rgba(191,233,215,.12); border-radius: 20px; background: linear-gradient(145deg, rgba(16,43,34,.95), rgba(9,28,22,.98)); box-shadow: 0 18px 45px rgba(0,0,0,.16); overflow: hidden; }
 .card-meta { color: #8da79d; font-size: .78rem; font-weight: 650; }
 .status { height: 24px !important; background: rgba(126,231,184,.1) !important; color: #9af1c8 !important; border: 1px solid rgba(126,231,184,.17) !important; }
+.status.live { background: rgba(242,91,91,.13) !important; color: #ffaaa2 !important; border-color: rgba(242,91,91,.3) !important; }
 .status.final { background: rgba(246,200,107,.1) !important; color: #f6c86b !important; }
 .freshness { height: 24px !important; font-size: .62rem !important; background: rgba(122,151,140,.08) !important; color: #8da79d !important; }.freshness.stale { color: #f6c86b !important; }
 .engine-chip { height: 24px !important; font-size: .62rem !important; border: 1px solid rgba(95,166,194,.24) !important; background: rgba(44,112,139,.12) !important; color: #9fc8d8 !important; }
@@ -44,6 +45,12 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .versus span { display: block; }
 .versus small { font-size: .54rem; letter-spacing: .12em; }
 .probability-block { padding: 18px; background: rgba(3,16,12,.32); border-radius: 14px; }
+.live-game-notice { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 11px 13px; border: 1px solid rgba(242,91,91,.22); border-radius: 11px; background: rgba(242,91,91,.075); }
+.live-game-notice b { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; color: #ffaaa2; font-size: .76rem; }
+.live-game-notice b i { width: 7px; height: 7px; border-radius: 50%; background: #f25b5b; box-shadow: 0 0 0 4px rgba(242,91,91,.12); animation: live-pulse 1.6s ease-in-out infinite; }
+.live-game-notice span { color: #a8847d; font-size: .64rem; line-height: 1.45; }
+@keyframes live-pulse { 50% { opacity: .45; transform: scale(.82); } }
+@media (prefers-reduced-motion: reduce) { .live-game-notice b i { animation: none; } }
 .result-comparison { margin-bottom: 16px; padding: 14px 16px; background: rgba(246,200,107,.07); border: 1px solid rgba(246,200,107,.17); border-radius: 12px; }
 .result-comparison-heading { gap: 12px; margin-bottom: 12px; }.result-comparison-heading b { color: #e5c887; font-size: .75rem; }.result-comparison-heading span { color: #826f49; font-size: .58rem; text-align: right; }
 .result-comparison-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; align-items: stretch; }

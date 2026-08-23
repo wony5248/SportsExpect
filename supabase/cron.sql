@@ -67,14 +67,15 @@ begin
   end loop;
 end $$;
 
--- Full refresh hourly, with the opposite half-hour reserved for nearby-game updates.
+-- Full refresh hourly. Lightweight nearby/live refreshes run every five minutes so first
+-- pitch and final status reach an open board promptly without repeating season-wide work.
 select cron.schedule('dugout-kbo-full', '4 * * * *',
   $$select public.invoke_dugout_refresh('KBO', 'full')$$);
-select cron.schedule('dugout-kbo-nearby', '34 * * * *',
+select cron.schedule('dugout-kbo-nearby', '*/5 * * * *',
   $$select public.invoke_dugout_refresh('KBO', 'nearby')$$);
 select cron.schedule('dugout-mlb-full', '19 * * * *',
   $$select public.invoke_dugout_refresh('MLB', 'full')$$);
-select cron.schedule('dugout-mlb-nearby', '49 * * * *',
+select cron.schedule('dugout-mlb-nearby', '2-59/5 * * * *',
   $$select public.invoke_dugout_refresh('MLB', 'nearby')$$);
 
 -- Per-game immutable checkpoints. The lightweight endpoint runs every minute,

@@ -46,7 +46,7 @@ def upsert_game(session: Session, raw: dict[str, Any], source_url: str, collecte
     else:
         for key, value in values.items():
             setattr(game, key, value)
-    if raw.get("away_score") is not None and raw.get("home_score") is not None:
+    if raw.get("status") == "FINAL" and raw.get("away_score") is not None and raw.get("home_score") is not None:
         result = session.get(GameResult, game.id)
         if result is None:
             result = GameResult(game_id=game.id, away_score=raw["away_score"], home_score=raw["home_score"],
@@ -54,9 +54,13 @@ def upsert_game(session: Session, raw: dict[str, Any], source_url: str, collecte
                                 finalized_at=collected_at, source_url=source_url)
             session.add(result)
         else:
-            result.away_score, result.home_score = raw["away_score"], raw["home_score"]
+            away_score, home_score = int(raw["away_score"]), int(raw["home_score"])
+            score_changed = result.away_score != away_score or result.home_score != home_score
+            result.away_score, result.home_score = away_score, home_score
             if raw.get("innings") is not None:
                 result.innings = raw["innings"]
+            if score_changed:
+                result.finalized_at = collected_at
             result.source_url = source_url
     return game
 
@@ -103,6 +107,11 @@ def upsert_games_bulk(session: Session, rows: list[dict[str, Any]], source_url: 
             game = Game(external_id=str(raw["external_id"]), **values)
             session.add(game); games[game.external_id] = game
         else:
+            # Season schedule pages are useful for archive discovery but are less authoritative
+            # than the per-game feed. Never let a partial-score schedule row regress or finalize
+            # a state already established by the live endpoint.
+            if game.status in {"LIVE", "FINAL", "CANCELLED"}:
+                values["status"] = game.status
             for key, value in values.items():
                 setattr(game, key, value)
         output.append(game)
@@ -117,7 +126,7 @@ def upsert_games_bulk(session: Session, rows: list[dict[str, Any]], source_url: 
             for result in session.scalars(select(GameResult).where(GameResult.game_id.in_(chunk))).all()
         })
     for raw, game in zip(rows, output, strict=True):
-        if raw.get("away_score") is None or raw.get("home_score") is None:
+        if game.status != "FINAL" or raw.get("status") != "FINAL" or raw.get("away_score") is None or raw.get("home_score") is None:
             continue
         result = results.get(game.id)
         if result is None:
@@ -126,9 +135,13 @@ def upsert_games_bulk(session: Session, rows: list[dict[str, Any]], source_url: 
                                 innings=raw.get("innings"), source_url=source_url)
             session.add(result); results[game.id] = result
         else:
+            score_changed = (result.away_score != int(raw["away_score"]) or
+                             result.home_score != int(raw["home_score"]))
             result.away_score, result.home_score = int(raw["away_score"]), int(raw["home_score"])
             if raw.get("innings") is not None:
                 result.innings = raw["innings"]
+            if score_changed:
+                result.finalized_at = collected_at
             result.source_url = source_url
     return output
 
@@ -508,7 +521,7 @@ def _game_serialization_context(session: Session, games: list[Game]) -> dict[str
         game.id: prediction
         for game in games
         if (prediction := _display_prediction(
-            game, predictions_by_game.get(game.id, []), results.get(game.id),
+            game, predictions_by_game.get(game.id, []), results.get(game.id) if game.status == "FINAL" else None,
         )) is not None
     }
     replay_predictions = {
@@ -557,7 +570,9 @@ def _serialize_game(game: Game, context: dict[str, Any]) -> dict[str, Any]:
     pitcher_map = {p.side: p for p in pitchers}
     home_stat = context["team_stats"].get(game.home_team_id)
     away_stat = context["team_stats"].get(game.away_team_id)
-    result = context["results"].get(game.id)
+    # A score row is only an official result after the source marks the game final. This also
+    # hides and later repairs any partial result written by an older collector version.
+    result = context["results"].get(game.id) if game.status == "FINAL" else None
     market = context["markets"].get(game.id)
     snapshots = context["snapshots"].get(game.id, [])
     source_objects = [value for value in (home_stat, away_stat, *pitchers, *lineups) if value]
@@ -720,7 +735,7 @@ def _sources(game: Game, home: TeamStat | None, away: TeamStat | None, pitchers:
 def performance_metrics(session: Session) -> dict[str, Any]:
     rows = session.execute(select(Prediction, GameResult, Game).join(
         GameResult, GameResult.game_id == Prediction.game_id
-    ).join(Game, Game.id == Prediction.game_id)).all()
+    ).join(Game, Game.id == Prediction.game_id).where(Game.status == "FINAL")).all()
     # One evaluation per game and source. Retrospective replay never changes the official live metric.
     latest: dict[int, tuple[Prediction, GameResult]] = {}
     replay: dict[int, tuple[Prediction, GameResult]] = {}

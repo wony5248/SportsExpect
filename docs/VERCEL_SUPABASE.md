@@ -122,7 +122,7 @@ select vault.create_secret('YOUR_ADMIN_TOKEN', 'dugout_admin_token');
 그다음 [`supabase/cron.sql`](../supabase/cron.sql)의 전체 내용을 SQL Editor에서 실행합니다. 등록되는 작업은 다음과 같습니다.
 
 - KBO/MLB 전체 갱신: 각 1시간
-- 경기 임박 갱신: 전체 갱신 사이의 30분 시점
+- 경기 임박·진행 상태 갱신: 5분마다, 시작 3시간 전부터 시작 후 6시간까지
 - 경기별 정확 시점 스냅샷: 매분 확인, 실제 외부 수집은 24시간·3시간·60분·15분 창에 들어온 경기만 실행
 - 다음 날 경기 발견: KBO 13:10 KST, MLB 00:20 KST
 - 시장 배당: KBO 12:00 KST, MLB 00:00 KST에 리그당 하루 1회

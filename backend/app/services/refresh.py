@@ -35,6 +35,7 @@ from backend.app.services.batting import build_batter_table, league_average_tabl
 from backend.app.services.bullpen import load_profiles, seed_league
 from backend.app.services.model_lifecycle import load_champion_runtime
 from backend.app.services.prediction_evaluation import evaluate_pending_predictions
+from backend.app.services.team_residuals import TeamResidualHistory
 
 
 def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None = None,
@@ -84,6 +85,10 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
         if fetched_games:
             for raw in fetched_games:
                 if game_ids and raw["external_id"] not in game_ids:
+                    continue
+                if raw["status"] != "SCHEDULED":
+                    # Live polling only needs the authoritative state/result feed. Pregame
+                    # pitcher, lineup and split enrichment stops at first pitch.
                     continue
                 starter_source = _tracked(
                     f"kbo_starters_{raw['external_id']}", "/ws/Schedule.asmx/GetPitcherRecordAnalysis",
@@ -160,6 +165,8 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
         for raw in fetched_games:
             if game_ids and raw["external_id"] not in game_ids:
                 continue
+            if raw["status"] != "SCHEDULED":
+                continue
             starter_source = _tracked(
                 f"mlb_starters_{raw['external_id']}", "/api/v1/people/{id}/stats",
                 lambda item=raw: client.starter_stats(item), errors,
@@ -215,6 +222,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
             query = query.where(Game.external_id.in_(game_ids))
         games = session.scalars(query).all()
         model_runtime = load_champion_runtime(session, league)
+        residual_history = TeamResidualHistory.from_session(session, league)
         # Seed any team that has no profile yet, then read them all back, so a bullpen update
         # made since the last refresh reaches this slate's predictions. Both are optional
         # enrichments: if their tables are not migrated yet the slate still gets predictions.
@@ -248,6 +256,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 "home_games_today": appearances[game.home_team_id],
                 "away_games_today": appearances[game.away_team_id],
                 "league_average_runs": league_average_runs,
+                "team_residuals": residual_history.context_for(game),
             }
             captured_at = datetime.now(KST)
             result = predict_game(

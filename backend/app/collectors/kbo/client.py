@@ -74,7 +74,9 @@ class KboClient:
                 continue
             cancel_id = str(item.get("CANCEL_SC_ID", "0"))
             state = str(item.get("GAME_STATE_SC", "1"))
-            result = bool(item.get("GAME_RESULT_CK"))
+            # KBO sends this flag as a string.  bool("0") is True in Python, which used to
+            # make an in-progress game look final as soon as the field appeared in the feed.
+            result = _flag(item.get("GAME_RESULT_CK"))
             status = "CANCELLED" if cancel_id != "0" else ("FINAL" if result or state == "3" else ("LIVE" if state in {"2", "5"} else "SCHEDULED"))
             start_text = item.get("G_TM")
             start_at = datetime.combine(game_date, time.fromisoformat(start_text), tzinfo=KST) if start_text else None
@@ -169,15 +171,23 @@ class KboClient:
             time_match = re.search(r"\d{1,2}:\d{2}", _text(time_cell.get("Text", ""))) if time_cell else None
             start_time = time_match.group(0) if time_match else None
             status_text = " ".join(_text(cell.get("Text", "")) for cell in cells)
-            status = "CANCELLED" if "취소" in status_text else ("FINAL" if len(scores) == 2 else "SCHEDULED")
+            collected_day = raw.collected_at.astimezone(KST).date()
+            explicit_final = any(label in status_text for label in ("경기종료", "종료"))
+            # The monthly page shows both clubs' *current* scores during a live game. Scores
+            # alone therefore prove completion only for a past date; today's authoritative
+            # state comes from GetKboGameList above.
+            status = "CANCELLED" if "취소" in status_text else (
+                "FINAL" if len(scores) == 2 and (game_date < collected_day or explicit_final)
+                else "LIVE" if len(scores) == 2 else "SCHEDULED"
+            )
             stadium = _text(cells[-2].get("Text", "")) if len(cells) >= 2 else ""
             games.append({
                 "external_id": f"{game_date:%Y%m%d}{away_code}{home_code}{sequence}",
                 "game_date": game_date, "venue_date": game_date,
                 "away_name": away_name,
                 "away_code": away_code, "home_name": home_name, "home_code": home_code,
-                "away_score": scores[0] if len(scores) == 2 else None,
-                "home_score": scores[1] if len(scores) == 2 else None,
+                "away_score": scores[0] if status == "FINAL" else None,
+                "home_score": scores[1] if status == "FINAL" else None,
                 "start_time": start_time,
                 "start_at": datetime.combine(game_date, time.fromisoformat(start_time), tzinfo=KST) if start_time else None,
                 "stadium": stadium or None,
@@ -387,6 +397,12 @@ class KboClient:
         })
         response.raise_for_status()
         return response.text
+
+
+def _flag(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().upper() in {"1", "Y", "YES", "TRUE"}
 
 
 def _clean_id(value: Any) -> str | None:

@@ -45,7 +45,7 @@ docker compose exec api python -m backend.app.cli refresh --date 2026-08-22 --le
 
 - KBO·MLB 전체 갱신: Supabase Cron으로 1시간마다
 - 다음 날 일정 선취득: MLB 00:20, KBO 13:10 KST
-- 경기 근처 3시간: 전체 갱신 사이 30분 시점에 해당 경기 집중 갱신
+- 경기 시작 3시간 전~시작 후 6시간: 5분마다 경기 상태·최종 결과 집중 갱신
 - 정확 시점 수집: 매분 대상 경기만 확인해 시작 24시간·3시간·60분·15분 전 ±2.5분 안에 불변 스냅샷 저장
 - 모델 생명주기: KBO 05:30, MLB 16:30 KST에 날짜순 재학습·승격·롤백 평가
 - 중복 요청: PostgreSQL advisory lock으로 차단

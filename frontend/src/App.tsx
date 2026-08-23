@@ -32,11 +32,12 @@ export default function App() {
   const mobile = useMobile()
   const requestId = useRef(0)
   const seasonYear = Number(date.slice(0, 4))
+  const hasActiveGames = date === kstToday() && games.some((game) => game.status === 'SCHEDULED' || game.status === 'LIVE')
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (background = false) => {
     const currentRequest = ++requestId.current
-    setLoading(true); setError(null)
-    const auxiliary = Promise.allSettled([fetchOperations(), fetchBacktest(league)])
+    if (!background) { setLoading(true); setError(null) }
+    const auxiliary = background ? null : Promise.allSettled([fetchOperations(), fetchBacktest(league)])
     try {
       const gameRows = await fetchGames(date, league)
       if (currentRequest !== requestId.current) return
@@ -44,13 +45,16 @@ export default function App() {
     }
     catch (err) {
       if (currentRequest !== requestId.current) return
-      setGames([])
-      setError(err instanceof Error ? err.message : '알 수 없는 오류')
+      if (!background) {
+        setGames([])
+        setError(err instanceof Error ? err.message : '알 수 없는 오류')
+      }
     }
     finally {
-      if (currentRequest === requestId.current) setLoading(false)
+      if (!background && currentRequest === requestId.current) setLoading(false)
     }
 
+    if (!auxiliary) return
     const [operationResult, backtestResult] = await auxiliary
     if (currentRequest !== requestId.current) return
     if (operationResult.status === 'fulfilled') setOperations(operationResult.value)
@@ -58,6 +62,18 @@ export default function App() {
   }, [date, league])
 
   useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    if (!hasActiveGames) return
+    const timer = window.setInterval(() => { void load(true) }, 60_000)
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void load(true)
+    }
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
+  }, [hasActiveGames, load])
   useEffect(() => {
     let active = true
     void loadAuthSession().then((next) => { if (active) setSession(next) }).catch(() => { if (active) setSession(null) })

@@ -22,18 +22,27 @@ def evaluate_game_predictions(session: Session, game: Game, result: GameResult) 
     written = 0
     for prediction in predictions:
         stored = existing.get(prediction.id)
+        stored_score = ((stored.details or {}).get("actual_score") if stored else None) or {}
+        needs_score_update = bool(stored and (
+            stored_score.get("away") != result.away_score or stored_score.get("home") != result.home_score
+        ))
         needs_inning_update = bool(
             stored and stored.actual_inning_path_count is None and result.innings is not None and
             isinstance((prediction.payload or {}).get("simulation_recipe"), dict)
         )
-        if (stored and not needs_inning_update) or not _eligible_for_result(prediction, game):
+        if (stored and not needs_score_update and not needs_inning_update) or not _eligible_for_result(prediction, game):
             continue
         evaluation = _evaluate(prediction, result)
         if evaluation is None:
             continue
         if stored:
-            stored.actual_inning_path_count = evaluation.get("actual_inning_path_count")
-            stored.actual_inning_path_probability = evaluation.get("actual_inning_path_probability")
+            for field in (
+                "simulation_count", "actual_score_count", "actual_score_probability",
+                "actual_outcome_count", "actual_outcome_probability", "actual_total_count",
+                "actual_total_probability", "actual_margin_count", "actual_margin_probability",
+                "actual_inning_path_count", "actual_inning_path_probability",
+            ):
+                setattr(stored, field, evaluation.get(field))
             stored.details = evaluation
             stored.evaluated_at = datetime.now(KST)
             written += 1
@@ -61,7 +70,7 @@ def evaluate_game_predictions(session: Session, game: Game, result: GameResult) 
 
 def evaluate_pending_predictions(session: Session, league: str | None = None,
                                  target_date: date | None = None) -> int:
-    query = select(Game, GameResult).join(GameResult, GameResult.game_id == Game.id)
+    query = select(Game, GameResult).join(GameResult, GameResult.game_id == Game.id).where(Game.status == "FINAL")
     if league:
         query = query.where(Game.league == league)
     if target_date:

@@ -109,14 +109,17 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                     league: str = "MLB", home_staff: dict[str, Any] | None = None,
                     away_staff: dict[str, Any] | None = None, home_lineup: np.ndarray | None = None,
                     away_lineup: np.ndarray | None = None,
-                    observed_result: dict[str, Any] | None = None) -> dict[str, Any]:
+                    observed_result: dict[str, Any] | None = None,
+                    home_team_variance: float | None = None,
+                    away_team_variance: float | None = None) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
     if home_lineup is not None and away_lineup is not None:
         # Both lineups have collected splits, so play the game out plate appearance by plate
         # appearance instead of drawing inning run totals.
         return _summarize(*_plate_appearance_game(
             rng, home_expected, away_expected, simulations, league, home_staff, away_staff,
-            home_lineup, away_lineup), observed_result=observed_result)
+            home_lineup, away_lineup, home_team_variance, away_team_variance),
+            observed_result=observed_result)
     # A shared gamma run environment creates realistic over-dispersion and correlation
     # (weather/umpire/park conditions affect both clubs) while preserving expected means.
     variance = min(.18, max(.02, environment_variance))
@@ -124,10 +127,12 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     shared_environment = rng.gamma(shape, variance, simulations)
     # Baseball scoring is more dispersed than a Poisson process even after shared weather/park effects.
     # Independent gamma shocks represent sequencing, defense and bullpen execution specific to each club.
-    independent_variance = min(.24, max(.04, team_variance))
-    independent_shape = 1 / independent_variance
-    home_environment = rng.gamma(independent_shape, independent_variance, simulations)
-    away_environment = rng.gamma(independent_shape, independent_variance, simulations)
+    home_independent_variance = min(.32, max(.04,
+        team_variance if home_team_variance is None else home_team_variance))
+    away_independent_variance = min(.32, max(.04,
+        team_variance if away_team_variance is None else away_team_variance))
+    home_environment = rng.gamma(1 / home_independent_variance, home_independent_variance, simulations)
+    away_environment = rng.gamma(1 / away_independent_variance, away_independent_variance, simulations)
     # Split each expected total across nine innings. Slightly higher late-inning weights reflect
     # starter fatigue and bullpen exposure while preserving each team's full-game expectation.
     away_weights = np.array([.105, .105, .105, .108, .110, .112, .115, .118, .122])
@@ -246,6 +251,8 @@ def evaluate_simulation_recipe(recipe: dict[str, Any], observed_result: dict[str
         home_staff=recipe.get("home_staff"), away_staff=recipe.get("away_staff"),
         home_lineup=_recipe_array(recipe.get("home_lineup")),
         away_lineup=_recipe_array(recipe.get("away_lineup")), observed_result=observed_result,
+        home_team_variance=recipe.get("home_team_variance"),
+        away_team_variance=recipe.get("away_team_variance"),
     )
     return result["observed_evaluation"]
 
@@ -257,7 +264,8 @@ def _recipe_array(value: Any) -> np.ndarray | None:
 def _plate_appearance_game(rng: np.random.Generator, home_expected: float, away_expected: float,
                            simulations: int, league: str, home_staff: dict[str, Any] | None,
                            away_staff: dict[str, Any] | None, home_lineup: np.ndarray,
-                           away_lineup: np.ndarray) -> tuple[Any, ...]:
+                           away_lineup: np.ndarray, home_team_variance: float | None,
+                           away_team_variance: float | None) -> tuple[Any, ...]:
     from backend.app.services.plate_engine import simulate_game
 
     max_extra = MLB_MAX_EXTRA_INNINGS if league == "MLB" else KBO_MAX_EXTRA_INNINGS
@@ -265,7 +273,7 @@ def _plate_appearance_game(rng: np.random.Generator, home_expected: float, away_
         rng, simulations,
         {"tables": home_lineup, "staff": home_staff or {}, "expected_runs": home_expected},
         {"tables": away_lineup, "staff": away_staff or {}, "expected_runs": away_expected},
-        league, {"max_extra": max_extra})
+        league, {"max_extra": max_extra}, home_team_variance, away_team_variance)
     home, away = played["home"], played["away"]
     if league == "MLB":
         # Beyond the practical cap, decide the handful still tied by relative scoring strength.

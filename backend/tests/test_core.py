@@ -23,7 +23,7 @@ from backend.app.services.claude_advisor import blend_with_claude
 from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batter_base_states,
                                                _batter_pitcher_split, _data_id_table, _hitter_name,
                                                _pitcher_opponent_split, _rank_table, _record_rate,
-                                               _scoreboard_innings)
+                                               _scoreboard_innings, _flag)
 from backend.app.collectors.kbo.client import SourcePayload
 from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient, _linescore
 from backend.app.collectors.odds import _consensus_event
@@ -42,6 +42,9 @@ from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
 from backend.app.services.model_lifecycle import _promotion_decision, predict_with_runtime
 from backend.app.services.historical_replay import run_historical_replay
 from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
+from backend.app.services.team_residuals import (ResidualObservation, TeamResidualHistory,
+                                                 apply_residual_adjustment, available_before,
+                                                 residual_context)
 
 
 def test_rank_and_data_tables_are_schema_driven():
@@ -76,6 +79,25 @@ def test_kbo_scoreboard_inning_rows_are_parsed_and_trailing_blanks_removed():
     ]}
     result = _scoreboard_innings({"code": "100", "table2": json.dumps(table)})
     assert result == {"away": [1, 0, 2], "home": [0, 1, 0]}
+
+
+def test_kbo_string_result_flag_does_not_finalize_a_live_game():
+    assert _flag("0") is False
+    assert _flag("1") is True
+    response = {"game": [{
+        "SR_ID": 0, "CANCEL_SC_ID": "0", "GAME_STATE_SC": "2", "GAME_RESULT_CK": "0",
+        "G_ID": "20260823LGOB0", "G_TM": "18:30", "AWAY_ID": "LG", "AWAY_NM": "LG",
+        "HOME_ID": "OB", "HOME_NM": "두산", "S_NM": "잠실", "T_SCORE_CN": "3",
+        "B_SCORE_CN": "2", "START_PIT_CK": True, "LINEUP_CK": True,
+    }]}
+    client = KboClient(transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=response)))
+    try:
+        game = client.games(date(2026, 8, 23)).data[0]
+    finally:
+        client.close()
+    assert game["status"] == "LIVE"
+    assert game["away_score"] is None
+    assert game["home_score"] is None
 
 
 def test_mlb_linescore_is_normalized_for_result_flow_comparison():
@@ -452,6 +474,31 @@ def test_game_date_archive_counts_leagues_by_kst_date():
         ]
 
 
+def test_live_game_never_serializes_a_partial_score_as_final_result():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        away = Team(league="KBO", code="LG", name="LG")
+        home = Team(league="KBO", code="OB", name="두산")
+        session.add_all([away, home]); session.flush()
+        game = Game(
+            external_id="LIVE-PARTIAL", league="KBO", game_date=date(2026, 8, 23),
+            venue_date=date(2026, 8, 23), start_at=datetime(2026, 8, 23, 18, 30),
+            start_time=datetime(2026, 8, 23, 18, 30).time(), away_team_id=away.id,
+            home_team_id=home.id, status="LIVE", source="test", source_url="test",
+            collected_at=datetime(2026, 8, 23, 19, 10),
+        )
+        session.add(game); session.flush()
+        session.add(GameResult(
+            game_id=game.id, away_score=3, home_score=2,
+            finalized_at=datetime(2026, 8, 23, 19, 10), source_url="old-collector",
+        ))
+        session.flush()
+        card = game_cards(session, date(2026, 8, 23), "KBO")[0]
+        assert card["status"] == "LIVE"
+        assert card["result"] is None
+
+
 def test_simulation_is_reproducible_and_coherent():
     first = simulate_scores(5.2, 4.1, 20_000, 42)
     second = simulate_scores(5.2, 4.1, 20_000, 42)
@@ -767,7 +814,7 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     score = after["payload"]["display_expected_score"]
     assert after["expected_total"] == round(score["away"] + score["home"], 1)
     assert after["statistical_expected_total"] == round(after["home_expected_runs"] + after["away_expected_runs"], 2)
-    assert after["payload"]["summary_schema_version"] == 10
+    assert after["payload"]["summary_schema_version"] == SIMULATION_SUMMARY_SCHEMA_VERSION
     assert after["payload"]["coherence_valid"] is True
     assert any(
         score["away"] == after["payload"]["primary_score"]["away"]
@@ -950,6 +997,79 @@ def test_walk_forward_backtest_excludes_post_start_prediction():
         assert report["metrics"]["predicted_team_score_sd"] == .5
         assert report["metrics"]["actual_team_score_sd"] == 1.0
         assert report["metrics"]["runs_p10_p90_coverage"] == 1.0
+        assert report["team_residual_walk_forward"]["official_live"]["sample_size"] == 1
+
+
+def test_kbo_residual_calibration_separates_venue_shrinks_matchups_and_respects_cutoff():
+    observations = []
+    start = datetime(2026, 8, 1, 18, 30)
+    for index in range(12):
+        team_home = index % 2 == 0
+        observations.append(ResidualObservation(
+            game_id=index + 1, started_at=start + timedelta(days=index),
+            # Deliberately later collection times emulate a historical bulk import.
+            finalized_at=datetime(2026, 8, 23, 12, 0),
+            home_team_id=1 if team_home else 2, away_team_id=2 if team_home else 1,
+            home_expected=5.0, away_expected=5.0,
+            home_actual=7 if team_home else 5, away_actual=5 if team_home else 4,
+        ))
+    context = residual_context(observations, 1, 3, date(2026, 8, 23), force_enabled=True)
+    assert context["enabled"] is True
+    assert context["home"]["venue_offense"] > 0
+    assert context["home"]["venue_games"] == 6
+    # No games were against team 3, so matchup carry-over is exactly neutral.
+    assert context["home"]["matchup"] == 0
+    adjusted = apply_residual_adjustment(5.0, 5.0, context)
+    assert adjusted[0] > 5.0
+    assert abs(adjusted[0] - 5.0) <= .45
+    assert available_before(observations[-1], datetime(2026, 8, 23, 18, 30)) is True
+
+    same_day = ResidualObservation(
+        game_id=99, started_at=datetime(2026, 8, 23, 14, 0),
+        finalized_at=datetime(2026, 8, 23, 19, 0), home_team_id=1, away_team_id=2,
+        home_expected=5, away_expected=5, home_actual=10, away_actual=0,
+    )
+    history = TeamResidualHistory(observations + [same_day])
+    target = SimpleNamespace(league="KBO", game_date=date(2026, 8, 23),
+                             start_at=datetime(2026, 8, 23, 18, 30), home_team_id=1, away_team_id=3)
+    assert history.context_for(target)["source_game_count"] == 12
+
+
+def test_residual_calibration_is_kbo_only_until_mlb_history_is_ready():
+    game = SimpleNamespace(league="MLB", game_date=date(2026, 8, 23),
+                           start_at=datetime(2026, 8, 23, 10, 0), home_team_id=1, away_team_id=2)
+    context = TeamResidualHistory([]).context_for(game)
+    assert context["enabled"] is False
+    assert context["reason"] == "LEAGUE_NOT_ENABLED"
+    assert apply_residual_adjustment(4.5, 4.2, context) == (4.5, 4.2)
+
+
+def test_side_specific_residual_volatility_widens_the_inning_simulation():
+    low = simulate_scores(5.0, 5.0, 30_000, 20260823, league="KBO",
+                          home_team_variance=.04, away_team_variance=.04)
+    high = simulate_scores(5.0, 5.0, 30_000, 20260823, league="KBO",
+                           home_team_variance=.30, away_team_variance=.04)
+    low_width = low["team_quantiles"]["home"]["p90"] - low["team_quantiles"]["home"]["p10"]
+    high_width = high["team_quantiles"]["home"]["p90"] - high["team_quantiles"]["home"]["p10"]
+    assert high_width > low_width
+
+    table = build_batter_table(_batter_base_states(SITUATION_HTML))
+    lineup = np.stack([table] * 9)
+    plate_low = simulate_scores(5.0, 5.0, 8_000, 20260823, league="KBO",
+                                home_lineup=lineup, away_lineup=lineup,
+                                home_team_variance=.04, away_team_variance=.04)
+    plate_high = simulate_scores(5.0, 5.0, 8_000, 20260823, league="KBO",
+                                 home_lineup=lineup, away_lineup=lineup,
+                                 home_team_variance=.30, away_team_variance=.04)
+    def home_score_sd(result):
+        counts = [(int(score.split(":")[1]), count)
+                  for score, count in result["frequency_tables"]["scores"].items()]
+        size = sum(count for _, count in counts)
+        mean = sum(score * count for score, count in counts) / size
+        return (sum((score - mean) ** 2 * count for score, count in counts) / size) ** .5
+
+    assert home_score_sd(plate_high) > home_score_sd(plate_low)
+    assert abs(plate_high["mean_runs"]["home"] / 5.0 - 1) < .03
 
 
 def test_startup_bootstrap_only_requests_missing_leagues():

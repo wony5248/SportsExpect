@@ -60,8 +60,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
       ? p.home_expected_runs + p.away_expected_runs
       : undefined
   )
+  const isFinal = game.status === 'FINAL'
   const homeFavored = !p || p.home_win_probability >= p.away_win_probability
-  const ranking = p && coherent ? rankedOutcomes(p, game) : null
+  const ranking = p && coherent ? rankedOutcomes(p, game, isFinal) : null
   const topOutcome = ranking?.outcomes[0]
   const handicap = p && coherent ? handicapSides(p, game) : null
   const requestPersonalAnalysis = async () => {
@@ -75,10 +76,10 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
       setPersonalBusy(false)
     }
   }
-  const resultComparison = completedGameComparison(game, p, expectedScore)
+  const resultComparison = isFinal ? completedGameComparison(game, p, expectedScore) : null
   const isReplay = p?.origin === 'HISTORICAL_REPLAY'
   const evaluation = p?.evaluation
-  const verdicts = game.result && p && ranking ? marketVerdicts(p, game, ranking) : null
+  const verdicts = isFinal && game.result && p && ranking ? marketVerdicts(p, game, ranking) : null
   const judgedVerdicts = verdicts?.filter((verdict) => verdict.hit != null) ?? []
   const verdictHits = judgedVerdicts.filter((verdict) => verdict.hit).length
   return (
@@ -92,7 +93,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             label={`${isReplay ? '과거 재현 · ' : ''}${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'} 시뮬레이션 엔진`}
             className={`engine-chip${engine === 'PLATE_APPEARANCE' ? ' plate' : ''}${isReplay ? ' replay' : ''}`} />}
           <Chip size="small" label={game.freshness.status === 'FRESH' ? '최신' : '갱신 필요'} className={`freshness ${game.freshness.status.toLowerCase()}`} />
-          <Chip size="small" label={game.status === 'SCHEDULED' ? '경기 예정' : game.status} className={`status ${game.status.toLowerCase()}`} />
+          <Chip size="small" label={gameStatusLabel(game.status)} className={`status ${game.status.toLowerCase()}`} />
         </Stack>
       </Stack>
       <Box className="matchup">
@@ -100,7 +101,11 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <Box className="versus"><span>VS</span><small>{game.league}</small></Box>
         <TeamName team={game.home} side="HOME" />
       </Box>
-      {game.result && <Box className="result-comparison">
+      {game.status === 'LIVE' && <Box className="live-game-notice" role="status">
+        <b><i aria-hidden="true" />경기 중</b>
+        <span>공식 경기 상태를 5분마다 확인합니다. 종료가 확정되면 실제 결과와 예측 적중 여부를 표시합니다.</span>
+      </Box>}
+      {isFinal && game.result && <Box className="result-comparison">
         <Stack direction="row" justifyContent="space-between" alignItems="baseline" className="result-comparison-heading">
           <b>{isReplay ? '과거 재현과 실제 결과 비교' : '경기 전 예측은 맞았을까'}{judgedVerdicts.length ? ` · ${judgedVerdicts.length}개 중 ${verdictHits}개 적중` : ''}</b>
           <span>{resultComparison
@@ -429,12 +434,17 @@ function predictionUnavailableMessage(game: Game, hasPrediction: boolean) {
   return '당시 저장된 경기 전 예측이 없습니다. 누수 방지 조건을 통과한 과거 재현이 생성되면 실제 결과와 비교해 표시합니다.'
 }
 
+function gameStatusLabel(status: string) {
+  return ({ SCHEDULED: '경기 예정', LIVE: '경기 중', FINAL: '경기 종료', CANCELLED: '경기 취소' } as Record<string, string>)[status] ?? status
+}
+
 function isDetailedPrediction(prediction: Prediction | null): prediction is Prediction {
   return Boolean(prediction && (prediction.summary_schema_version ?? 0) >= 2 && prediction.coherence_valid === true)
 }
 
 function completedGameComparison(game: Game, prediction: Prediction | null,
                                  expectedScore: { away: number; home: number } | undefined) {
+  if (game.status !== 'FINAL') return null
   const result = game.result
   if (!result || !prediction || !expectedScore) return null
   const predictedHome = prediction.home_win_probability >= prediction.away_win_probability
@@ -487,6 +497,7 @@ function handicapSides(p: NonNullable<Game['prediction']>, game: Game) {
 
 function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
                         ranking: ReturnType<typeof rankedOutcomes>): MarketVerdict[] {
+  if (game.status !== 'FINAL') return []
   const result = game.result
   if (!result) return []
   const margin = result.home_score - result.away_score
@@ -526,12 +537,12 @@ function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
   return rows
 }
 
-function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game): {
+function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game, includeResult = game.status === 'FINAL'): {
   outcomes: RankedOutcome[]
   line: number | null
   lineSource: '시장' | '모델'
 } {
-  const result = game.result
+  const result = includeResult ? game.result : null
   const actual = result ? `실제 ${result.away_score} : ${result.home_score}` : undefined
   const margin = result ? result.home_score - result.away_score : null
   const outcomes: RankedOutcome[] = [
