@@ -12,7 +12,7 @@ from backend.app.config import KST
 from backend.app.models import (Game, GameResult, LineupEntry, PitcherStat, Prediction,
                                 PredictionEvaluation, Team)
 from backend.app.repositories.repository import save_prediction
-from backend.app.services.prediction import predict_game
+from backend.app.services.prediction import SIMULATION_SUMMARY_SCHEMA_VERSION, predict_game
 from backend.app.services.prediction_evaluation import evaluate_game_predictions
 
 
@@ -46,6 +46,7 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
     ).all())
 
     created = evaluated = skipped_live = skipped_existing = legacy_live_replayed = cold_start_created = 0
+    outdated_replays_refreshed = 0
     processed: list[str] = []
     for game, result in candidates:
         stored = by_game.get(game.id, [])
@@ -68,12 +69,14 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
                 continue
             needs_legacy_replay = True
         existing_replays = [row for row in stored if row.origin == "HISTORICAL_REPLAY"]
-        if existing_replays:
-            if any(row.id not in evaluated_prediction_ids for row in existing_replays):
+        current_replays = [row for row in existing_replays if _is_current_replay(row)]
+        if current_replays:
+            if any(row.id not in evaluated_prediction_ids for row in current_replays):
                 evaluated += evaluate_game_predictions(session, game, result)
-                evaluated_prediction_ids.update(row.id for row in existing_replays)
+                evaluated_prediction_ids.update(row.id for row in current_replays)
             skipped_existing += 1
             continue
+        outdated_replays_refreshed += int(bool(existing_replays))
         prior = [(prior_game, prior_result) for prior_game, prior_result in history
                  if prior_game.game_date.year == game.game_date.year and _game_before(prior_game, game)]
         home = _reconstructed_team_stat(game.home_team, game, prior)
@@ -132,6 +135,7 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
         "skipped_live": skipped_live, "skipped_existing_replay": skipped_existing,
         "skipped_insufficient_history": 0, "cold_start_created": cold_start_created,
         "legacy_live_replayed": legacy_live_replayed, "limit": limit,
+        "outdated_replays_refreshed": outdated_replays_refreshed,
         "games": processed,
         "disclosure": "과거 재현은 경기 전 데이터만 복원한 회고 시뮬레이션이며 당시 저장된 실전 예측과 분리됩니다.",
     }
@@ -223,6 +227,16 @@ def _before_start(prediction: Prediction, game: Game) -> bool:
 def _has_exact_simulation_population(prediction: Prediction) -> bool:
     payload = prediction.payload or {}
     return isinstance(payload.get("simulation_recipe"), dict) or isinstance(payload.get("frequency_tables"), dict)
+
+
+def _is_current_replay(prediction: Prediction) -> bool:
+    payload = prediction.payload or {}
+    return (
+        int(payload.get("summary_schema_version") or 0) >= SIMULATION_SUMMARY_SCHEMA_VERSION
+        and payload.get("coherence_valid") is True
+        and payload.get("engine") in {"INNING_RATE", "PLATE_APPEARANCE"}
+        and _has_exact_simulation_population(prediction)
+    )
 
 
 def _naive(value: datetime) -> datetime:

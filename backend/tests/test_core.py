@@ -34,7 +34,8 @@ from backend.app.services.refresh import (SPLIT_FETCH_BUDGET, _collect_batter_sp
 from backend.app.services.batting import SINGLE, STATE_INDEX, build_batter_table
 from backend.app.services.simulation import simulate_scores
 from backend.app.services.simulation import evaluate_simulation_recipe
-from backend.app.services.prediction import (blend_classifier_into_means, build_score_estimates,
+from backend.app.services.prediction import (SIMULATION_SUMMARY_SCHEMA_VERSION,
+                                             blend_classifier_into_means, build_score_estimates,
                                              predict_game, select_primary_score)
 from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
                                        _missing_leagues_for_date, checkpoint_stage_for_minutes)
@@ -203,15 +204,27 @@ def test_legacy_live_forecast_keeps_original_and_adds_separate_exact_replay():
             payload={"summary_schema_version": 4, "model": {"name": "MLB_MATCHUP_V10"}},
             created_at=target.start_at - timedelta(hours=1),
         ))
+        session.add(Prediction(
+            game_id=target.id, model_version_id=legacy_model.id, input_hash="outdated-replay-input",
+            origin="HISTORICAL_REPLAY", data_cutoff=target.start_at,
+            home_win_probability=.55, away_win_probability=.45,
+            home_expected_runs=4.8, away_expected_runs=4.0, confidence=.6,
+            payload={"summary_schema_version": SIMULATION_SUMMARY_SCHEMA_VERSION - 1,
+                     "coherence_valid": True, "engine": "INNING_RATE",
+                     "model": {"name": "MLB_HISTORICAL_REPLAY_OLD"}},
+            leakage_audit={"passed": True}, created_at=target.start_at + timedelta(hours=4),
+        ))
         session.flush()
 
         report = run_historical_replay(session, "MLB", limit=1)
         assert report["created"] == 1
         assert report["legacy_live_replayed"] == 1
+        assert report["outdated_replays_refreshed"] == 1
         card = game_cards(session, target.game_date, "MLB")[0]
         assert card["prediction"]["origin"] == "LIVE_PREGAME"
         assert card["prediction"]["evaluation"] is None
         assert card["replay_prediction"]["origin"] == "HISTORICAL_REPLAY"
+        assert card["replay_prediction"]["summary_schema_version"] == SIMULATION_SUMMARY_SCHEMA_VERSION
         assert card["replay_prediction"]["evaluation"]["simulation_count"] == settings.simulations
 
 

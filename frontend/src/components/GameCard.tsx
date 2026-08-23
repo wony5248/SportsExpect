@@ -5,7 +5,7 @@ import VerifiedRounded from '@mui/icons-material/VerifiedRounded'
 import AutoAwesomeRounded from '@mui/icons-material/AutoAwesomeRounded'
 import { fetchPersonalClaudeAnalysis } from '../lib/api'
 import { getAccessToken } from '../lib/auth'
-import type { Game, PersonalClaudeAnalysis, Team } from '../types'
+import type { Game, PersonalClaudeAnalysis, Prediction, Team } from '../types'
 
 const pct = (value: number) => `${Math.round(value * 100)}%`
 const pctFine = (value: number) => `${(value * 100).toFixed(1)}%`
@@ -30,8 +30,16 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const [personalAnalysis, setPersonalAnalysis] = useState<PersonalClaudeAnalysis | null>(null)
   const [personalBusy, setPersonalBusy] = useState(false)
   const [personalError, setPersonalError] = useState<string | null>(null)
-  const p = game.prediction
-  const coherent = Boolean(p && (p.summary_schema_version ?? 0) >= 2 && p.coherence_valid === true)
+  const storedPrediction = game.prediction
+  const replayPrediction = game.replay_prediction
+  // Keep a genuine pre-game forecast as the primary record, but let a current, leakage-audited
+  // replay provide the detailed archive card when that old record predates coherent summaries.
+  const p = isDetailedPrediction(storedPrediction)
+    ? storedPrediction
+    : isDetailedPrediction(replayPrediction) ? replayPrediction : storedPrediction
+  const coherent = isDetailedPrediction(p)
+  // Forecasts saved before the engine field was introduced all used the inning-rate simulator.
+  const engine = p?.engine ?? (coherent ? 'INNING_RATE' : undefined)
   const predictedScore = p ? ((p.summary_schema_version ?? 0) >= 10 && p.primary_score
     ? p.primary_score
     : selectRepresentativeScore(p)) : undefined
@@ -67,11 +75,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
       setPersonalBusy(false)
     }
   }
-  const resultComparison = completedGameComparison(game, expectedScore)
+  const resultComparison = completedGameComparison(game, p, expectedScore)
   const isReplay = p?.origin === 'HISTORICAL_REPLAY'
   const evaluation = p?.evaluation
-  const legacyReplay = !isReplay && !evaluation ? game.replay_prediction : null
-  const legacyReplayEvaluation = legacyReplay?.evaluation
   const verdicts = game.result && p && ranking ? marketVerdicts(p, game, ranking) : null
   const judgedVerdicts = verdicts?.filter((verdict) => verdict.hit != null) ?? []
   const verdictHits = judgedVerdicts.filter((verdict) => verdict.hit).length
@@ -82,8 +88,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           ? `한국 ${shortDate(game.date)} ${game.time ?? '시간 미정'} KST · 미국 현지 ${shortDate(game.venue_date)} · ${game.stadium ?? '구장 미정'}`
           : `${game.time ?? '시간 미정'} KST · ${game.stadium ?? '구장 미정'}`}</span>
         <Stack direction="row" spacing={.7}>
-          {isReplay && <Chip size="small" label="과거 재현 · 이닝 득점률 엔진" className="engine-chip replay" />}
-          {!isReplay && p?.engine === 'PLATE_APPEARANCE' && <Chip size="small" label="타석별 시뮬레이션 엔진" className="engine-chip plate" />}
+          {engine && <Chip size="small"
+            label={`${isReplay ? '과거 재현 · ' : ''}${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'} 시뮬레이션 엔진`}
+            className={`engine-chip${engine === 'PLATE_APPEARANCE' ? ' plate' : ''}${isReplay ? ' replay' : ''}`} />}
           <Chip size="small" label={game.freshness.status === 'FRESH' ? '최신' : '갱신 필요'} className={`freshness ${game.freshness.status.toLowerCase()}`} />
           <Chip size="small" label={game.status === 'SCHEDULED' ? '경기 예정' : game.status} className={`status ${game.status.toLowerCase()}`} />
         </Stack>
@@ -112,10 +119,6 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         {evaluation && <SimulationEvaluation evaluation={evaluation} title={isReplay
           ? '과거 재현 · 이닝 득점률 엔진에서 실제 결과가 나온 횟수'
           : undefined} />}
-        {legacyReplayEvaluation && <SimulationEvaluation
-          evaluation={legacyReplayEvaluation}
-          title="과거 재현 · 이닝 득점률 엔진에서 실제 결과가 나온 횟수"
-        />}
         {verdicts && verdicts.length > 0 && <Box className="market-verdicts">
           {verdicts.map((verdict) => <Box key={verdict.market} className={`market-verdict ${verdict.hit == null ? 'neutral' : verdict.hit ? 'hit' : 'miss'}`}>
             <span>{verdict.market}</span>
@@ -426,9 +429,13 @@ function predictionUnavailableMessage(game: Game, hasPrediction: boolean) {
   return '당시 저장된 경기 전 예측이 없습니다. 누수 방지 조건을 통과한 과거 재현이 생성되면 실제 결과와 비교해 표시합니다.'
 }
 
-function completedGameComparison(game: Game, expectedScore: { away: number; home: number } | undefined) {
+function isDetailedPrediction(prediction: Prediction | null): prediction is Prediction {
+  return Boolean(prediction && (prediction.summary_schema_version ?? 0) >= 2 && prediction.coherence_valid === true)
+}
+
+function completedGameComparison(game: Game, prediction: Prediction | null,
+                                 expectedScore: { away: number; home: number } | undefined) {
   const result = game.result
-  const prediction = game.prediction
   if (!result || !prediction || !expectedScore) return null
   const predictedHome = prediction.home_win_probability >= prediction.away_win_probability
   const actualWinner = result.home_score === result.away_score
