@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import joinedload, Session
 
 from backend.app.collectors.kbo import KboClient
@@ -202,9 +203,11 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
         games = session.scalars(query).all()
         model_runtime = load_champion_runtime(session, league)
         # Seed any team that has no profile yet, then read them all back, so a bullpen update
-        # made since the last refresh reaches this slate's predictions.
-        seed_league(session, league, target_date)
-        bullpen_profiles = load_profiles(session, league)
+        # made since the last refresh reaches this slate's predictions. Both are optional
+        # enrichments: if their tables are not migrated yet the slate still gets predictions.
+        bullpen_profiles = _optional(
+            lambda: (seed_league(session, league, target_date), load_profiles(session, league))[1],
+            {}, "bullpen profiles", errors)
         all_day_games = session.scalars(select(Game).where(Game.game_date == target_date, Game.league == league)).all()
         team_ids = {team_id for day_game in all_day_games for team_id in (day_game.home_team_id, day_game.away_team_id)}
         stats_by_team = {team_id: latest_team_stat(session, team_id, target_date) for team_id in team_ids}
@@ -239,7 +242,9 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 model_runtime=model_runtime,
                 bullpens={"home": bullpen_profiles.get(game.home_team_id),
                           "away": bullpen_profiles.get(game.away_team_id)},
-                lineup_tables=_lineup_split_tables(session, game, league, target_date.year, lineups),
+                lineup_tables=_optional(
+                    lambda: _lineup_split_tables(session, game, league, target_date.year, lineups),
+                    {}, "batter splits", errors),
             )
             save_prediction(
                 session, game, result, stage=checkpoint_stage or _prediction_stage(game, captured_at),
@@ -384,6 +389,20 @@ def _team_key(name: str) -> str:
     return aliases.get(compact, compact)
 
 
+def _optional(action: Callable[[], Any], default: Any, label: str, errors: list[str]) -> Any:
+    """Run an optional enrichment, degrading instead of taking the whole refresh down.
+
+    Bullpen profiles and batter splits live in tables added after the core schema. Until a
+    deployment has run those migrations the queries fail, and a slate with no predictions is
+    far worse than a slate predicted by the inning-rate model.
+    """
+    try:
+        return action()
+    except SQLAlchemyError as exc:
+        errors.append(f"{label} 사용 불가(마이그레이션 대기 중일 수 있음): {type(exc).__name__}")
+        return default
+
+
 def _collect_batter_splits(client: KboClient | MlbClient, entries: list[dict[str, Any]],
                            season: int, league: str, errors: list[str]) -> None:
     """Fetch base-state splits for lineup hitters we have not stored this season yet.
@@ -394,8 +413,14 @@ def _collect_batter_splits(client: KboClient | MlbClient, entries: list[dict[str
     player_ids = {str(entry["player_id"]) for entry in entries if entry.get("player_id")}
     if not player_ids:
         return
-    with session_scope() as session:
-        stored = set(load_batter_splits(session, league, season, sorted(player_ids)))
+
+    def stored_ids() -> set[str]:
+        with session_scope() as session:
+            return set(load_batter_splits(session, league, season, sorted(player_ids)))
+
+    stored = _optional(stored_ids, None, "batter splits", errors)
+    if stored is None:
+        return
     missing = sorted(player_ids - stored)
     if not missing:
         return
@@ -407,8 +432,13 @@ def _collect_batter_splits(client: KboClient | MlbClient, entries: list[dict[str
     )
     if not source or not source.data:
         return
-    with session_scope() as session:
-        upsert_batter_splits(session, league, season, source.data, source.source_url, source.collected_at)
+
+    def store() -> bool:
+        with session_scope() as session:
+            upsert_batter_splits(session, league, season, source.data, source.source_url, source.collected_at)
+        return True
+
+    _optional(store, False, "batter splits", errors)
 
 
 def _lineup_split_tables(session: Session, game: Game, league: str, season: int,

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import Text, create_engine, event, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from backend.app.config import KST, database_url_from_environment
 from backend.app.database.base import Base
@@ -25,7 +26,7 @@ from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient
 from backend.app.collectors.odds import _consensus_event
 from backend.app.services.feature_engineering import _effective_lineup_ops, _lineup_matchup_summary
 from backend.app.services.refresh import (_market_event_date, _market_refresh_due, _months_for_recent,
-                                          _prediction_stage, _recent_by_team)
+                                          _optional, _prediction_stage, _recent_by_team)
 from backend.app.services.batting import SINGLE, STATE_INDEX, build_batter_table
 from backend.app.services.simulation import simulate_scores
 from backend.app.services.prediction import (blend_classifier_into_means, build_score_estimates,
@@ -404,6 +405,18 @@ def test_plate_engine_matches_expected_runs_and_obeys_the_ninth_inning_rules():
 
     # One lineup without collected splits is enough to fall back to the inning-rate model.
     assert simulate_scores(4.8, 4.2, 5_000, 21, league="MLB", home_lineup=lineup)["engine"] == "INNING_RATE"
+
+
+def test_optional_enrichment_degrades_instead_of_failing_the_refresh():
+    errors: list[str] = []
+    # A table that has not been migrated yet must not take the whole slate down with it.
+    missing_table = OperationalError("select 1", {}, Exception("no such table: team_bullpen"))
+    assert _optional(lambda: (_ for _ in ()).throw(missing_table), {}, "bullpen profiles", errors) == {}
+    assert errors and "bullpen profiles" in errors[0]
+    # A real programming error is not a database problem and must still surface.
+    with pytest.raises(ZeroDivisionError):
+        _optional(lambda: 1 / 0, {}, "bullpen profiles", errors)
+    assert _optional(lambda: {"ok": 1}, {}, "bullpen profiles", errors) == {"ok": 1}
 
 
 def test_dense_intervals_are_tighter_than_central_80_band():
