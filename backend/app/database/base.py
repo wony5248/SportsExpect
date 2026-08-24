@@ -51,6 +51,7 @@ def init_db() -> None:
                 "fip": "FLOAT", "k_bb_rate": "FLOAT", "rest_days": "INTEGER",
                 "recent_pitches": "INTEGER", "handedness": "VARCHAR(4)", "opponent_games": "INTEGER",
                 "opponent_innings": "FLOAT", "opponent_era": "FLOAT", "opponent_whip": "FLOAT",
+                "advanced": "JSON DEFAULT '{}'",
             },
             "lineups": {
                 "opponent_pitcher_id": "VARCHAR(20)", "matchup_plate_appearances": "INTEGER",
@@ -58,6 +59,7 @@ def init_db() -> None:
                 "matchup_triples": "INTEGER", "matchup_home_runs": "INTEGER", "matchup_walks": "INTEGER",
                 "matchup_hit_by_pitch": "INTEGER", "matchup_strikeouts": "INTEGER",
                 "matchup_avg": "FLOAT", "matchup_obp": "FLOAT", "matchup_slg": "FLOAT", "matchup_ops": "FLOAT",
+                "advanced": "JSON DEFAULT '{}'",
             },
             "runtime_secrets": {"model": "VARCHAR(80)"},
             "game_starters": {

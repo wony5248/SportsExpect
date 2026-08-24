@@ -57,6 +57,7 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
     residual = context.get("team_residuals") or {}
     residual_home = residual.get("home") or {}
     residual_away = residual.get("away") or {}
+    strength = context.get("team_strength") or {}
     pregame = context.get("pregame") or {}
     bullpen = pregame.get("bullpen") or {}
     schedule = pregame.get("schedule") or {}
@@ -68,6 +69,10 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
      home_bvp_adjustment, away_bvp_adjustment, home_bvp_coverage, away_bvp_coverage,
      home_bvp_pa, away_bvp_pa) = _lineup_feature(lineups or [])
     platoon_diff, home_platoon, away_platoon, home_platoon_coverage, away_platoon_coverage = _platoon_feature(lineups or [])
+    statcast = _lineup_statcast_features(lineups or [])
+    home_park, away_park, park_events = _dynamic_park_factors(pregame, lineups or [])
+    home_pitch_quality = _pitcher_statcast(home_pitcher)
+    away_pitch_quality = _pitcher_statcast(away_pitcher)
     park_factors = MLB_PARK_FACTORS if league == "MLB" else KBO_PARK_FACTORS
     opponent_name = getattr(getattr(away, "team", None), "name", None)
     matchup = _matchup(home, opponent_name)
@@ -76,6 +81,13 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
     return {
         "league_average_runs": float(context.get("league_average_runs") or (5.15 if league == "KBO" else 4.45)),
         "season_win_rate_diff": _v(home.win_rate, .5) - _v(away.win_rate, .5),
+        "strength_elo_diff": _v(strength.get("elo_diff"), 0.0),
+        "strength_srs_diff": _v(strength.get("srs_diff"), 0.0),
+        "pythagorean_diff": _v(strength.get("pythagorean_diff"), 0.0),
+        "schedule_strength_diff": _v(strength.get("schedule_strength_diff"), 0.0),
+        "adjusted_offense_diff": _v(strength.get("adjusted_offense_diff"), 0.0),
+        "adjusted_defense_edge": _v(strength.get("adjusted_defense_edge"), 0.0),
+        "team_strength_available": bool(strength.get("available")),
         "recent_10_win_rate_diff": _v(h_recent.get("win_rate"), .5) - _v(a_recent.get("win_rate"), .5),
         "recent_run_diff": _v(h_recent.get("avg_runs"), _v(home.runs_per_game, 4.5)) - _v(a_recent.get("avg_runs"), _v(away.runs_per_game, 4.5)),
         "recent_run_allowed_diff": _v(a_recent.get("avg_runs_allowed"), _v(away.runs_allowed_per_game, 4.5)) - _v(h_recent.get("avg_runs_allowed"), _v(home.runs_allowed_per_game, 4.5)),
@@ -137,7 +149,10 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         "static_park_factor": park_factors.get(stadium or "", 1.0),
         "weather_run_multiplier": _v((pregame.get("weather") or {}).get("run_multiplier"), 1.0),
         "weather_available": bool((pregame.get("weather") or {}).get("available")),
-        "park_factor": park_factors.get(stadium or "", 1.0) * _v((pregame.get("weather") or {}).get("run_multiplier"), 1.0),
+        "home_park_factor": home_park or park_factors.get(stadium or "", 1.0),
+        "away_park_factor": away_park or park_factors.get(stadium or "", 1.0),
+        "park_event_factors": park_events,
+        "park_factor": ((home_park + away_park) / 2 if home_park and away_park else park_factors.get(stadium or "", 1.0)) * _v((pregame.get("weather") or {}).get("run_multiplier"), 1.0),
         "lineup_strength_diff": lineup_diff,
         "home_lineup_index": home_lineup_index,
         "away_lineup_index": away_lineup_index,
@@ -162,6 +177,18 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
             - _recent_pitcher_deviation(away_pitcher, "k_bb_rate")
         ),
         "starter_recent_form_available": bool((getattr(home_pitcher, "recent", None) or {}).get("available") and (getattr(away_pitcher, "recent", None) or {}).get("available")),
+        "starter_xera_diff": _paired_nested_difference(away_pitch_quality, home_pitch_quality, "xera"),
+        "starter_xwoba_diff": _paired_nested_difference(away_pitch_quality, home_pitch_quality, "xwoba"),
+        "starter_velocity_trend_edge": _v(home_pitch_quality.get("velocity_change"), 0.0) - _v(away_pitch_quality.get("velocity_change"), 0.0),
+        "starter_arsenal_stability_edge": _v(away_pitch_quality.get("usage_change"), 0.0) - _v(home_pitch_quality.get("usage_change"), 0.0),
+        "statcast_pitcher_available": bool(home_pitch_quality.get("available") and away_pitch_quality.get("available")),
+        "lineup_xwoba_diff": statcast["home_xwoba"] - statcast["away_xwoba"],
+        "lineup_pitch_type_edge": statcast["home_pitch_matchup"] - statcast["away_pitch_matchup"],
+        "lineup_frv_edge": statcast["home_frv"] - statcast["away_frv"],
+        "lineup_oaa_edge": statcast["home_oaa"] - statcast["away_oaa"],
+        "catcher_framing_edge": statcast["home_framing"] - statcast["away_framing"],
+        "battery_edge": statcast["home_battery"] - statcast["away_battery"],
+        "statcast_lineup_coverage": statcast["coverage"],
         "fielding_edge": _fielding_index(home) - _fielding_index(away),
         "baserunning_edge": _baserunning_index(home) - _baserunning_index(away),
         "catcher_control_edge": _catcher_index(home) - _catcher_index(away),
@@ -217,6 +244,15 @@ def logistic_probability(features: dict[str, float | bool]) -> float:
     matchup_reliability = _clip(float(features["head_to_head_games"]) / 8, 0, 1)
     z = 0.14
     z += 0.55 * _logit(.5 + float(features["season_win_rate_diff"]) / 2)
+    # Opponent-adjusted signals are deliberately conservative until the walk-forward trainer
+    # has enough seasons to learn their coefficients. They reduce schedule-strength bias without
+    # allowing several correlated standings measures to overwhelm starter and lineup evidence.
+    strength_reliability = 1.0 if features.get("team_strength_available") else 0.0
+    z += strength_reliability * .0010 * float(features.get("strength_elo_diff", 0))
+    z += strength_reliability * .025 * float(features.get("strength_srs_diff", 0))
+    z += strength_reliability * .30 * float(features.get("pythagorean_diff", 0))
+    z += strength_reliability * .018 * float(features.get("adjusted_offense_diff", 0))
+    z += strength_reliability * .018 * float(features.get("adjusted_defense_edge", 0))
     z += recent_reliability * 0.60 * float(features["recent_10_win_rate_diff"])
     z += recent_reliability * 0.045 * float(features["recent_run_diff"])
     z += recent_reliability * 0.040 * float(features["recent_run_allowed_diff"])
@@ -245,6 +281,17 @@ def logistic_probability(features: dict[str, float | bool]) -> float:
     z += lineup_reliability * 0.12 * float(features["lineup_platoon_diff"])
     z += starter_reliability * 0.025 * float(features["starter_recent_era_diff"])
     z += starter_reliability * 0.14 * float(features["starter_recent_k_bb_diff"])
+    if features.get("statcast_pitcher_available"):
+        z += starter_reliability * .055 * float(features.get("starter_xera_diff", 0))
+        z += starter_reliability * .90 * float(features.get("starter_xwoba_diff", 0))
+        z += starter_reliability * .035 * float(features.get("starter_velocity_trend_edge", 0))
+        z += starter_reliability * .10 * float(features.get("starter_arsenal_stability_edge", 0))
+    z += lineup_reliability * .70 * float(features.get("lineup_xwoba_diff", 0))
+    z += lineup_reliability * .20 * float(features.get("lineup_pitch_type_edge", 0))
+    z += lineup_reliability * .020 * float(features.get("lineup_frv_edge", 0))
+    z += lineup_reliability * .012 * float(features.get("lineup_oaa_edge", 0))
+    z += lineup_reliability * .018 * float(features.get("catcher_framing_edge", 0))
+    z += lineup_reliability * .012 * float(features.get("battery_edge", 0))
     z += 0.025 * float(features["fielding_edge"])
     z += 0.035 * float(features["baserunning_edge"])
     z += 0.020 * float(features["catcher_control_edge"])
@@ -321,7 +368,9 @@ def expected_runs(home: Any, away: Any, home_pitcher: Any | None, away_pitcher: 
         + .06 * float(advanced.get("home_lineup_platoon_index", 0))
         + .025 * float(advanced.get("baserunning_edge", 0))
         + .018 * float(advanced.get("fielding_edge", 0))
-        + .012 * float(advanced.get("catcher_control_edge", 0)), -.12, .12))
+        + .012 * float(advanced.get("catcher_control_edge", 0))
+        + .030 * float(advanced.get("adjusted_offense_diff", 0))
+        + .022 * float(advanced.get("adjusted_defense_edge", 0)), -.16, .16))
     away_context = math.exp(_clip(
         .08 * float(advanced.get("home_bullpen_fatigue", 0))
         - .04 * float(advanced.get("away_schedule_fatigue", 0))
@@ -329,10 +378,24 @@ def expected_runs(home: Any, away: Any, home_pitcher: Any | None, away_pitcher: 
         + .06 * float(advanced.get("away_lineup_platoon_index", 0))
         - .025 * float(advanced.get("baserunning_edge", 0))
         - .018 * float(advanced.get("fielding_edge", 0))
-        - .012 * float(advanced.get("catcher_control_edge", 0)), -.12, .12))
+        - .012 * float(advanced.get("catcher_control_edge", 0))
+        - .030 * float(advanced.get("adjusted_offense_diff", 0))
+        - .022 * float(advanced.get("adjusted_defense_edge", 0)), -.16, .16))
     home_field, away_field = HOME_FIELD_MULTIPLIERS.get(league or "MLB", HOME_FIELD_MULTIPLIERS["MLB"])
-    home_expected = home_base * home_batting * away_pitching * park_factor * home_field * lineup_home * recent_home * bullpen_home * matchup_home * home_context
-    away_expected = away_base * away_batting * home_pitching * park_factor * away_field * lineup_away * recent_away * bullpen_away * matchup_away * away_context
+    home_park = _v(advanced.get("home_park_factor"), park_factor) * _v(advanced.get("weather_run_multiplier"), 1.0)
+    away_park = _v(advanced.get("away_park_factor"), park_factor) * _v(advanced.get("weather_run_multiplier"), 1.0)
+    statcast_home = math.exp(_clip(.55 * float(advanced.get("lineup_xwoba_diff", 0))
+                                  + .12 * float(advanced.get("lineup_pitch_type_edge", 0)), -.10, .10))
+    statcast_away = math.exp(_clip(-.55 * float(advanced.get("lineup_xwoba_diff", 0))
+                                  - .12 * float(advanced.get("lineup_pitch_type_edge", 0)), -.10, .10))
+    defense_home = math.exp(_clip(.012 * float(advanced.get("lineup_frv_edge", 0))
+                                 + .008 * float(advanced.get("catcher_framing_edge", 0))
+                                 + .006 * float(advanced.get("battery_edge", 0)), -.07, .07))
+    defense_away = math.exp(_clip(-.012 * float(advanced.get("lineup_frv_edge", 0))
+                                 - .008 * float(advanced.get("catcher_framing_edge", 0))
+                                 - .006 * float(advanced.get("battery_edge", 0)), -.07, .07))
+    home_expected = home_base * home_batting * away_pitching * home_park * home_field * lineup_home * recent_home * bullpen_home * matchup_home * home_context * statcast_home * defense_home
+    away_expected = away_base * away_batting * home_pitching * away_park * away_field * lineup_away * recent_away * bullpen_away * matchup_away * away_context * statcast_away * defense_away
     return _clip(home_expected, .6, 10.0), _clip(away_expected, .6, 10.0), league_avg
 
 
@@ -431,6 +494,102 @@ def _platoon_feature(lineups: list[Any]) -> tuple[float, float, float, int, int]
     return _clip(home - away, -.8, .8), _clip(home, -.5, .5), _clip(away, -.5, .5), len(values["home"]), len(values["away"])
 
 
+def _lineup_statcast_features(lineups: list[Any]) -> dict[str, float]:
+    output: dict[str, float] = {"coverage": 0.0}
+    coverage = []
+    for side in ("home", "away"):
+        xwoba: list[float] = []
+        pitch_matchups: list[float] = []
+        frv: list[float] = []
+        oaa: list[float] = []
+        framing: list[float] = []
+        battery: list[float] = []
+        side_rows = [item for item in lineups if getattr(item, "side", None) == side]
+        for item in side_rows:
+            advanced = getattr(item, "advanced", None) or {}
+            expected = advanced.get("expected") or {}
+            pa = _v(expected.get("pa"), 0.0)
+            if expected.get("xwoba") is not None:
+                weight = min(1.0, pa / (pa + 100.0))
+                xwoba.append(.320 + (float(expected["xwoba"]) - .320) * weight)
+            matchup_rows = list((advanced.get("pitch_type_matchup") or {}).values())
+            valid_matchups = [row for row in matchup_rows if row.get("xwoba") is not None]
+            if valid_matchups:
+                values = []
+                for row in valid_matchups:
+                    pitches = _v(row.get("pitches"), 0.0)
+                    weight = min(.75, pitches / (pitches + 80.0))
+                    values.append(.320 + (float(row["xwoba"]) - .320) * weight)
+                pitch_matchups.append(sum(values) / len(values))
+            fielding = advanced.get("fielding") or {}
+            outs = _v(fielding.get("outs"), 0.0)
+            if outs > 0 and fielding.get("fielding_runs") is not None:
+                frv.append(_clip(float(fielding["fielding_runs"]) * 1000 / max(outs, 250), -20, 20))
+            if outs > 0 and fielding.get("outs_above_average") is not None:
+                oaa.append(_clip(float(fielding["outs_above_average"]) * 1000 / max(outs, 250), -20, 20))
+            if str(getattr(item, "position", "")).upper() == "C":
+                if outs > 0 and fielding.get("framing_runs") is not None:
+                    framing.append(_clip(float(fielding["framing_runs"]) * 1000 / max(outs, 250), -20, 20))
+                battery_row = advanced.get("battery") or {}
+                pitches = _v(battery_row.get("pitches"), 0.0)
+                value = battery_row.get("pitcher_run_value_per_100")
+                if value is not None and pitches:
+                    battery.append(float(value) * min(.70, pitches / (pitches + 300.0)))
+        output[f"{side}_xwoba"] = sum(xwoba) / len(xwoba) if xwoba else .320
+        output[f"{side}_pitch_matchup"] = sum(pitch_matchups) / len(pitch_matchups) if pitch_matchups else .320
+        output[f"{side}_frv"] = sum(frv) / max(9, len(frv))
+        output[f"{side}_oaa"] = sum(oaa) / max(9, len(oaa))
+        output[f"{side}_framing"] = sum(framing) if framing else 0.0
+        output[f"{side}_battery"] = sum(battery) if battery else 0.0
+        coverage.append(len(xwoba) / 9)
+    output["coverage"] = min(coverage) if coverage else 0.0
+    return output
+
+
+def _dynamic_park_factors(pregame: dict[str, Any], lineups: list[Any]) -> tuple[float, float, dict[str, Any]]:
+    park = pregame.get("park_factors") or {}
+    by_hand = park.get("by_batter_hand") or {}
+    if not park.get("available") or not by_hand.get("ALL"):
+        return 0.0, 0.0, {}
+    event_output: dict[str, Any] = {}
+    composites = {}
+    for side in ("home", "away"):
+        rows = [item for item in lineups if getattr(item, "side", None) == side]
+        factors = []
+        for item in rows or [None]:
+            hand = str(getattr(item, "batting_side", "") or "").upper() if item else ""
+            if hand == "S" and by_hand.get("L") and by_hand.get("R"):
+                value = {key: (_v(by_hand["L"].get(key), 1.0) + _v(by_hand["R"].get(key), 1.0)) / 2
+                         for key in ("runs", "woba", "double", "triple", "home_run")}
+            else:
+                value = by_hand.get(hand) or by_hand["ALL"]
+            factors.append(value)
+        averaged = {key: sum(_v(value.get(key), 1.0) for value in factors) / len(factors)
+                    for key in ("runs", "woba", "double", "triple", "home_run")}
+        event_output[side] = averaged
+        composites[side] = (.50 * averaged["runs"] + .20 * averaged["woba"] +
+                            .18 * averaged["home_run"] + .09 * averaged["double"] + .03 * averaged["triple"])
+    return composites["home"], composites["away"], event_output
+
+
+def _pitcher_statcast(pitcher: Any | None) -> dict[str, Any]:
+    advanced = getattr(pitcher, "advanced", None) or {}
+    expected = advanced.get("expected") or {}
+    trend = advanced.get("pitch_trend") or {}
+    return {
+        "available": expected.get("xera") is not None or expected.get("xwoba") is not None,
+        "pa": expected.get("pa"), "xera": expected.get("xera"), "xwoba": expected.get("xwoba"),
+        "velocity_change": trend.get("fastball_velocity_change") if trend.get("available") else None,
+        "usage_change": trend.get("arsenal_usage_change") if trend.get("available") else None,
+    }
+
+
+def _paired_nested_difference(first: dict[str, Any], second: dict[str, Any], field: str) -> float:
+    if first.get(field) is None or second.get(field) is None:
+        return 0.0
+    return float(first[field]) - float(second[field])
+
+
 def _quality_start_rate(pitcher: Any | None) -> float:
     starts = _v(getattr(pitcher, "games", None), 0.0)
     quality = _v(getattr(pitcher, "quality_starts", None), 0.0)
@@ -454,6 +613,10 @@ def _effective_pitcher_era(pitcher: Any | None, team_era: float) -> float:
     era, _ = _opponent_pitcher_era(pitcher)
     fip = _v(getattr(pitcher, "fip", None), era)
     skill_estimate = .58 * era + .42 * fip
+    statcast = _pitcher_statcast(pitcher)
+    if statcast.get("xera") is not None:
+        expected_weight = min(.30, _v(statcast.get("pa"), 0.0) / (_v(statcast.get("pa"), 0.0) + 500.0))
+        skill_estimate = (1 - expected_weight) * skill_estimate + expected_weight * _clip(float(statcast["xera"]), 1.0, 9.0)
     recent = getattr(pitcher, "recent", None) or {}
     recent_era = recent.get("era") if recent.get("available") else None
     recent_starts = int(recent.get("starts") or 0)

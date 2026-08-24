@@ -226,6 +226,9 @@ class PitcherStat(Base):
     opponent_whip: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Leakage-safe starts strictly before this game (form, workload and derived pitch limit).
     recent: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # Pregame Statcast quality, arsenal trend and pitcher-catcher history. Kept as a versioned
+    # JSON snapshot because availability and fields differ by league and source date.
+    advanced: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     source: Mapped[str] = mapped_column(String(80))
     source_url: Mapped[str] = mapped_column(Text)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
@@ -262,6 +265,8 @@ class LineupEntry(Base):
     matchup_obp: Mapped[float | None] = mapped_column(Float, nullable=True)
     matchup_slg: Mapped[float | None] = mapped_column(Float, nullable=True)
     matchup_ops: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Expected hitting, pitch-type matchup, OAA/FRV and catcher framing for this starter.
+    advanced: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     confirmed: Mapped[bool] = mapped_column(default=False)
     source: Mapped[str] = mapped_column(String(80))
     source_url: Mapped[str] = mapped_column(Text)

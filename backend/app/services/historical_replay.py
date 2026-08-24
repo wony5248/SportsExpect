@@ -16,6 +16,7 @@ from backend.app.services.prediction import SIMULATION_SUMMARY_SCHEMA_VERSION, p
 from backend.app.services.prediction_evaluation import evaluate_game_predictions
 from backend.app.services.archived_starters import starter_view
 from backend.app.services.team_residuals import TeamResidualHistory
+from backend.app.services.team_strength import TeamStrengthHistory
 from backend.app.services.probability_calibration import LeagueProbabilityCalibrationHistory
 
 
@@ -38,6 +39,7 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
         ).where(Game.league == league, Game.status == "FINAL").order_by(Game.start_at, Game.id)
     ).all()
     residual_history = TeamResidualHistory.from_session(session, league)
+    strength_history = TeamStrengthHistory.from_session(session, league)
     archived: dict[int, list[GameStarter]] = defaultdict(list)
     for record in session.scalars(select(GameStarter).join(Game, Game.id == GameStarter.game_id)
                                   .where(Game.league == league)).all():
@@ -142,6 +144,7 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             {"home_games_today": 1, "away_games_today": 1,
              "league_average_runs": league_average_runs,
              "team_residuals": residual_history.context_for(game),
+             "team_strength": strength_history.context_for(game),
              "probability_calibration": probability_history.context_for(game),
              "market": market_context},
             model_runtime=None, bullpens={}, lineup_tables={},

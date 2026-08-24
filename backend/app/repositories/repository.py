@@ -287,8 +287,10 @@ def upsert_pitcher(session: Session, game: Game, raw: dict[str, Any], source_url
     values = {key: raw.get(key) for key in (
         "player_id", "name", "confirmed", "era", "whip", "war", "games", "avg_start_innings",
         "quality_starts", "fip", "k_bb_rate", "rest_days", "recent_pitches", "handedness",
-        "opponent_games", "opponent_innings", "opponent_era", "opponent_whip", "recent",
+        "opponent_games", "opponent_innings", "opponent_era", "opponent_whip", "recent", "advanced",
     )}
+    values["recent"] = raw.get("recent") or {}
+    values["advanced"] = raw.get("advanced") or {}
     values.update(source=f"{game.league} official starter analysis", source_url=source_url, collected_at=collected_at)
     if stat is None:
         stat = PitcherStat(game_id=game.id, side=raw["side"], **values)
@@ -341,6 +343,7 @@ def replace_lineups(session: Session, game: Game, entries: list[dict[str, Any]],
             matchup_home_runs=raw.get("matchup_home_runs"), matchup_walks=raw.get("matchup_walks"),
             matchup_hit_by_pitch=raw.get("matchup_hit_by_pitch"), matchup_strikeouts=raw.get("matchup_strikeouts"),
             matchup_obp=raw.get("matchup_obp"), matchup_slg=raw.get("matchup_slg"), matchup_ops=raw.get("matchup_ops"),
+            advanced=raw.get("advanced") or {},
             source=f"{game.league} official lineup + batter/pitcher matchup" if matchup_source_url else f"{game.league} official lineup",
             source_url=entry_source_url, collected_at=collected_at,
         )

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from backend.app.models import Game
 
 
-CONTEXT_POLICY_VERSION = 1
+CONTEXT_POLICY_VERSION = 2
 
 
 def prediction_context(session: Session, game: Game) -> dict[str, Any]:

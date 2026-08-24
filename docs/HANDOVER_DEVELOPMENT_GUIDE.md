@@ -324,6 +324,9 @@ from net._http_response order by created desc limit 30;
 - 시장 배당은 기준점 비교와 표시용이며 팀 능력 추정 입력으로 사용하지 않는다.
 - 55% 미만 승률은 단일 조건부 대표 점수로 단정하지 않고 양 팀 승리 시나리오를 함께 표시한다.
 - 실제 라인업 미확정, 날씨·불펜 데이터 부족은 신뢰도를 낮추지만 임의 값을 확정 정보처럼 만들지 않는다.
+- Elo/SRS/Pythagorean과 상대 보정 공격·수비는 `team_strength.py`에서 목표 경기 전 결과만으로 계산한다.
+- MLB Statcast와 양 리그 불펜 workload는 `advanced`/`pregame_context` 경기 전 스냅샷으로 저장하며, 과거 replay에 현재 값을 역으로 붙이지 않는다.
+- 현재 시뮬레이션 요약 스키마는 25, 학습 특징 스키마는 7이다.
 - 생성형 AI는 공용 기본 예측을 만들지 않는다. 로그인 사용자의 선택형 개인 분석만 별도 실행한다.
 - 자동 승격 전에 `/api/v1/admin/model/dry-run?league=KBO|MLB`로 DB를 변경하지 않는 challenger 평가와 상수 특징 목록을 확인할 수 있다.
 

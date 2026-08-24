@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import csv
 from datetime import date, datetime, timedelta
+import io
+import json
+import re
 from typing import Any
 
 import httpx
@@ -29,6 +33,8 @@ class MlbClient:
             headers={"User-Agent": "DugoutLab/0.2 (+low-frequency educational collector)"},
         )
         self._feed_cache: dict[str, SourcePayload] = {}
+        self._savant_cache: dict[tuple[str, tuple[tuple[str, str], ...]], SourcePayload] = {}
+        self._pitch_trend_cache: dict[tuple[str, date], dict[str, Any]] = {}
 
     def close(self) -> None:
         self.client.close()
@@ -42,6 +48,191 @@ class MlbClient:
         if game_pk not in self._feed_cache:
             self._feed_cache[game_pk] = self._get_json(f"/api/v1.1/game/{game_pk}/feed/live")
         return self._feed_cache[game_pk]
+
+    def _savant_rows(self, path: str, params: dict[str, Any], variables: tuple[str, ...]) -> SourcePayload:
+        key = (path, tuple(sorted((str(name), str(value)) for name, value in params.items())))
+        if key in self._savant_cache:
+            return self._savant_cache[key]
+        response = self.client.get(f"https://baseballsavant.mlb.com{path}", params=params)
+        response.raise_for_status()
+        rows: list[dict[str, Any]] | None = None
+        for variable in variables:
+            match = re.search(rf"\b(?:var|const)\s+{re.escape(variable)}\s*=\s*", response.text)
+            if not match:
+                continue
+            try:
+                decoded, _ = json.JSONDecoder().raw_decode(response.text[match.end():].lstrip())
+            except json.JSONDecodeError:
+                continue
+            if isinstance(decoded, list):
+                rows = decoded
+                break
+        if rows is None:
+            raise ValueError(f"Baseball Savant embedded data missing: {path}")
+        payload = SourcePayload(rows, str(response.url), datetime.now(KST))
+        self._savant_cache[key] = payload
+        return payload
+
+    def statcast_expected(self, season: int, player_type: str) -> SourcePayload:
+        payload = self._savant_rows("/leaderboard/expected_statistics", {
+            "type": player_type, "year": season, "position": "", "team": "", "min": 1,
+        }, ("data", "leaderboardData"))
+        output = {}
+        for row in payload.data:
+            player_id = row.get("entity_id") or row.get("player_id")
+            if player_id is None:
+                continue
+            output[str(player_id)] = {
+                "pa": _as_int(row.get("pa"), 0) or 0,
+                "xwoba": _as_float(row.get("est_woba")),
+                "woba": _as_float(row.get("woba")),
+                "xera": _as_float(row.get("xera")),
+                "era": _as_float(row.get("era")),
+                "hard_hit_percent": _as_float(row.get("hard_hit_percent")),
+                "source": "BASEBALL_SAVANT_EXPECTED_STATS",
+            }
+        return SourcePayload(output, payload.source_url, payload.collected_at)
+
+    def statcast_fielding(self, season: int) -> SourcePayload:
+        frv = self._savant_rows("/leaderboard/fielding-run-value", {
+            "gameType": "Regular", "minInnings": 1, "minResults": 1, "position": 0,
+            "seasonEnd": season, "seasonStart": season, "type": "fielder",
+        }, ("data", "leaderboardData"))
+        oaa = self._savant_rows("/leaderboard/outs_above_average", {
+            "type": "Fielder", "year": season, "team": "", "range": "year", "min": "q",
+        }, ("data", "leaderboardData"))
+        output: dict[str, dict[str, Any]] = {}
+        for row in frv.data:
+            player_id = row.get("id") or row.get("entity_id")
+            if player_id is None:
+                continue
+            output[str(player_id)] = {
+                "fielding_runs": _as_float(row.get("total_runs")),
+                "range_runs": _as_float(row.get("range_runs")),
+                "arm_runs": _as_float(row.get("arm_runs")),
+                "framing_runs": _as_float(row.get("framing_runs")),
+                "blocking_runs": _as_float(row.get("blocking_runs")),
+                "throwing_runs": _as_float(row.get("throwing_runs")),
+                "outs": _as_int(row.get("outs_total"), 0) or 0,
+            }
+        for row in oaa.data:
+            player_id = row.get("entity_id") or row.get("id")
+            if player_id is not None:
+                output.setdefault(str(player_id), {})["outs_above_average"] = _as_float(row.get("outs_above_average"))
+        for value in output.values():
+            value["source"] = "BASEBALL_SAVANT_FRV_OAA"
+        return SourcePayload(output, f"{frv.source_url}, {oaa.source_url}", max(frv.collected_at, oaa.collected_at))
+
+    def statcast_park_factors(self, season: int) -> SourcePayload:
+        output: dict[str, dict[str, Any]] = {}
+        urls: list[str] = []
+        collected = datetime.now(KST)
+        for hand in ("", "L", "R"):
+            payload = self._savant_rows("/leaderboard/statcast-park-factors", {
+                "batSide": hand, "condition": "All", "parks": "mlb", "rolling": 3,
+                "stat": "index_wOBA", "type": "year", "year": season,
+            }, ("data", "leaderboardData"))
+            urls.append(payload.source_url); collected = max(collected, payload.collected_at)
+            for row in payload.data:
+                name = row.get("venue_name")
+                if not name:
+                    continue
+                sample = _as_int(row.get("n_pa"), 0) or 0
+                credibility = sample / (sample + 10000.0)
+                def factor(field: str) -> float:
+                    raw = _as_float(row.get(field))
+                    return round(1 + credibility * ((raw if raw is not None else 100) / 100 - 1), 4)
+                output.setdefault(name, {})[hand or "ALL"] = {
+                    "runs": factor("index_runs"), "woba": factor("index_woba"),
+                    "double": factor("index_2b"), "triple": factor("index_3b"),
+                    "home_run": factor("index_hr"), "plate_appearances": sample,
+                    "years": _as_int(row.get("year_range"), 3) or 3,
+                }
+        return SourcePayload(output, ", ".join(urls), collected)
+
+    def statcast_pitch_trend(self, player_id: str, boundary: date) -> SourcePayload:
+        cache_key = (str(player_id), boundary)
+        if cache_key in self._pitch_trend_cache:
+            data = self._pitch_trend_cache[cache_key]
+            return SourcePayload(data, str(data.get("source_url", "")), datetime.now(KST))
+        end = boundary - timedelta(days=1)
+        start = boundary - timedelta(days=46)
+        response = self.client.get("https://baseballsavant.mlb.com/statcast_search/csv", params={
+            "all": "true", "type": "pitcher", "player_type": "pitcher",
+            "game_date_gt": start.isoformat(), "game_date_lt": end.isoformat(),
+            "pitchers_lookup[]": str(player_id),
+        })
+        response.raise_for_status()
+        rows = list(csv.DictReader(io.StringIO(response.text.lstrip("\ufeff"))))
+        recent = [row for row in rows if _csv_date(row.get("game_date")) and
+                  (boundary - _csv_date(row.get("game_date"))).days <= 14]
+        baseline = [row for row in rows if _csv_date(row.get("game_date")) and
+                    15 <= (boundary - _csv_date(row.get("game_date"))).days <= 46]
+        recent_summary = _pitch_summary(recent)
+        baseline_summary = _pitch_summary(baseline)
+        catcher_history: dict[str, dict[str, float | int]] = {}
+        for catcher_id in {str(row.get("fielder_2")) for row in rows if row.get("fielder_2")}:
+            sample = [row for row in rows if str(row.get("fielder_2")) == catcher_id]
+            run_value = -sum(_as_float(row.get("delta_run_exp")) or 0.0 for row in sample)
+            catcher_history[catcher_id] = {"pitches": len(sample), "pitcher_run_value_per_100": round(100 * run_value / len(sample), 3)}
+        data = {
+            "available": len(recent) >= 40 and len(baseline) >= 40,
+            "recent_pitches": len(recent), "baseline_pitches": len(baseline),
+            "recent": recent_summary, "baseline": baseline_summary,
+            "fastball_velocity_change": _difference(recent_summary.get("fastball_velocity"), baseline_summary.get("fastball_velocity")),
+            "spin_change_percent": _percent_change(recent_summary.get("spin_rate"), baseline_summary.get("spin_rate")),
+            "movement_change": _difference(recent_summary.get("movement"), baseline_summary.get("movement")),
+            "arsenal_usage_change": _usage_change(recent_summary.get("pitches", {}), baseline_summary.get("pitches", {})),
+            "top_pitch_types": [name for name, _ in sorted((recent_summary.get("pitches") or {}).items(),
+                                                            key=lambda item: item[1].get("usage", 0), reverse=True)[:3]],
+            "catcher_history": catcher_history,
+            "cutoff": boundary.isoformat(), "source": "BASEBALL_SAVANT_PITCH_LEVEL", "source_url": str(response.url),
+        }
+        self._pitch_trend_cache[cache_key] = data
+        return SourcePayload(data, str(response.url), datetime.now(KST))
+
+    def statcast_lineup_context(self, entries: list[dict[str, Any]], game: dict[str, Any]) -> SourcePayload:
+        season = game["game_date"].year
+        expected = self.statcast_expected(season, "batter")
+        fielding = self.statcast_fielding(season)
+        trends = {}
+        urls = [expected.source_url, fielding.source_url]
+        for side in ("away", "home"):
+            pitcher_id = game.get(f"{side}_pitcher_id")
+            if pitcher_id:
+                trend = self.statcast_pitch_trend(str(pitcher_id), game.get("venue_date") or game["game_date"])
+                trends[side] = trend.data; urls.append(trend.source_url)
+        arsenal_maps: dict[str, dict[str, dict[str, Any]]] = {}
+        pitch_types = {pitch for trend in trends.values() for pitch in trend.get("top_pitch_types", [])}
+        for pitch_type in pitch_types:
+            payload = self._savant_rows("/leaderboard/pitch-arsenal-stats", {
+                "min": 10, "pitchType": pitch_type, "type": "batter", "year": season,
+            }, ("leaderboardData", "data"))
+            urls.append(payload.source_url)
+            arsenal_maps[pitch_type] = {str(row.get("player_id")): row for row in payload.data if row.get("player_id")}
+        output = {}
+        for entry in entries:
+            player_id = str(entry.get("player_id") or "")
+            opponent_side = "home" if entry.get("side") == "away" else "away"
+            trend = trends.get(opponent_side, {})
+            matchup = {}
+            for pitch_type in trend.get("top_pitch_types", []):
+                row = arsenal_maps.get(pitch_type, {}).get(player_id)
+                if row:
+                    matchup[pitch_type] = {
+                        "pitches": _as_int(row.get("pitches"), 0) or 0,
+                        "xwoba": _as_float(row.get("est_woba")),
+                        "run_value_per_100": _as_float(row.get("run_value_per_100")),
+                        "whiff_percent": _as_float(row.get("whiff_percent")),
+                    }
+            output[player_id] = {
+                "expected": expected.data.get(player_id, {}),
+                "fielding": fielding.data.get(player_id, {}),
+                "pitch_type_matchup": matchup,
+                "battery": (trend.get("catcher_history") or {}).get(player_id, {}) if entry.get("position") == "C" else {},
+                "source": "BASEBALL_SAVANT_PREGAME_V1",
+            }
+        return SourcePayload(output, ", ".join(dict.fromkeys(urls)), datetime.now(KST))
 
     def games(self, service_date: date) -> SourcePayload:
         games: dict[str, dict[str, Any]] = {}
@@ -159,6 +350,11 @@ class MlbClient:
     def starter_stats(self, game: dict[str, Any]) -> SourcePayload:
         output = []
         urls = []
+        try:
+            expected = self.statcast_expected(game["start_at"].year, "pitcher")
+            urls.append(expected.source_url)
+        except Exception:
+            expected = SourcePayload({}, "", datetime.now(KST))
         for side in ("away", "home"):
             player_id = game.get(f"{side}_pitcher_id")
             if not player_id:
@@ -203,6 +399,15 @@ class MlbClient:
             opponent_er = sum(_as_int(row.get("stat", {}).get("earnedRuns"), 0) or 0 for row in opponent_logs)
             opponent_hits = sum(_as_int(row.get("stat", {}).get("hits"), 0) or 0 for row in opponent_logs)
             opponent_walks = sum(_as_int(row.get("stat", {}).get("baseOnBalls"), 0) or 0 for row in opponent_logs)
+            try:
+                trend = self.statcast_pitch_trend(str(player_id), boundary)
+                urls.append(trend.source_url)
+                advanced = {"expected": expected.data.get(str(player_id), {}), "pitch_trend": trend.data,
+                            "source": "BASEBALL_SAVANT_PREGAME_V1"}
+            except Exception as exc:
+                advanced = {"expected": expected.data.get(str(player_id), {}), "pitch_trend": {
+                    "available": False, "reason": f"{type(exc).__name__}: {exc}", "cutoff": boundary.isoformat(),
+                }, "source": "BASEBALL_SAVANT_PARTIAL"}
             output.append({
                 "side": side, "player_id": player_id, "name": game.get(f"{side}_pitcher_name"),
                 "confirmed": True, "era": _as_float(stat.get("era")), "whip": _as_float(stat.get("whip")),
@@ -228,6 +433,7 @@ class MlbClient:
                     "derived_pitch_limit": min(115, max(70, round(sum(start_pitches) / len(start_pitches) + 8))) if start_pitches else None,
                     "velocity_available": False, "source": "OFFICIAL_GAME_LOG",
                 },
+                "advanced": advanced,
             })
         return SourcePayload(output, ", ".join(urls) or f"{self.base_url}/api/v1/people/{{id}}/stats", datetime.now(KST))
 
@@ -305,9 +511,9 @@ class MlbClient:
         workload: dict[str, dict[str, dict[str, Any]]] = {}
         urls = [schedule.source_url]
 
-        def relief_rows(item: dict[str, Any]) -> tuple[list[tuple[str, str, str, int]], str]:
+        def relief_rows(item: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
             payload = self._game_feed(str(item["gamePk"]))
-            rows: list[tuple[str, str, str, int]] = []
+            rows: list[dict[str, Any]] = []
             game_day = _parse_datetime(item["gameDate"]).astimezone(KST).date()
             days_ago = (target_date - game_day).days
             if not 1 <= days_ago <= 3:
@@ -320,29 +526,115 @@ class MlbClient:
                     stat = player.get("stats", {}).get("pitching", {})
                     if (_as_int(stat.get("gamesStarted"), 0) or 0) > 0:
                         continue
-                    rows.append((str(team.get("id")), str(player_id),
-                                 player.get("person", {}).get("fullName", str(player_id)),
-                                 _as_int(stat.get("numberOfPitches"), 0) or 0, days_ago))
+                    season = player.get("seasonStats", {}).get("pitching", {})
+                    person = payload.data.get("gameData", {}).get("players", {}).get(f"ID{player_id}", {})
+                    rows.append({
+                        "team_id": str(team.get("id")), "player_id": str(player_id),
+                        "name": player.get("person", {}).get("fullName", str(player_id)),
+                        "pitches": _as_int(stat.get("numberOfPitches"), 0) or 0, "days_ago": days_ago,
+                        "hand": (person.get("pitchHand") or {}).get("code"),
+                        "era": _as_float(season.get("era")), "saves": _as_int(season.get("saves"), 0) or 0,
+                        "holds": _as_int(season.get("holds"), 0) or 0,
+                    })
             return rows, payload.source_url
 
         with ThreadPoolExecutor(max_workers=8) as pool:
             for future in as_completed([pool.submit(relief_rows, item) for item in prior]):
                 rows, url = future.result(); urls.append(url)
-                for team_id, player_id, name, pitches, days_ago in rows:
-                    arm = workload.setdefault(team_id, {}).setdefault(player_id, {"name": name, "days": {}})
-                    arm["days"][str(days_ago)] = arm["days"].get(str(days_ago), 0) + pitches
+                for row in rows:
+                    team_id, player_id = row["team_id"], row["player_id"]
+                    arm = workload.setdefault(team_id, {}).setdefault(player_id, {
+                        "player_id": player_id, "name": row["name"], "hand": row.get("hand"), "days": {},
+                        "era": row.get("era"), "saves": row.get("saves", 0), "holds": row.get("holds", 0),
+                    })
+                    days_ago = row["days_ago"]
+                    arm["days"][str(days_ago)] = arm["days"].get(str(days_ago), 0) + row["pitches"]
+
+        # Complete the workload ledger with every active reliever. Arms with no recent usage are
+        # genuinely available candidates, rather than being absent from the data altogether.
+        current_starters = {str(game.get(f"{side}_pitcher_id")) for game in games for side in ("away", "home")
+                            if game.get(f"{side}_pitcher_id")}
+        team_ids = {str(game[f"{side}_code"]) for game in games for side in ("away", "home")}
+
+        def active_relievers(team_id: str) -> tuple[str, list[dict[str, Any]], str]:
+            payload = self._get_json(f"/api/v1/teams/{team_id}/roster", {
+                "rosterType": "active",
+                "hydrate": f"person(stats(type=season,group=pitching,season={target_date.year}))",
+            })
+            rows = []
+            for item in payload.data.get("roster", []):
+                person = item.get("person") or {}
+                if (item.get("position") or {}).get("abbreviation") != "P" or str(person.get("id")) in current_starters:
+                    continue
+                stat = next((split.get("stat", {}) for group in person.get("stats", [])
+                             for split in group.get("splits", [])), {})
+                games_pitched = _as_int(stat.get("gamesPitched"), 0) or 0
+                games_started = _as_int(stat.get("gamesStarted"), 0) or 0
+                if games_pitched and games_started > max(3, games_pitched * .35):
+                    continue
+                batters = _as_int(stat.get("battersFaced"), 0) or 0
+                rows.append({
+                    "player_id": str(person.get("id")), "name": person.get("fullName"),
+                    "hand": (person.get("pitchHand") or {}).get("code"), "days": {},
+                    "era": _as_float(stat.get("era")), "saves": _as_int(stat.get("saves"), 0) or 0,
+                    "holds": _as_int(stat.get("holds"), 0) or 0,
+                    "k_bb_rate": ((_as_int(stat.get("strikeOuts"), 0) or 0) -
+                                  (_as_int(stat.get("baseOnBalls"), 0) or 0)) / batters if batters else None,
+                    "inherited_runners": _as_int(stat.get("inheritedRunners"), 0) or 0,
+                    "inherited_scored": _as_int(stat.get("inheritedRunnersScored"), 0) or 0,
+                })
+            return team_id, rows, payload.source_url
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for future in as_completed([pool.submit(active_relievers, team_id) for team_id in team_ids]):
+                try:
+                    team_id, roster_rows, url = future.result(); urls.append(url)
+                except (httpx.HTTPError, ValueError):
+                    continue
+                for row in roster_rows:
+                    existing = workload.setdefault(team_id, {}).setdefault(row["player_id"], row)
+                    for field in ("name", "hand", "era", "saves", "holds", "k_bb_rate",
+                                  "inherited_runners", "inherited_scored"):
+                        if row.get(field) is not None:
+                            existing[field] = row[field]
+        for arms in workload.values():
+            for starter_id in current_starters:
+                arms.pop(starter_id, None)
 
         bullpen: dict[str, dict[str, Any]] = {}
         for team_id, arms in workload.items():
             day_totals = {day: sum(int(arm["days"].get(str(day), 0)) for arm in arms.values()) for day in (1, 2, 3)}
-            high_load = [arm["name"] for arm in arms.values()
-                         if int(arm["days"].get("1", 0)) >= 30 or
-                         (int(arm["days"].get("1", 0)) > 0 and int(arm["days"].get("2", 0)) > 0)]
+            arm_rows = []
+            for arm in arms.values():
+                day1, day2, day3 = (int(arm["days"].get(str(day), 0)) for day in (1, 2, 3))
+                consecutive = int(day1 > 0) + (int(day2 > 0) if day1 > 0 else 0) + (int(day3 > 0) if day1 > 0 and day2 > 0 else 0)
+                status = "UNAVAILABLE" if day1 >= 35 or consecutive >= 3 else (
+                    "LIMITED" if day1 >= 22 or (day1 > 0 and day2 > 0) else "AVAILABLE")
+                leverage = "HIGH" if int(arm.get("saves") or 0) + int(arm.get("holds") or 0) >= 5 else "MIDDLE"
+                arm_rows.append({**arm, "consecutive_days": consecutive, "availability": status,
+                                 "leverage_tier": leverage})
+            high_load = [arm["name"] for arm in arm_rows if arm["availability"] != "AVAILABLE"]
+            unavailable = [arm["name"] for arm in arm_rows if arm["availability"] == "UNAVAILABLE"]
             fatigue = min(1.0, day_totals[1] / 140 * .65 + day_totals[2] / 160 * .25 + len(high_load) * .06)
+            high_arms = [arm for arm in arm_rows if arm["leverage_tier"] == "HIGH"]
+            high_fatigue = (sum(1.0 if arm["availability"] == "UNAVAILABLE" else .55
+                                for arm in high_arms if arm["availability"] != "AVAILABLE") / max(1, len(high_arms)))
             bullpen[team_id] = {"available": True, "source": "OFFICIAL_BOX_SCORE", "pitches": day_totals,
                                  "high_load_arms": high_load, "confirmed_unavailable_arms": [],
                                  "fatigue_index": round(fatigue, 4),
-                                 "availability_basis": "official workload; manager availability is not inferred"}
+                                 "tier_fatigue": {"high_leverage": round(min(1.0, high_fatigue), 4),
+                                                  "middle": round(fatigue, 4), "chase": round(fatigue * .65, 4),
+                                                  "mop_up": round(fatigue * .45, 4)},
+                                 "arms": arm_rows, "workload_unavailable_arms": unavailable,
+                                 "availability_basis": "official pitches and consecutive use; workload status is probabilistic, not a manager declaration"}
+
+        try:
+            parks = self.statcast_park_factors(target_date.year)
+            urls.append(parks.source_url)
+            park_rows = parks.data
+        except Exception as exc:
+            park_rows = {}
+            park_error = f"{type(exc).__name__}: {exc}"
 
         output: dict[str, dict[str, Any]] = {}
         for game in games:
@@ -351,15 +643,22 @@ class MlbClient:
             venue = game_data.get("venue", {})
             location = venue.get("location", {})
             weather = game_data.get("weather") or {}
+            venue_name = venue.get("name")
             output[game["external_id"]] = {
                 "version": 1, "league": "MLB",
                 "weather": _weather_context(weather, venue.get("fieldInfo") or {}),
-                "venue": {"available": bool(venue), "name": venue.get("name"),
+                "venue": {"available": bool(venue), "name": venue_name,
                           "latitude": (location.get("defaultCoordinates") or {}).get("latitude"),
                           "longitude": (location.get("defaultCoordinates") or {}).get("longitude"),
                           "roof_type": (venue.get("fieldInfo") or {}).get("roofType"),
                           "turf_type": (venue.get("fieldInfo") or {}).get("turfType"),
                           "time_zone": (venue.get("timeZone") or {}).get("id")},
+                "park_factors": {
+                    "available": venue_name in park_rows,
+                    "method": "STATCAST_3_YEAR_PA_SHRUNK",
+                    "by_batter_hand": park_rows.get(venue_name, {}),
+                    "reason": None if venue_name in park_rows else (park_error if 'park_error' in locals() else "VENUE_NOT_MATCHED"),
+                },
                 "bullpen": {side: bullpen.get(str(game[f"{side}_code"]), {
                     "available": False, "source": "OFFICIAL_BOX_SCORE", "reason": "NO_PRIOR_RELIEF_USAGE",
                     "fatigue_index": 0.0, "pitches": {1: 0, 2: 0, 3: 0},
@@ -626,3 +925,64 @@ def _weather_context(weather: dict[str, Any], field: dict[str, Any]) -> dict[str
             "wind": wind_text, "controlled_roof": controlled,
             "run_multiplier": round(max(.92, min(1.08, 1 + temp_effect + wind_effect)), 4),
             "method": "conservative temperature/wind adjustment capped at +/-8%"}
+
+
+def _csv_date(value: str | None) -> date | None:
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def _pitch_summary(rows: list[dict[str, str]]) -> dict[str, Any]:
+    if not rows:
+        return {"pitches": {}}
+    by_type: dict[str, list[dict[str, str]]] = {}
+    for row in rows:
+        pitch_type = row.get("pitch_type")
+        if pitch_type:
+            by_type.setdefault(pitch_type, []).append(row)
+
+    def average(field: str, sample: list[dict[str, str]]) -> float | None:
+        values = [_as_float(row.get(field)) for row in sample]
+        valid = [value for value in values if value is not None]
+        return round(sum(valid) / len(valid), 4) if valid else None
+
+    pitches = {}
+    for pitch_type, sample in by_type.items():
+        horizontal = average("pfx_x", sample)
+        vertical = average("pfx_z", sample)
+        pitches[pitch_type] = {
+            "count": len(sample), "usage": round(len(sample) / len(rows), 4),
+            "velocity": average("release_speed", sample), "spin_rate": average("release_spin_rate", sample),
+            "horizontal_movement": horizontal, "vertical_movement": vertical,
+        }
+    fastballs = [row for row in rows if row.get("pitch_type") in {"FF", "SI", "FC"}]
+    pfx_x = average("pfx_x", rows)
+    pfx_z = average("pfx_z", rows)
+    return {
+        "pitches": pitches,
+        "fastball_velocity": average("release_speed", fastballs),
+        "spin_rate": average("release_spin_rate", rows),
+        "movement": round(((pfx_x or 0) ** 2 + (pfx_z or 0) ** 2) ** .5, 4) if pfx_x is not None and pfx_z is not None else None,
+    }
+
+
+def _difference(current: Any, baseline: Any) -> float | None:
+    return round(float(current) - float(baseline), 4) if current is not None and baseline is not None else None
+
+
+def _percent_change(current: Any, baseline: Any) -> float | None:
+    if current is None or baseline in (None, 0):
+        return None
+    return round((float(current) / float(baseline) - 1) * 100, 4)
+
+
+def _usage_change(current: dict[str, Any], baseline: dict[str, Any]) -> float | None:
+    pitch_types = set(current) | set(baseline)
+    if not pitch_types:
+        return None
+    # Total variation distance: 0 means identical arsenals, 1 a complete replacement.
+    return round(.5 * sum(abs(float((current.get(name) or {}).get("usage", 0)) -
+                                float((baseline.get(name) or {}).get("usage", 0)))
+                            for name in pitch_types), 4)

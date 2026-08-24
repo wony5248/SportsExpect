@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from html import unescape
 from typing import Any
 from urllib.parse import urlencode
@@ -49,6 +49,7 @@ class KboClient:
                 "X-Requested-With": "XMLHttpRequest",
             },
         )
+        self._html_cache: dict[str, SourcePayload] = {}
 
     def close(self) -> None:
         self.client.close()
@@ -59,9 +60,13 @@ class KboClient:
         return SourcePayload(response.json(), f"{self.base_url}{path}", datetime.now(KST))
 
     def _get_html(self, path: str) -> SourcePayload:
+        if path in self._html_cache:
+            return self._html_cache[path]
         response = self.client.get(path)
         response.raise_for_status()
-        return SourcePayload(response.text, str(response.url), datetime.now(KST))
+        payload = SourcePayload(response.text, str(response.url), datetime.now(KST))
+        self._html_cache[path] = payload
+        return payload
 
     def games(self, game_date: date) -> SourcePayload:
         raw = self._post_json(
@@ -110,6 +115,119 @@ class KboClient:
             {"leId": "1", "srId": "0", "seasonId": str(season), "gameId": game_id},
         )
         return SourcePayload(_scoreboard_innings(raw.data), raw.source_url, raw.collected_at)
+
+    def boxscore_pitchers(self, game: dict[str, Any]) -> SourcePayload:
+        """Return official per-pitcher workload from a completed KBO box score."""
+        path = "/ws/Schedule.asmx/GetBoxScoreScroll"
+        raw = self._post_json(path, {
+            "leId": "1", "srId": "0", "seasonId": str(game["game_date"].year),
+            "gameId": game["external_id"],
+        })
+        output: list[dict[str, Any]] = []
+        for side, group in zip(("away", "home"), raw.data.get("arrPitcher", []), strict=False):
+            table = group.get("table") or group.get("table1") or "{}"
+            if isinstance(table, str):
+                table = json.loads(table)
+            for index, wrapper in enumerate(table.get("rows", [])):
+                values = [_text(cell.get("Text", "")) for cell in wrapper.get("row", [])]
+                if len(values) < 9 or not values[0]:
+                    continue
+                output.append({
+                    "side": side, "team_code": str(game[f"{side}_code"]), "name": values[0],
+                    "started": index == 0, "pitches": _as_int(values[8], 0) or 0,
+                    "innings": _baseball_innings(values[6]), "batters_faced": _as_int(values[7], 0) or 0,
+                    "saves": _as_int(values[5], 0) or 0,
+                })
+        return SourcePayload(output, raw.source_url, raw.collected_at)
+
+    def slate_context(self, target_date: date, games: list[dict[str, Any]]) -> SourcePayload:
+        """Official KBO weather plus prior-three-day reliever workload."""
+        urls: list[str] = []
+        workload: dict[str, dict[str, dict[str, Any]]] = {}
+        for days_ago in (1, 2, 3):
+            prior_date = target_date - timedelta(days=days_ago)
+            try:
+                schedule = self.games(prior_date); urls.append(schedule.source_url)
+            except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                continue
+            for prior_game in schedule.data:
+                if prior_game.get("status") != "FINAL":
+                    continue
+                try:
+                    box = self.boxscore_pitchers(prior_game); urls.append(box.source_url)
+                except (httpx.HTTPError, ValueError, KeyError, TypeError):
+                    continue
+                for row in box.data:
+                    if row.get("started"):
+                        continue
+                    arm = workload.setdefault(row["team_code"], {}).setdefault(row["name"], {
+                        "player_id": None, "name": row["name"], "hand": None, "days": {},
+                    })
+                    arm["days"][str(days_ago)] = arm["days"].get(str(days_ago), 0) + int(row["pitches"])
+
+        try:
+            weather = self._post_json("/ws/Schedule.asmx/GetTodayGames", {
+                "gameDate": target_date.strftime("%Y%m%d"), "leId": "1",
+                "srId": "0,1,3,4,5,7", "headerCk": "0",
+            })
+            urls.append(weather.source_url)
+            weather_by_game = {str(row.get("gameId")): row for row in weather.data.get("gameList", [])}
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            weather_by_game = {}
+        bullpen: dict[str, dict[str, Any]] = {}
+        for team_code, arms in workload.items():
+            arm_rows = []
+            for arm in arms.values():
+                day1, day2, day3 = (int(arm["days"].get(str(day), 0)) for day in (1, 2, 3))
+                consecutive = int(day1 > 0) + (int(day2 > 0) if day1 > 0 else 0) + (int(day3 > 0) if day1 > 0 and day2 > 0 else 0)
+                status = "UNAVAILABLE" if day1 >= 35 or consecutive >= 3 else (
+                    "LIMITED" if day1 >= 22 or (day1 > 0 and day2 > 0) else "AVAILABLE")
+                arm_rows.append({**arm, "consecutive_days": consecutive, "availability": status,
+                                 "leverage_tier": "UNKNOWN"})
+            totals = {day: sum(int(arm["days"].get(str(day), 0)) for arm in arms.values()) for day in (1, 2, 3)}
+            fatigue = min(1.0, totals[1] / 120 * .65 + totals[2] / 140 * .25 +
+                          sum(arm["availability"] != "AVAILABLE" for arm in arm_rows) * .06)
+            bullpen[team_code] = {
+                "available": True, "source": "KBO_OFFICIAL_BOX_SCORE", "pitches": totals,
+                "fatigue_index": round(fatigue, 4), "arms": arm_rows,
+                "high_load_arms": [arm["name"] for arm in arm_rows if arm["availability"] != "AVAILABLE"],
+                "workload_unavailable_arms": [arm["name"] for arm in arm_rows if arm["availability"] == "UNAVAILABLE"],
+                "confirmed_unavailable_arms": [],
+                "availability_basis": "official pitch counts and consecutive use; leverage role not published",
+            }
+
+        output = {}
+        for game in games:
+            official_weather = weather_by_game.get(game["external_id"], {})
+            temperature = _as_float(official_weather.get("gameTemp") if official_weather.get("gameTemp") is not None
+                                    else official_weather.get("temp"))
+            rain = _as_float(official_weather.get("gameRain") if official_weather.get("gameRain") is not None
+                             else official_weather.get("rain"))
+            dome = str(game.get("stadium")) == "고척"
+            run_multiplier = 1.0 if dome or temperature is None else max(.96, min(1.05, 1 + (temperature - 24) * .003))
+            output[game["external_id"]] = {
+                "version": 1, "league": "KBO",
+                "weather": {
+                    "available": bool(official_weather), "temperature_c": temperature,
+                    "rain_probability": rain, "condition": official_weather.get("gameIconName") or official_weather.get("iconName"),
+                    "controlled_roof": dome, "run_multiplier": round(run_multiplier, 4),
+                    "method": "official KBO temperature; wind unavailable and therefore neutral",
+                },
+                "venue": {"available": bool(game.get("stadium")), "name": game.get("stadium")},
+                "bullpen": {side: bullpen.get(str(game[f"{side}_code"]), {
+                    "available": False, "source": "KBO_OFFICIAL_BOX_SCORE", "reason": "NO_PRIOR_RELIEF_USAGE",
+                    "fatigue_index": 0.0, "pitches": {1: 0, 2: 0, 3: 0}, "arms": [],
+                    "high_load_arms": [], "workload_unavailable_arms": [], "confirmed_unavailable_arms": [],
+                }) for side in ("away", "home")},
+                "kbo_data_coverage": {
+                    "weather": bool(official_weather), "bullpen_pitch_counts": True,
+                    "starter_recent_logs": True, "left_right_splits": True,
+                    "official_team_defense": True, "official_catcher_control": True,
+                    "statcast_defense": False, "catcher_framing": False,
+                    "note": "KBO 공식 미제공 항목은 중립값으로 유지하며 추정값을 만들지 않음",
+                },
+            }
+        return SourcePayload(output, ", ".join(dict.fromkeys(urls)), datetime.now(KST))
 
     def lineups(self, game: dict[str, Any]) -> SourcePayload:
         path = "/ws/Schedule.asmx/GetLineUpAnalysis"
@@ -208,15 +326,17 @@ class KboClient:
         hit1_path = "/Record/Team/Hitter/Basic1.aspx"
         hit2_path = "/Record/Team/Hitter/Basic2.aspx"
         pitch_path = "/Record/Team/Pitcher/Basic1.aspx"
-        pages = [self._get_html(p) for p in (rank_path, hit1_path, hit2_path, pitch_path)]
+        defense_path = "/Record/Team/Defense/Basic.aspx"
+        pages = [self._get_html(p) for p in (rank_path, hit1_path, hit2_path, pitch_path, defense_path)]
         ranks = _rank_table(pages[0].data)
         hit1 = _data_id_table(pages[1].data)
         hit2 = _data_id_table(pages[2].data)
         pitching = _data_id_table(pages[3].data)
+        defense = _data_id_table(pages[4].data)
         teams: dict[str, dict[str, Any]] = {}
         for name, rank in ranks.items():
             games = int(rank.get("경기", 0))
-            h1, h2, pit = hit1.get(name, {}), hit2.get(name, {}), pitching.get(name, {})
+            h1, h2, pit, field = hit1.get(name, {}), hit2.get(name, {}), pitching.get(name, {}), defense.get(name, {})
             runs = _as_float(h1.get("RUN_CN"))
             allowed = _as_float(pit.get("R_CN"))
             teams[name] = {
@@ -236,8 +356,17 @@ class KboClient:
                     "source": "KBO_OFFICIAL_TEAM_HITTING",
                     "stolen_bases": _as_int(h1.get("SB_CN", h2.get("SB_CN"))),
                     "caught_stealing": _as_int(h1.get("CS_CN", h2.get("CS_CN"))),
-                    "fielding_available": False,
-                    "catcher_available": False,
+                    "fielding_available": field.get("FPCT_RT") is not None,
+                    "fielding_percentage": _as_float(field.get("FPCT_RT")),
+                    "errors": _as_int(field.get("ERR_CN")),
+                    "double_plays": _as_int(field.get("GDP_CN")),
+                    "catcher_available": field.get("CS_RT") is not None,
+                    "passed_balls": _as_int(field.get("PB_CN")),
+                    "stolen_bases_allowed": _as_int(field.get("SB_CN")),
+                    "opponent_caught_stealing": _as_int(field.get("CS_CN")),
+                    "opponent_stolen_base_percentage": (
+                        1 - (_as_float(field.get("CS_RT"), 0.0) or 0.0) / 100
+                    ) if field.get("CS_RT") is not None else None,
                 },
             }
         source_url = ", ".join(page.source_url for page in pages)
@@ -252,7 +381,8 @@ class KboClient:
             "awayTeamId": game["away_code"], "awayPitId": game["away_pitcher_id"],
             "homeTeamId": game["home_code"], "homePitId": game["home_pitcher_id"], "groupSc": "SEASON",
         })
-        player_ids = [str(game[f"{side}_pitcher_id"]) for side in ("away", "home")]
+        player_ids = [str(game[f"{side}_pitcher_id"]) for side in ("away", "home")
+                      if game.get(f"{side}_pitcher_id")]
         logs = self.pitcher_game_logs(player_ids, game["game_date"].year)
         boundary = game.get("venue_date") or game["game_date"]
         output = []
@@ -267,6 +397,7 @@ class KboClient:
             name_node = BeautifulSoup(cells[0].get("Text", ""), "html.parser").select_one(".name")
             opponent = game.get("home_name" if side == "away" else "away_name")
             opponent_split: dict[str, Any] = {}
+            detail: SourcePayload | None = None
             player_id = game.get(f"{side}_pitcher_id")
             log_summary = _pitcher_log_summary(
                 logs.data.get(str(player_id), []), boundary,
@@ -279,6 +410,7 @@ class KboClient:
                 except httpx.HTTPError:
                     # Season starter values remain usable when the optional detail page is unavailable.
                     opponent_split = {}
+            handedness = _pitcher_hand(detail.data) if detail else None
             output.append({
                 "side": side, "player_id": game.get(f"{side}_pitcher_id"),
                 "name": name_node.get_text(strip=True) if name_node else game.get(f"{side}_pitcher_name"),
@@ -291,10 +423,36 @@ class KboClient:
                 "fip": log_summary["fip"], "k_bb_rate": log_summary["k_bb_rate"],
                 "rest_days": log_summary["rest_days"],
                 "recent_pitches": log_summary["recent_pitches"],
+                "handedness": handedness,
                 "recent": log_summary["recent"],
                 **opponent_split,
             })
         return SourcePayload(output, ", ".join(source_urls), raw.collected_at)
+
+    def batter_platoon(self, entries: list[dict[str, Any]], game: dict[str, Any]) -> SourcePayload:
+        """Official KBO batter performance versus left- or right-handed pitchers."""
+        pitcher_hands: dict[str, str | None] = {}
+        urls: list[str] = []
+        for side in ("away", "home"):
+            player_id = game.get(f"{side}_pitcher_id")
+            if not player_id:
+                pitcher_hands[side] = None
+                continue
+            page = self._get_html(f"/Record/Player/PitcherDetail/Game.aspx?playerId={player_id}")
+            urls.append(page.source_url); pitcher_hands[side] = _pitcher_hand(page.data)
+        output = {}
+        for entry in entries:
+            player_id = entry.get("player_id")
+            opponent_side = "home" if entry.get("side") == "away" else "away"
+            hand = pitcher_hands.get(opponent_side)
+            if not player_id or hand not in {"L", "R"}:
+                continue
+            page = self._get_html(f"/Record/Player/HitterDetail/Situation.aspx?playerId={player_id}")
+            urls.append(page.source_url)
+            split = _hitter_pitcher_type_split(page.data, hand)
+            if split:
+                output[str(player_id)] = {"platoon_opponent_hand": hand, **split}
+        return SourcePayload(output, ", ".join(dict.fromkeys(urls)) or self.base_url, datetime.now(KST))
 
     def archived_starters(self, game_dates: list[date]) -> SourcePayload:
         """Who actually started each finished game on the given dates.
@@ -594,6 +752,45 @@ def _pitcher_opponent_split(html: str, opponent: str) -> dict[str, Any]:
             "opponent_games": _as_int(cells[1]), "opponent_innings": innings,
             "opponent_era": _as_float(cells[2]),
             "opponent_whip": round((hits + walks) / innings, 3) if innings else None,
+        }
+    return {}
+
+
+def _pitcher_hand(html: str) -> str | None:
+    soup = BeautifulSoup(html, "html.parser")
+    profile = soup.select_one("[id$='playerProfile_lblPosition']")
+    text = profile.get_text(" ", strip=True) if profile else ""
+    if "좌투" in text:
+        return "L"
+    if "우투" in text:
+        return "R"
+    return None
+
+
+def _hitter_pitcher_type_split(html: str, hand: str) -> dict[str, Any]:
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.select_one('table[summary="투수유형별 기록"]')
+    if not table:
+        return {}
+    label = "좌투수" if hand == "L" else "우투수"
+    for row in table.select("tbody tr"):
+        cells = [cell.get_text(strip=True) for cell in row.select("td")]
+        if len(cells) < 11 or cells[0] != label:
+            continue
+        at_bats = _as_int(cells[2], 0) or 0
+        hits = _as_int(cells[3], 0) or 0
+        doubles = _as_int(cells[4], 0) or 0
+        triples = _as_int(cells[5], 0) or 0
+        homers = _as_int(cells[6], 0) or 0
+        walks = _as_int(cells[8], 0) or 0
+        hit_by_pitch = _as_int(cells[9], 0) or 0
+        plate_appearances = at_bats + walks + hit_by_pitch
+        obp = (hits + walks + hit_by_pitch) / plate_appearances if plate_appearances else None
+        total_bases = hits + doubles + 2 * triples + 3 * homers
+        slg = total_bases / at_bats if at_bats else None
+        return {
+            "platoon_plate_appearances": plate_appearances,
+            "platoon_ops": round(obp + slg, 4) if obp is not None and slg is not None else None,
         }
     return {}
 

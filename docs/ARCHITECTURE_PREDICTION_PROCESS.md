@@ -410,7 +410,7 @@ hash에 포함되는 주요 요소:
 
 과거 재현은 잔차와 보정의 이력을 보조할 수 있지만 자동 champion 승격에는 독립 실전 검증 표본이 필요하다.
 
-현재 요약 스키마 23은 과거 재현에 실제 경기 전 선발 입력이 추가된 버전이다. 선발 복원 이전에 생성된 replay는 스키마 버전이 낮아 재생성 대상이 된다.
+현재 요약 스키마 25는 과거 재현의 실제 경기 전 선발 입력에 더해 상대 강도 보정과 고급 경기 전 입력을 포함한다. 이전 버전 replay는 스키마 버전이 낮아 재생성 대상이 된다.
 
 ## 18. 자동 학습·승격·롤백
 
@@ -482,12 +482,22 @@ API는 소수점 네 자리 반올림을 하므로 합계 검사는 작은 반�
 
 시장 배당, 생성형 AI 의견, 경기 후 확정 정보는 모델을 그럴듯하게 보이게 만들 수 있지만 미래 예측 검증을 오염시킬 수 있다. 데이터 시점과 역할을 명확히 분리하는 것이 지표 수를 늘리는 것보다 우선이다.
 
-## 22. 관련 코드와 문서
+## 22. 상대 강도·Statcast·불펜·구장 고도화
+
+- 시즌 최종값이 아니라 경기 시작 전 확정 결과만으로 Elo, SRS, Pythagorean 기대승률, 상대 보정 공격·수비와 일정 강도를 매번 재구성한다.
+- MLB 선발은 Baseball Savant xERA·xwOBA와 최근 14일 대 직전 15~46일 구속·회전·무브먼트·구종 비율 변화를 저장한다.
+- 확정 라인업은 타자 xwOBA, 선발 주 구종별 성과, 실제 선발 야수 FRV·OAA, 포수 프레이밍과 선발-포수 최근 배터리 값을 사용한다.
+- MLB 현역 로스터와 양 리그 공식 박스스코어를 결합해 등판 가능 후보별 최근 1~3일 투구수·연투를 계산한다. 감독 발표가 없는 `UNAVAILABLE`은 확정 결장이 아니라 workload 판정으로 구분한다.
+- MLB 구장 계수는 좌·우 타자별 3년 값을 표본 축소하고 2B·3B·HR 확률을 타석 엔진 내부에서 직접 조정한다. 전체 기대득점은 같은 구장 계수로 다시 보정해 이중 반영하지 않는다.
+- KBO는 공식 날씨, 박스스코어 투구수, 최근 선발 로그, 좌·우 투수 스플릿, 팀 수비·포수 도루저지를 수집한다. 공식 OAA·프레이밍·구종 이동 데이터가 없으면 추정하지 않는다.
+
+## 23. 관련 코드와 문서
 
 - `backend/app/services/refresh.py`
 - `backend/app/services/prediction.py`
 - `backend/app/services/feature_engineering.py`
 - `backend/app/services/team_residuals.py`
+- `backend/app/services/team_strength.py`
 - `backend/app/services/probability_calibration.py`
 - `backend/app/services/simulation.py`
 - `backend/app/services/plate_engine.py`

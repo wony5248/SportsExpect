@@ -29,6 +29,8 @@ TRAINABLE_FEATURES = [
     "base_home_expected", "base_away_expected", "league_average_runs",
     "season_win_rate_diff", "recent_10_win_rate_diff", "recent_run_diff",
     "recent_run_allowed_diff", "runs_per_game_diff", "runs_allowed_per_game_diff",
+    "strength_elo_diff", "strength_srs_diff", "pythagorean_diff", "schedule_strength_diff",
+    "adjusted_offense_diff", "adjusted_defense_edge",
     "home_avg", "away_avg", "home_obp", "away_obp", "home_slg", "away_slg",
     "home_ops", "away_ops", "split_win_rate_diff", "starter_era_diff",
     "starter_whip_diff", "starter_war_diff", "starter_fip_diff", "starter_k_bb_diff",
@@ -38,6 +40,9 @@ TRAINABLE_FEATURES = [
     "starter_opponent_era_diff", "park_factor", "lineup_strength_diff", "lineup_bvp_diff",
     "bullpen_fatigue_edge", "schedule_fatigue_edge", "lineup_platoon_diff",
     "starter_recent_era_diff", "starter_recent_k_bb_diff", "fielding_edge", "baserunning_edge", "catcher_control_edge",
+    "starter_xera_diff", "starter_xwoba_diff", "starter_velocity_trend_edge",
+    "starter_arsenal_stability_edge", "lineup_xwoba_diff", "lineup_pitch_type_edge",
+    "lineup_frv_edge", "lineup_oaa_edge", "catcher_framing_edge", "battery_edge",
     "weather_run_multiplier",
     "home_starter_confirmed", "away_starter_confirmed", "home_lineup_confirmed",
     "away_lineup_confirmed", "recent_home_games", "recent_away_games",
@@ -334,7 +339,7 @@ def _train_candidate(session: Session, league: str, samples: list[dict[str, Any]
     model = ModelVersion(
         name=name, algorithm=("standardized L2 logistic win classifier + ridge home/away run regressors; "
                              "leakage-audited chronological holdout"),
-        feature_schema={"version": 6, "features": TRAINABLE_FEATURES}, checksum=checksum, created_at=now,
+        feature_schema={"version": 7, "features": TRAINABLE_FEATURES}, checksum=checksum, created_at=now,
     )
     session.add(model)
     session.flush()
@@ -414,9 +419,11 @@ def _maybe_rollback(session: Session, registry: ModelRegistry, samples: list[dic
 
 def _evaluate(runtime: dict[str, Any] | None, samples: list[dict[str, Any]]) -> dict[str, Any]:
     predictions = []
+    methods = []
     for row in samples:
         probability, home_runs, away_runs, method = _operating_prediction(runtime, row)
         predictions.append((probability, home_runs, away_runs, row))
+        methods.append(method)
     brier = np.mean([(p - row["outcome"]) ** 2 for p, _, _, row in predictions])
     log_loss = np.mean([-row["outcome"] * math.log(_clip(p, .001, .999)) -
                         (1 - row["outcome"]) * math.log(1 - _clip(p, .001, .999))
@@ -427,14 +434,10 @@ def _evaluate(runtime: dict[str, Any] | None, samples: list[dict[str, Any]]) -> 
             "log_loss": round(float(log_loss), 6), "run_mae": round(float(np.mean(run_errors)), 6),
             "evaluation_method": (
                 "OPERATING_MONTE_CARLO_RECIPE" if all(
-                    _operating_prediction_method(row) == "OPERATING_MONTE_CARLO_RECIPE" for row in samples
+                    method == "OPERATING_MONTE_CARLO_RECIPE" for method in methods
                 ) else "MIXED_OPERATING_RECIPE_AND_POISSON_FALLBACK"
             ),
             "simulation_draws_per_game": MODEL_VALIDATION_SIMULATIONS}
-
-
-def _operating_prediction_method(row: dict[str, Any]) -> str:
-    return "OPERATING_MONTE_CARLO_RECIPE" if isinstance(row.get("simulation_recipe"), dict) else "POISSON_FALLBACK"
 
 
 def _operating_prediction(runtime: dict[str, Any] | None,
@@ -475,6 +478,8 @@ def _operating_prediction(runtime: dict[str, Any] | None,
         headline_total_line=recipe.get("headline_total_line"),
         headline_home_spread=recipe.get("headline_home_spread"),
         probability_calibration=recipe.get("probability_calibration"),
+        home_event_factors=recipe.get("home_event_factors"),
+        away_event_factors=recipe.get("away_event_factors"),
     )
     return (float(result["home_two_way_probability"]), float(result["mean_runs"]["home"]),
             float(result["mean_runs"]["away"]), "OPERATING_MONTE_CARLO_RECIPE")

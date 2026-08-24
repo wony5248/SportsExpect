@@ -224,14 +224,17 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                     away_team_variance: float | None = None,
                     headline_total_line: float | None = None,
                     headline_home_spread: float | None = None,
-                    probability_calibration: dict[str, Any] | None = None) -> dict[str, Any]:
+                    probability_calibration: dict[str, Any] | None = None,
+                    home_event_factors: dict[str, float] | None = None,
+                    away_event_factors: dict[str, float] | None = None) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
     if home_lineup is not None and away_lineup is not None:
         # Both lineups have collected splits, so play the game out plate appearance by plate
         # appearance instead of drawing inning run totals.
         return _summarize(*_plate_appearance_game(
             rng, home_expected, away_expected, simulations, league, home_staff, away_staff,
-            home_lineup, away_lineup, home_team_variance, away_team_variance),
+            home_lineup, away_lineup, home_team_variance, away_team_variance,
+            home_event_factors, away_event_factors),
             observed_result=observed_result, headline_total_line=headline_total_line,
             headline_home_spread=headline_home_spread,
             probability_calibration=probability_calibration)
@@ -385,14 +388,18 @@ def _plate_appearance_game(rng: np.random.Generator, home_expected: float, away_
                            simulations: int, league: str, home_staff: dict[str, Any] | None,
                            away_staff: dict[str, Any] | None, home_lineup: np.ndarray,
                            away_lineup: np.ndarray, home_team_variance: float | None,
-                           away_team_variance: float | None) -> tuple[Any, ...]:
+                           away_team_variance: float | None,
+                           home_event_factors: dict[str, float] | None = None,
+                           away_event_factors: dict[str, float] | None = None) -> tuple[Any, ...]:
     from backend.app.services.plate_engine import simulate_game
 
     max_extra = MLB_MAX_EXTRA_INNINGS if league == "MLB" else KBO_MAX_EXTRA_INNINGS
     played = simulate_game(
         rng, simulations,
-        {"tables": home_lineup, "staff": home_staff or {}, "expected_runs": home_expected},
-        {"tables": away_lineup, "staff": away_staff or {}, "expected_runs": away_expected},
+        {"tables": home_lineup, "staff": home_staff or {}, "expected_runs": home_expected,
+         "event_factors": home_event_factors or {}},
+        {"tables": away_lineup, "staff": away_staff or {}, "expected_runs": away_expected,
+         "event_factors": away_event_factors or {}},
         league, {"max_extra": max_extra}, home_team_variance, away_team_variance)
     home, away = played["home"], played["away"]
     if league == "MLB":

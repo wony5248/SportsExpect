@@ -111,7 +111,8 @@ def _play(rng: np.random.Generator, simulations: int, home: dict[str, Any], away
                                             None if extra else tier_counts["home"])
         runs, away_batter = _half_inning(
             rng, away["tables"], away_batter, away_scale * away_game_scale,
-            home_multiplier, live, None, runner_on_second=(extra and league == "MLB"))
+            home_multiplier, live, None, runner_on_second=(extra and league == "MLB"),
+            event_factors=away.get("event_factors"))
         away_total += runs
         away_runs_by_inning.append(np.where(live, runs, -1) if inning >= 9 else runs)
         # Bottom half. From the ninth on, the home club bats only while level or behind, and a
@@ -123,7 +124,8 @@ def _play(rng: np.random.Generator, simulations: int, home: dict[str, Any], away
                                             None if extra else tier_counts["away"])
         runs, home_batter = _half_inning(
             rng, home["tables"], home_batter, home_scale * home_game_scale,
-            away_multiplier, bats, cap, runner_on_second=(extra and league == "MLB"))
+            away_multiplier, bats, cap, runner_on_second=(extra and league == "MLB"),
+            event_factors=home.get("event_factors"))
         home_total += runs
         # A half-inning that was never played is recorded as -1 so a scorebook can show it as
         # skipped rather than as a scoreless inning.
@@ -169,7 +171,8 @@ def _half_inning(rng: np.random.Generator, tables: np.ndarray, batter: np.ndarra
                  offense_scale: float | np.ndarray,
                  pitcher_multiplier: np.ndarray, active: np.ndarray,
                  run_cap: np.ndarray | None,
-                 runner_on_second: bool = False) -> tuple[np.ndarray, np.ndarray]:
+                 runner_on_second: bool = False,
+                 event_factors: dict[str, float] | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Bat until three outs, or until a walk-off caps the inning."""
     simulations = batter.size
     runs = np.zeros(simulations, dtype=np.int64)
@@ -187,7 +190,7 @@ def _half_inning(rng: np.random.Generator, tables: np.ndarray, batter: np.ndarra
         index = np.flatnonzero(batting)
         state = first[index].astype(np.int64) + 2 * second[index] + 4 * third[index]
         active_scale = offense_scale[index] if isinstance(offense_scale, np.ndarray) else offense_scale
-        row = tables[batter[index], state] * _adjustment(pitcher_multiplier[index], active_scale)
+        row = tables[batter[index], state] * _adjustment(pitcher_multiplier[index], active_scale, event_factors)
         row /= row.sum(axis=1, keepdims=True)
         draw = rng.random(index.size)
         outcome = (np.cumsum(row, axis=1) < draw[:, None]).sum(axis=1).clip(0, row.shape[1] - 1)
@@ -205,13 +208,18 @@ def _half_inning(rng: np.random.Generator, tables: np.ndarray, batter: np.ndarra
     return runs, batter
 
 
-def _adjustment(pitcher_multiplier: np.ndarray, offense_scale: float | np.ndarray) -> np.ndarray:
+def _adjustment(pitcher_multiplier: np.ndarray, offense_scale: float | np.ndarray,
+                event_factors: dict[str, float] | None = None) -> np.ndarray:
     """Scale on-base outcomes; the balance flows into outs so each row still sums to one."""
     factor = pitcher_multiplier * offense_scale
     weights = np.ones((factor.size, 7))
     weights[:, [WALK, SINGLE, DOUBLE, TRIPLE, HOMER]] = factor[:, None]
     # A tougher pitcher converts the missing on-base chances into outs, mostly strikeouts.
     weights[:, STRIKEOUT] = np.power(factor, -.35)
+    event = event_factors or {}
+    weights[:, DOUBLE] *= float(event.get("double", 1.0))
+    weights[:, TRIPLE] *= float(event.get("triple", 1.0))
+    weights[:, HOMER] *= float(event.get("home_run", 1.0))
     return weights
 
 

@@ -36,6 +36,7 @@ from backend.app.services.bullpen import load_profiles, seed_league
 from backend.app.services.model_lifecycle import load_champion_runtime
 from backend.app.services.prediction_evaluation import evaluate_pending_predictions
 from backend.app.services.team_residuals import TeamResidualHistory
+from backend.app.services.team_strength import TeamStrengthHistory
 from backend.app.services.probability_calibration import LeagueProbabilityCalibrationHistory
 from backend.app.services.pregame_context import prediction_context
 
@@ -56,6 +57,18 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
             with session_scope() as session:
                 for raw in fetched_games:
                     upsert_game(session, raw, games_source.source_url, games_source.collected_at, "KBO")
+            scheduled = [row for row in fetched_games if row.get("status") == "SCHEDULED"]
+            context_source = _tracked(
+                "kbo_pregame_context", "/ws/Schedule.asmx/GetTodayGames + GetBoxScoreScroll",
+                lambda: client.slate_context(target_date, scheduled), errors,
+            ) if scheduled else None
+            if context_source:
+                with session_scope() as session:
+                    for external_id, context in context_source.data.items():
+                        stored_game = session.scalar(select(Game).where(Game.external_id == external_id))
+                        if stored_game:
+                            stored_game.pregame_context = context
+                            stored_game.context_collected_at = context_source.collected_at
 
         with session_scope() as session:
             fresh = team_stats_fresh(session, target_date, "KBO")
@@ -110,6 +123,7 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                 if lineup_source and lineup_source.data:
                     _enrich_batter_matchups(client, raw, lineup_source.data, errors, "KBO")
                     _resolve_kbo_player_ids(client, lineup_source.data, raw, errors)
+                    _enrich_kbo_platoon(client, raw, lineup_source.data, errors)
                     _collect_batter_splits(client, lineup_source.data, target_date.year, "KBO", errors, split_budget)
                     with session_scope() as session:
                         game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
@@ -201,6 +215,7 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
                 if lineup_source and lineup_source.data:
                     _enrich_batter_matchups(client, raw, lineup_source.data, errors, "MLB")
                     _enrich_mlb_platoon(client, raw, lineup_source.data, errors)
+                    _enrich_mlb_statcast(client, raw, lineup_source.data, errors)
                     _collect_batter_splits(client, lineup_source.data, target_date.year, "MLB", errors, split_budget)
                     with session_scope() as session:
                         game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
@@ -238,6 +253,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
         games = session.scalars(query).all()
         model_runtime = load_champion_runtime(session, league)
         residual_history = TeamResidualHistory.from_session(session, league)
+        strength_history = TeamStrengthHistory.from_session(session, league)
         probability_history = LeagueProbabilityCalibrationHistory.from_session(session, league)
         # Seed any team that has no profile yet, then read them all back, so a bullpen update
         # made since the last refresh reaches this slate's predictions. Both are optional
@@ -298,6 +314,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 "away_games_today": appearances[game.away_team_id],
                 "league_average_runs": league_average_runs,
                 "team_residuals": residual_history.context_for(game, regime),
+                "team_strength": strength_history.context_for(game),
                 "probability_calibration": probability_history.context_for(game),
                 "pregame": prediction_context(session, game),
                 "market": market_context,
@@ -797,6 +814,42 @@ def _enrich_mlb_platoon(client: MlbClient, game: dict[str, Any], entries: list[d
             entry.update(stats)
             existing = entry.get("matchup_source_url")
             entry["matchup_source_url"] = f"{existing}, {source.source_url}" if existing else source.source_url
+
+
+def _enrich_kbo_platoon(client: KboClient, game: dict[str, Any], entries: list[dict[str, Any]],
+                        errors: list[str]) -> None:
+    """Attach official current-season KBO splits versus the starter's throwing hand."""
+    source = _tracked(
+        f"kbo_platoon_{game['external_id']}", "/Record/Player/HitterDetail/Situation.aspx",
+        lambda: client.batter_platoon(entries, game), errors,
+    )
+    if not source:
+        return
+    for entry in entries:
+        stats = source.data.get(str(entry.get("player_id")))
+        if stats:
+            entry.update(stats)
+            existing = entry.get("matchup_source_url")
+            entry["matchup_source_url"] = f"{existing}, {source.source_url}" if existing else source.source_url
+
+
+def _enrich_mlb_statcast(client: MlbClient, game: dict[str, Any], entries: list[dict[str, Any]],
+                         errors: list[str]) -> None:
+    """Attach official expected hitting, pitch-type matchup, defense and catcher context."""
+    source = _tracked(
+        f"mlb_statcast_lineup_{game['external_id']}",
+        "https://baseballsavant.mlb.com/leaderboard",
+        lambda: client.statcast_lineup_context(entries, game), errors,
+    )
+    if not source:
+        for entry in entries:
+            entry.setdefault("advanced", {"available": False, "reason": "STATCAST_COLLECTION_FAILED"})
+        return
+    for entry in entries:
+        player_id = str(entry.get("player_id") or "")
+        entry["advanced"] = source.data.get(player_id, {"available": False, "reason": "PLAYER_NOT_MATCHED"})
+        existing = entry.get("matchup_source_url")
+        entry["matchup_source_url"] = f"{existing}, {source.source_url}" if existing else source.source_url
 
 
 def _recent_by_team(results: list[dict[str, Any]], target: date) -> dict[str, dict[str, Any]]:

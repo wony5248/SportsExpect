@@ -88,7 +88,12 @@ class LeagueProbabilityCalibrationHistory:
             calibration = payload.get("probability_calibration") or {}
             raw_distribution = calibration.get("raw_distribution")
             calibrated_distribution = calibration.get("calibrated_distribution")
-            if isinstance(raw_distribution, dict) and isinstance(calibrated_distribution, dict):
+            # Disabled calibration produces an identical copy and is not evidence that a
+            # candidate map is safe. Only genuinely reweighted, walk-forward games enter this
+            # full-distribution promotion gate; MLB therefore remains HOLD until such a
+            # candidate backtest exists instead of passing on identity-vs-identity metrics.
+            if (calibration.get("enabled") and isinstance(raw_distribution, dict)
+                    and isinstance(calibrated_distribution, dict)):
                 distribution_observations.append(DistributionCalibrationObservation(
                     game_id=game.id, raw=raw_distribution, calibrated=calibrated_distribution,
                     home_score=int(result.home_score), away_score=int(result.away_score),
