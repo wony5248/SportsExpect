@@ -21,7 +21,7 @@ from backend.app.services.operations import LockUnavailable, backup_database, op
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services.bullpen import TIERS, apply_profile_update, load_profiles
 from backend.app.services.jobs import run_cron_refresh, run_full_refresh, run_replay_refresh
-from backend.app.services.model_lifecycle import lifecycle_status
+from backend.app.services.model_lifecycle import evaluate_candidate, lifecycle_status
 from backend.app.services.claude_advisor import clear_claude_cache
 from backend.app.services.data_integrity import pitcher_stats_integrity
 from backend.app.services.personal_claude import analyze_game_for_user
@@ -190,6 +190,12 @@ def cron_refresh(
     except LockUnavailable as exc:
         # A concurrent full/nearby run is expected occasionally; Cron can safely retry later.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/model/dry-run", dependencies=[Depends(require_admin)])
+def model_dry_run(league: str = Query(pattern="^(KBO|MLB)$"), session: Session = Depends(get_session)):
+    """Train a challenger against the archive and report the comparison without promoting it."""
+    return evaluate_candidate(session, league)
 
 
 @app.post("/api/v1/admin/replay", dependencies=[Depends(require_admin)])

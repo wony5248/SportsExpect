@@ -81,6 +81,55 @@ def predict_with_runtime(runtime: dict[str, Any], features: dict[str, Any],
     return probability, home_runs, away_runs
 
 
+def evaluate_candidate(session: Session, league: str) -> dict[str, Any]:
+    """Train a challenger and report how it scores, without touching the live champion.
+
+    The real lifecycle refuses to promote until enough independent live forecasts exist. That
+    guard is right, but it also hides whether the replay archive is already good enough to beat
+    the baseline, so this reports the same comparison read-only.
+    """
+    samples = _training_samples(session, league)
+    if len(samples) < MIN_TRAINING_SAMPLES:
+        return {"league": league, "trained": False, "samples": len(samples),
+                "reason": f"학습 표본 {len(samples)}개로 최소 {MIN_TRAINING_SAMPLES}개에 미달합니다."}
+    validation, validation_source = _validation_partition(samples)
+    validation_start = min(_naive(row["captured_at"]) for row in validation)
+    train = [row for row in samples if _naive(row["captured_at"]) < validation_start]
+    if len(train) < MIN_TRAINING_SAMPLES:
+        return {"league": league, "trained": False, "samples": len(samples),
+                "reason": f"검증 구간을 제외한 학습 표본이 {len(train)}개로 부족합니다."}
+    try:
+        artifact, candidate_metrics, comparator_metrics = _train_candidate(session, league, samples, datetime.now(KST))
+    finally:
+        # A dry run must leave nothing behind, not even an unreferenced artifact row.
+        session.rollback()
+    promoted, reason = _promotion_decision(candidate_metrics, comparator_metrics)
+    return {
+        "league": league, "trained": True, "dry_run": True,
+        "samples": len(samples), "train_samples": len(train), "validation_samples": len(validation),
+        "validation_source": validation_source,
+        "candidate": candidate_metrics, "comparator": comparator_metrics,
+        "would_promote": promoted, "reason": reason,
+        "policy": POLICY["promotion"],
+        "starter_feature_weights": _starter_feature_weights(artifact),
+    }
+
+
+def _starter_feature_weights(artifact: ModelArtifact) -> dict[str, dict[str, float]]:
+    """Standardized coefficients for the starter-related inputs, for auditing their influence."""
+    names = artifact.feature_names
+    wanted = [name for name in names if name.startswith("starter_") or name == "quality_start_rate_diff"]
+    output: dict[str, dict[str, float]] = {}
+    for name in wanted:
+        index = names.index(name)
+        output[name] = {
+            "win": round(float(artifact.win_coefficients[index]), 4),
+            "home_runs": round(float(artifact.home_run_coefficients[index]), 4),
+            "away_runs": round(float(artifact.away_run_coefficients[index]), 4),
+        }
+    return output
+
+
 def run_model_lifecycle(session: Session, league: str) -> dict[str, Any]:
     now = datetime.now(KST)
     registry = session.scalar(select(ModelRegistry).where(ModelRegistry.league == league).with_for_update())
