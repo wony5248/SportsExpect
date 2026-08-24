@@ -436,7 +436,7 @@ function InningLine({ away, home, score }: {
 
 function TeamName({ team, side }: { team: Team; side: string }) {
   const pitcher = team.starter
-  return <Box className="team">
+  return <Box className={`team ${side.toLowerCase()}`}>
     <small>{side}</small>
     <Typography variant="h5">{team.name}</Typography>
     <span>{team.stats ? `${team.stats.wins}승 ${team.stats.losses}패` : '기록 수집 전'}</span>
