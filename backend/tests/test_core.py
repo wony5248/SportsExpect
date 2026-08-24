@@ -1090,6 +1090,16 @@ def test_market_run_line_sets_dynamic_cover_population_for_headline_score():
     unchanged_population = simulate_scores(8.0, 2.5, 20_000, 20260824, league="MLB")
     assert result["frequency_tables"] == unchanged_population["frequency_tables"]
 
+    away_favorite = simulate_scores(
+        2.5, 8.0, 20_000, 20260825, league="MLB", headline_home_spread=2.5,
+    )
+    away_primary = away_favorite["projected_score"]
+    away_market = away_favorite["market_handicap"]
+    assert away_market["minus_side"] == "AWAY"
+    assert away_market["minus_probability"] > away_market["plus_probability"]
+    assert away_primary["run_line_source"] == "MARKET"
+    assert away_primary["away"] - away_primary["home"] >= 3
+
 
 @pytest.mark.parametrize("home_expected,away_expected,total_line", [
     (4.8, 4.1, 8.5),
