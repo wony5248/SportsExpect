@@ -188,6 +188,32 @@ def _reweight_win_branches(home_innings: np.ndarray, away_innings: np.ndarray,
     return (home_innings[selected], away_innings[selected], home[selected], away[selected], metadata)
 
 
+def _compact_distribution(home: np.ndarray, away: np.ndarray) -> dict[str, Any]:
+    """Small, durable audit surface for scoring calibration before and after reweighting."""
+    total = home + away
+    margin = home - away
+    decided = int(np.count_nonzero(margin))
+    home_two_way = float(np.count_nonzero(margin > 0) / decided) if decided else .5
+    return {
+        "home_two_way_probability": round(home_two_way, 8),
+        "mean_runs": {"home": round(float(home.mean()), 6), "away": round(float(away.mean()), 6)},
+        "handicap": {
+            "home_minus_1_5": round(float(np.mean(margin >= 2)), 8),
+            "away_minus_1_5": round(float(np.mean(margin <= -2)), 8),
+            "home_plus_1_5": round(float(np.mean(margin >= -1)), 8),
+            "away_plus_1_5": round(float(np.mean(margin <= 1)), 8),
+        },
+        "totals": {
+            str(line): {
+                "over": round(float(np.mean(total > line)), 8),
+                "under": round(float(np.mean(total < line)), 8),
+                "push": round(float(np.mean(total == line)), 8),
+            }
+            for line in TOTAL_MARKET_LINES
+        },
+    }
+
+
 def simulate_scores(home_expected: float, away_expected: float, simulations: int, seed: int,
                     environment_variance: float = .08, team_variance: float = .12,
                     league: str = "MLB", home_staff: dict[str, Any] | None = None,
@@ -655,9 +681,12 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
                probability_calibration: dict[str, Any] | None = None) -> dict[str, Any]:
     if len(home) != simulations or len(away) != simulations:
         raise ValueError("simulation population size does not match its recipe")
+    raw_distribution = _compact_distribution(home, away)
     home_innings, away_innings, home, away, calibration_summary = _reweight_win_branches(
         home_innings, away_innings, home, away, probability_calibration,
     )
+    calibration_summary["raw_distribution"] = raw_distribution
+    calibration_summary["calibrated_distribution"] = _compact_distribution(home, away)
     total = home + away
     home_win_probability = float(np.mean(home > away))
     away_win_probability = float(np.mean(away > home))

@@ -23,18 +23,23 @@ from backend.app.services import claude_advisor, personal_claude, runtime_secret
 from backend.app.services.claude_advisor import blend_with_claude
 from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batter_base_states,
                                                _batter_pitcher_split, _data_id_table, _hitter_name,
-                                               _pitcher_daily_log, _pitcher_opponent_split,
+                                               _pitcher_daily_log, _pitcher_log_summary,
+                                               _pitcher_opponent_split,
                                                _rank_table, _record_rate,
                                                _scoreboard_innings, _flag)
 from backend.app.collectors.kbo.client import SourcePayload
 from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient, _linescore, _weather_context
 from backend.app.collectors.odds import _consensus_event
 from backend.app.services.feature_engineering import (HOME_FIELD_MULTIPLIERS, expected_runs, _effective_lineup_ops,
-                                                      _lineup_matchup_summary, _platoon_feature)
+                                                      _lineup_matchup_summary, _paired_pitcher_difference,
+                                                      _platoon_feature, _recent_pitcher_deviation)
 from backend.app.services.refresh import (SPLIT_FETCH_BUDGET, _collect_batter_splits, _market_event_date,
                                           _market_refresh_due, _months_for_recent, _optional,
-                                          _prediction_stage, _recent_by_team, _split_budget)
+                                          _prediction_stage, _recent_by_team, _split_budget,
+                                          _lineup_split_tables)
 from backend.app.services.batting import SINGLE, STATE_INDEX, build_batter_table
+from backend.app.services.batting import STRIKEOUT
+from backend.app.services.plate_engine import _half_inning
 from backend.app.services.simulation import simulate_scores
 from backend.app.services.simulation import evaluate_simulation_recipe
 from backend.app.services.prediction import (SIMULATION_SUMMARY_SCHEMA_VERSION,
@@ -46,7 +51,8 @@ from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
 from pathlib import Path
 from backend.app.services import prediction as prediction_module
 from backend.app.services.model_lifecycle import (_coherent_run_means, _promotion_decision,
-                                                  _validation_partition, predict_with_runtime)
+                                                  _operating_prediction, _validation_partition,
+                                                  predict_with_runtime)
 from backend.app.services.historical_replay import run_historical_replay
 from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
 from backend.app.services.team_residuals import (ResidualObservation, TeamResidualHistory,
@@ -55,8 +61,10 @@ from backend.app.services.team_residuals import (ResidualObservation, TeamResidu
 from backend.app.services.pregame_context import prediction_context
 from backend.app.services.data_integrity import summarize_pitcher_rows
 from backend.app.services.probability_calibration import (LeagueProbabilityCalibrationHistory,
+                                                          DistributionCalibrationObservation,
                                                           ProbabilityObservation,
-                                                          calibrated_probability)
+                                                          calibrated_probability,
+                                                          distribution_calibration_validation)
 
 
 def test_rank_and_data_tables_are_schema_driven():
@@ -823,6 +831,32 @@ def test_plate_engine_matches_expected_runs_and_obeys_the_ninth_inning_rules():
     assert simulate_scores(4.8, 4.2, 5_000, 21, league="MLB", home_lineup=lineup)["engine"] == "INNING_RATE"
 
 
+def test_plate_engine_places_mlb_automatic_runner_in_the_base_state():
+    tables = np.zeros((9, 8, 7), dtype=float)
+    tables[:, :, STRIKEOUT] = .55
+    tables[:, :, SINGLE] = .45
+    simulations = 12_000
+    active = np.ones(simulations, dtype=bool)
+    multiplier = np.ones(simulations)
+    empty, _ = _half_inning(
+        np.random.default_rng(123), tables, np.zeros(simulations, dtype=np.int64), 1.0,
+        multiplier, active, None,
+    )
+    automatic_runner, _ = _half_inning(
+        np.random.default_rng(123), tables, np.zeros(simulations, dtype=np.int64), 1.0,
+        multiplier, active, None, runner_on_second=True,
+    )
+    assert automatic_runner.mean() > empty.mean() + .10
+
+
+def test_projected_lineups_cannot_activate_the_plate_appearance_engine():
+    rows = [SimpleNamespace(side=side, player_id=f"{side}-{order}", confirmed=True)
+            for side in ("home", "away") for order in range(1, 10)]
+    rows[-1].confirmed = False
+    # The function must stop before touching split storage when even one batting slot is projected.
+    assert _lineup_split_tables(None, SimpleNamespace(), "MLB", 2026, rows) == {}
+
+
 def test_split_backfill_stays_inside_one_refresh_budget():
     """A full slate must not spend the whole serverless invocation fetching hitters."""
     fetched: list[int] = []
@@ -882,6 +916,27 @@ def test_model_training_uses_audited_historical_holdout_until_live_sample_is_lar
     assert len(validation) == 40
     assert all(row["origin"] == "LIVE_PREGAME" for row in validation)
     assert source == "LIVE_PREGAME_CHRONOLOGICAL_HOLDOUT"
+
+
+def test_lifecycle_scores_candidates_through_the_operating_simulation_recipe():
+    runtime = {
+        "feature_names": [], "feature_means": [], "feature_scales": [],
+        "win_intercept": 0.0, "win_coefficients": [],
+        "home_run_intercept": 5.0, "home_run_coefficients": [],
+        "away_run_intercept": 4.0, "away_run_coefficients": [],
+    }
+    row = {
+        "features": {}, "base_home_runs": 5.0, "base_away_runs": 4.0,
+        "residual_context": {}, "league": "MLB",
+        "simulation_recipe": {
+            "seed": 77, "league": "MLB", "environment_variance": .08,
+            "team_variance": .26, "home_team_variance": .26, "away_team_variance": .26,
+        },
+    }
+    probability, home_runs, away_runs, method = _operating_prediction(runtime, row)
+    assert method == "OPERATING_MONTE_CARLO_RECIPE"
+    assert 0 < probability < 1
+    assert home_runs > away_runs
 
 
 def test_mlb_never_reports_a_tied_score_and_branches_beat_the_raw_mode():
@@ -975,6 +1030,43 @@ def test_archived_starter_totals_stop_at_the_game_being_replayed():
         prior_walks=0, prior_strikeouts=0, prior_home_runs=0, prior_starts=0, prior_games=0,
         prior_quality_starts=0), 4.10)
     assert empty.era is None and empty.whip is None and empty.fip is None
+
+
+def test_starter_skill_units_and_recent_form_are_independent_signals():
+    home = SimpleNamespace(fip=3.5, era=4.0, k_bb_rate=.20,
+                           recent={"available": True, "era": 5.0, "k_bb_rate": .15})
+    away = SimpleNamespace(fip=4.5, era=4.0, k_bb_rate=.10,
+                           recent={"available": True, "era": 3.0, "k_bb_rate": .18})
+    assert _paired_pitcher_difference(away, home, "fip") == 1.0
+    assert _paired_pitcher_difference(home, away, "k_bb_rate") == pytest.approx(.10)
+    assert _recent_pitcher_deviation(away, "era") - _recent_pitcher_deviation(home, "era") == -2.0
+    assert (_recent_pitcher_deviation(home, "k_bb_rate")
+            - _recent_pitcher_deviation(away, "k_bb_rate")) == pytest.approx(-.13)
+    unavailable = SimpleNamespace(era=2.0, k_bb_rate=.30, recent={"available": False})
+    assert _recent_pitcher_deviation(unavailable, "era") == 0.0
+    assert _paired_pitcher_difference(home, SimpleNamespace(fip=None), "fip") == 0.0
+
+
+def test_kbo_official_daily_log_supplies_recent_starter_form_without_fake_pitch_counts():
+    rows = [
+        {"date": "2026-04-01", "innings": 6.0, "earned_runs": 2, "hits": 5, "walks": 1,
+         "hit_batters": 1, "batters_faced": 25, "strikeouts": 7, "home_runs": 1,
+         "pitches": None, "started": True},
+        {"date": "2026-04-07", "innings": 1.0, "earned_runs": 0, "hits": 0, "walks": 0,
+         "hit_batters": 0, "batters_faced": 3, "strikeouts": 2, "home_runs": 0,
+         "pitches": None, "started": False},
+        {"date": "2026-04-12", "innings": 5.0, "earned_runs": 3, "hits": 6, "walks": 2,
+         "hit_batters": 0, "batters_faced": 23, "strikeouts": 5, "home_runs": 1,
+         "pitches": None, "started": True},
+    ]
+    summary = _pitcher_log_summary(rows, date(2026, 4, 18))
+    assert summary["starts"] == 2
+    assert summary["rest_days"] == 6
+    assert summary["k_bb_rate"] == round((14 - 3) / 51, 4)
+    assert summary["recent"]["available"] is True
+    assert summary["recent"]["starts"] == 2
+    assert summary["recent_pitches"] is None
+    assert summary["recent"]["avg_pitches"] is None
 
 
 def test_kbo_daily_log_reproduces_the_official_season_line():
@@ -1606,6 +1698,38 @@ def test_calibrated_winner_branch_reweighting_recomputes_one_coherent_population
     assert calibrated["totals"]["8.5"]["over"] + calibrated["totals"]["8.5"]["under"] == pytest.approx(1)
     assert calibrated["full_distribution_score"] == calibrated["top_scores"][0]
     assert calibrated["winner_conditional_score"] == calibrated["projected_score"]
+
+
+def test_calibration_gate_checks_runs_margin_run_line_and_totals_together():
+    observations = []
+    for index in range(200):
+        home_score, away_score = ((6, 3) if index % 2 == 0 else (3, 6))
+        home_win = home_score > away_score
+        raw = {
+            "home_two_way_probability": .5, "mean_runs": {"home": 4.5, "away": 4.5},
+            "handicap": {"home_minus_1_5": .3, "away_minus_1_5": .3},
+            "totals": {line: {"over": .5} for line in ("7.5", "8.5", "9.5")},
+        }
+        calibrated = {
+            "home_two_way_probability": .8 if home_win else .2,
+            "mean_runs": {"home": float(home_score), "away": float(away_score)},
+            "handicap": {
+                "home_minus_1_5": .8 if home_win else .05,
+                "away_minus_1_5": .05 if home_win else .8,
+            },
+            "totals": {"7.5": {"over": .9}, "8.5": {"over": .9}, "9.5": {"over": .1}},
+        }
+        observations.append(DistributionCalibrationObservation(
+            game_id=index, raw=raw, calibrated=calibrated,
+            home_score=home_score, away_score=away_score,
+        ))
+    validation = distribution_calibration_validation(observations, "MLB")
+    assert validation["status"] == "PASS"
+    assert validation["validation_scope"] == "FULL_SCORE_DISTRIBUTION"
+    assert not validation["failed_metrics"]
+    assert validation["deltas"]["run_mae"] < 0
+    assert validation["deltas"]["handicap_brier"] < 0
+    assert validation["deltas"]["total_brier"] < 0
 
 
 def test_structural_residual_needs_twenty_matching_regime_games():

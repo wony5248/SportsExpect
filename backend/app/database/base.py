@@ -60,6 +60,11 @@ def init_db() -> None:
                 "matchup_avg": "FLOAT", "matchup_obp": "FLOAT", "matchup_slg": "FLOAT", "matchup_ops": "FLOAT",
             },
             "runtime_secrets": {"model": "VARCHAR(80)"},
+            "game_starters": {
+                "prior_hit_batters": "INTEGER DEFAULT 0",
+                "prior_batters_faced": "INTEGER DEFAULT 0",
+                "metric_schema_version": "INTEGER DEFAULT 1",
+            },
         }
         with engine.begin() as connection:
             for table, expected in additions.items():

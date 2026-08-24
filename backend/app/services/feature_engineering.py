@@ -98,8 +98,10 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         "starter_era_diff": _v(getattr(away_pitcher, "era", None), 4.5) - _v(getattr(home_pitcher, "era", None), 4.5),
         "starter_whip_diff": _v(getattr(away_pitcher, "whip", None), 1.4) - _v(getattr(home_pitcher, "whip", None), 1.4),
         "starter_war_diff": _v(getattr(home_pitcher, "war", None), 0.0) - _v(getattr(away_pitcher, "war", None), 0.0),
-        "starter_fip_diff": _v(getattr(away_pitcher, "fip", None), _v(getattr(away_pitcher, "era", None), 4.5)) - _v(getattr(home_pitcher, "fip", None), _v(getattr(home_pitcher, "era", None), 4.5)),
-        "starter_k_bb_diff": _v(getattr(home_pitcher, "k_bb_rate", None), 0.0) - _v(getattr(away_pitcher, "k_bb_rate", None), 0.0),
+        # FIP and K-BB% are independent skill signals. Falling back to ERA or zero would count
+        # the season ERA edge a second time whenever one feed was incomplete.
+        "starter_fip_diff": _paired_pitcher_difference(away_pitcher, home_pitcher, "fip"),
+        "starter_k_bb_diff": _paired_pitcher_difference(home_pitcher, away_pitcher, "k_bb_rate"),
         "starter_durability_diff": _v(getattr(home_pitcher, "avg_start_innings", None), 5.0) - _v(getattr(away_pitcher, "avg_start_innings", None), 5.0),
         "quality_start_rate_diff": _quality_start_rate(home_pitcher) - _quality_start_rate(away_pitcher),
         "starter_rest_days_diff": _clip(_v(getattr(home_pitcher, "rest_days", None), 5.0), 2, 8) - _clip(_v(getattr(away_pitcher, "rest_days", None), 5.0), 2, 8),
@@ -149,8 +151,16 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         "away_lineup_platoon_index": away_platoon,
         "home_lineup_platoon_coverage": home_platoon_coverage,
         "away_lineup_platoon_coverage": away_platoon_coverage,
-        "starter_recent_era_diff": _recent_pitcher_value(away_pitcher, "era", _v(getattr(away_pitcher, "era", None), 4.5)) - _recent_pitcher_value(home_pitcher, "era", _v(getattr(home_pitcher, "era", None), 4.5)),
-        "starter_recent_k_bb_diff": _recent_pitcher_value(home_pitcher, "k_bb_rate", _v(getattr(home_pitcher, "k_bb_rate", None), 0.0)) - _recent_pitcher_value(away_pitcher, "k_bb_rate", _v(getattr(away_pitcher, "k_bb_rate", None), 0.0)),
+        # Recent form means a deviation from that pitcher's own season level. An unavailable
+        # recent log is neutral, rather than silently duplicating the season feature.
+        "starter_recent_era_diff": (
+            _recent_pitcher_deviation(away_pitcher, "era")
+            - _recent_pitcher_deviation(home_pitcher, "era")
+        ),
+        "starter_recent_k_bb_diff": (
+            _recent_pitcher_deviation(home_pitcher, "k_bb_rate")
+            - _recent_pitcher_deviation(away_pitcher, "k_bb_rate")
+        ),
         "starter_recent_form_available": bool((getattr(home_pitcher, "recent", None) or {}).get("available") and (getattr(away_pitcher, "recent", None) or {}).get("available")),
         "fielding_edge": _fielding_index(home) - _fielding_index(away),
         "baserunning_edge": _baserunning_index(home) - _baserunning_index(away),
@@ -482,10 +492,21 @@ def _bullpen_proxy(team: Any, pitcher: Any | None) -> float:
     return -team_era - max(0.0, 5.5 - starter_innings) * .35 - recent_burden * .08
 
 
-def _recent_pitcher_value(pitcher: Any | None, field: str, fallback: float) -> float:
+def _paired_pitcher_difference(first: Any | None, second: Any | None, field: str) -> float:
+    first_value = getattr(first, field, None)
+    second_value = getattr(second, field, None)
+    if first_value is None or second_value is None:
+        return 0.0
+    return float(first_value) - float(second_value)
+
+
+def _recent_pitcher_deviation(pitcher: Any | None, field: str) -> float:
     recent = getattr(pitcher, "recent", None) or {}
-    value = recent.get(field) if recent.get("available") else None
-    return fallback if value is None else float(value)
+    recent_value = recent.get(field) if recent.get("available") else None
+    season_value = getattr(pitcher, field, None)
+    if recent_value is None or season_value is None:
+        return 0.0
+    return float(recent_value) - float(season_value)
 
 
 def _fielding_index(stat: Any) -> float:

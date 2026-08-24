@@ -252,8 +252,13 @@ class KboClient:
             "awayTeamId": game["away_code"], "awayPitId": game["away_pitcher_id"],
             "homeTeamId": game["home_code"], "homePitId": game["home_pitcher_id"], "groupSc": "SEASON",
         })
+        player_ids = [str(game[f"{side}_pitcher_id"]) for side in ("away", "home")]
+        logs = self.pitcher_game_logs(player_ids, game["game_date"].year)
+        boundary = game.get("venue_date") or game["game_date"]
         output = []
         source_urls = [raw.source_url]
+        if logs.source_url:
+            source_urls.append(logs.source_url)
         for side, row in zip(("away", "home"), raw.data.get("rows", []), strict=False):
             cells = row.get("row", [])
             values = [_text(cell.get("Text", "")) for cell in cells]
@@ -263,6 +268,9 @@ class KboClient:
             opponent = game.get("home_name" if side == "away" else "away_name")
             opponent_split: dict[str, Any] = {}
             player_id = game.get(f"{side}_pitcher_id")
+            log_summary = _pitcher_log_summary(
+                logs.data.get(str(player_id), []), boundary,
+            )
             if player_id and opponent:
                 try:
                     detail = self._get_html(f"/Record/Player/PitcherDetail/Game.aspx?playerId={player_id}")
@@ -275,10 +283,15 @@ class KboClient:
                 "side": side, "player_id": game.get(f"{side}_pitcher_id"),
                 "name": name_node.get_text(strip=True) if name_node else game.get(f"{side}_pitcher_name"),
                 "confirmed": game.get("starter_confirmed", False), "era": _as_float(values[1]),
-                "war": _as_float(values[2]), "games": _as_int(values[3]),
+                "war": _as_float(values[2]),
+                # QS is a percentage of starts, not of every pitching appearance.
+                "games": log_summary["starts"] or _as_int(values[3]),
                 "avg_start_innings": _as_float(values[4]), "quality_starts": _as_int(values[5]),
                 "whip": _as_float(values[6]),
-                "recent": {"available": False, "reason": "KBO_STARTER_RECENT_GAME_LOG_NOT_IN_ANALYSIS_FEED"},
+                "fip": log_summary["fip"], "k_bb_rate": log_summary["k_bb_rate"],
+                "rest_days": log_summary["rest_days"],
+                "recent_pitches": log_summary["recent_pitches"],
+                "recent": log_summary["recent"],
                 **opponent_split,
             })
         return SourcePayload(output, ", ".join(source_urls), raw.collected_at)
@@ -617,13 +630,62 @@ def _pitcher_daily_log(html: str, season: int) -> list[dict[str, Any]]:
                 "earned_runs": number("ER"),
                 "hits": number("H"),
                 "walks": number("BB"),
+                "hit_batters": number("HBP") if "HBP" in index else 0,
+                "batters_faced": number("TBF"),
                 "strikeouts": number("SO"),
                 "home_runs": number("HR"),
+                "pitches": next((number(column) for column in ("NP", "PIT", "투구수")
+                                 if column in index), None),
                 # 구분 marks the role; anything else is a relief outing.
                 "started": cells[index["구분"]] == "선발" if "구분" in index else False,
             })
     appearances.sort(key=lambda row: row["date"])
     return appearances
+
+
+def _pitcher_log_summary(appearances: list[dict[str, Any]], boundary: date) -> dict[str, Any]:
+    """Build leakage-safe KBO starter form from official rows strictly before first pitch."""
+    prior = [row for row in appearances if date.fromisoformat(row["date"]) < boundary]
+    starts = [row for row in prior if row.get("started")]
+    recent = starts[-3:]
+    innings = sum(float(row.get("innings") or 0) for row in prior)
+    batters = sum(int(row.get("batters_faced") or 0) for row in prior)
+    strikeouts = sum(int(row.get("strikeouts") or 0) for row in prior)
+    walks = sum(int(row.get("walks") or 0) for row in prior)
+    hit_batters = sum(int(row.get("hit_batters") or 0) for row in prior)
+    homers = sum(int(row.get("home_runs") or 0) for row in prior)
+    recent_innings = sum(float(row.get("innings") or 0) for row in recent)
+    recent_batters = sum(int(row.get("batters_faced") or 0) for row in recent)
+    recent_walks = sum(int(row.get("walks") or 0) for row in recent)
+    recent_strikeouts = sum(int(row.get("strikeouts") or 0) for row in recent)
+    pitch_rows = [row for row in prior if row.get("pitches") is not None and
+                  (boundary - date.fromisoformat(row["date"])).days <= 5]
+    recent_start_pitches = [int(row["pitches"]) for row in recent if row.get("pitches") is not None]
+    last_date = date.fromisoformat(prior[-1]["date"]) if prior else None
+    return {
+        "starts": len(starts),
+        "fip": round((13 * homers + 3 * (walks + hit_batters) - 2 * strikeouts) / innings + 3.1, 3)
+        if innings else None,
+        "k_bb_rate": round((strikeouts - walks) / batters, 4) if batters else None,
+        "rest_days": (boundary - last_date).days if last_date else None,
+        "recent_pitches": sum(int(row["pitches"]) for row in pitch_rows) if pitch_rows else None,
+        "recent": {
+            "available": bool(recent), "starts": len(recent),
+            "era": round(9 * sum(int(row.get("earned_runs") or 0) for row in recent) / recent_innings, 3)
+            if recent_innings else None,
+            "whip": round((sum(int(row.get("hits") or 0) for row in recent) + recent_walks) /
+                          recent_innings, 3) if recent_innings else None,
+            "k_bb_rate": round((recent_strikeouts - recent_walks) / recent_batters, 4)
+            if recent_batters else None,
+            "avg_pitches": round(sum(recent_start_pitches) / len(recent_start_pitches), 1)
+            if recent_start_pitches else None,
+            "max_pitches": max(recent_start_pitches) if recent_start_pitches else None,
+            "derived_pitch_limit": min(115, max(70, round(
+                sum(recent_start_pitches) / len(recent_start_pitches) + 8
+            ))) if recent_start_pitches else None,
+            "velocity_available": False, "source": "KBO_OFFICIAL_DAILY_PITCHER_LOG",
+        },
+    }
 
 
 def _baseball_innings(value: Any) -> float:

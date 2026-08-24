@@ -20,6 +20,10 @@ MIN_VALIDATION_SAMPLES = 40
 MIN_NEW_SAMPLES = 25
 MIN_ROLLBACK_SAMPLES = 50
 VALIDATION_FRACTION = .20
+# Lifecycle checks use the same simulator and recipe as production at a reduced, deterministic
+# draw count. Common seeds make challenger/comparator differences stable without multiplying a
+# scheduled retrain into millions of unnecessary draws.
+MODEL_VALIDATION_SIMULATIONS = 4000
 
 TRAINABLE_FEATURES = [
     "base_home_expected", "base_away_expected", "league_average_runs",
@@ -273,6 +277,9 @@ def _training_samples(session: Session, league: str) -> list[dict[str, Any]]:
             "game_id": game.id, "captured_at": cutoff, "features": features, "origin": origin,
             "base_home_runs": base_home, "base_away_runs": base_away,
             "baseline_probability": baseline_probability,
+            "league": league,
+            "simulation_recipe": payload.get("simulation_recipe"),
+            "residual_context": (snapshot.input_payload or {}).get("team_residuals") or {},
             "home_score": float(result.home_score), "away_score": float(result.away_score),
             "outcome": 1.0 if result.home_score > result.away_score else (.5 if result.home_score == result.away_score else 0.0),
         }
@@ -405,18 +412,10 @@ def _maybe_rollback(session: Session, registry: ModelRegistry, samples: list[dic
     return "ROLLED_BACK"
 
 
-def _evaluate(runtime: dict[str, Any] | None, samples: list[dict[str, Any]]) -> dict[str, float]:
+def _evaluate(runtime: dict[str, Any] | None, samples: list[dict[str, Any]]) -> dict[str, Any]:
     predictions = []
     for row in samples:
-        if runtime:
-            _classification_probability, home_runs, away_runs = predict_with_runtime(
-                runtime, row["features"], row["base_home_runs"], row["base_away_runs"],
-            )
-            probability = _two_way_poisson_probability(home_runs, away_runs)
-        else:
-            probability, home_runs, away_runs = (
-                row["baseline_probability"], row["base_home_runs"], row["base_away_runs"],
-            )
+        probability, home_runs, away_runs, method = _operating_prediction(runtime, row)
         predictions.append((probability, home_runs, away_runs, row))
     brier = np.mean([(p - row["outcome"]) ** 2 for p, _, _, row in predictions])
     log_loss = np.mean([-row["outcome"] * math.log(_clip(p, .001, .999)) -
@@ -425,7 +424,60 @@ def _evaluate(runtime: dict[str, Any] | None, samples: list[dict[str, Any]]) -> 
     run_errors = [abs(h - row["home_score"]) for _, h, _, row in predictions]
     run_errors += [abs(a - row["away_score"]) for _, _, a, row in predictions]
     return {"sample_size": len(samples), "brier": round(float(brier), 6),
-            "log_loss": round(float(log_loss), 6), "run_mae": round(float(np.mean(run_errors)), 6)}
+            "log_loss": round(float(log_loss), 6), "run_mae": round(float(np.mean(run_errors)), 6),
+            "evaluation_method": (
+                "OPERATING_MONTE_CARLO_RECIPE" if all(
+                    _operating_prediction_method(row) == "OPERATING_MONTE_CARLO_RECIPE" for row in samples
+                ) else "MIXED_OPERATING_RECIPE_AND_POISSON_FALLBACK"
+            ),
+            "simulation_draws_per_game": MODEL_VALIDATION_SIMULATIONS}
+
+
+def _operating_prediction_method(row: dict[str, Any]) -> str:
+    return "OPERATING_MONTE_CARLO_RECIPE" if isinstance(row.get("simulation_recipe"), dict) else "POISSON_FALLBACK"
+
+
+def _operating_prediction(runtime: dict[str, Any] | None,
+                          row: dict[str, Any]) -> tuple[float, float, float, str]:
+    """Evaluate through the exact production score engine, not an unrelated Poisson proxy."""
+    from backend.app.services.feature_engineering import logistic_probability
+    from backend.app.services.prediction import blend_classifier_into_means
+    from backend.app.services.simulation import simulate_scores
+    from backend.app.services.team_residuals import apply_residual_adjustment
+
+    if runtime:
+        _probability, home_runs, away_runs = predict_with_runtime(
+            runtime, row["features"], row["base_home_runs"], row["base_away_runs"],
+        )
+    else:
+        probability = logistic_probability(row["features"])
+        home_runs, away_runs = blend_classifier_into_means(
+            probability, row["base_home_runs"], row["base_away_runs"],
+        )
+    home_runs, away_runs = apply_residual_adjustment(
+        home_runs, away_runs, row.get("residual_context") or {},
+    )
+    recipe = row.get("simulation_recipe")
+    if not isinstance(recipe, dict):
+        return (_two_way_poisson_probability(home_runs, away_runs), home_runs, away_runs,
+                "POISSON_FALLBACK")
+    result = simulate_scores(
+        home_runs, away_runs, MODEL_VALIDATION_SIMULATIONS, int(recipe.get("seed", 0)),
+        float(recipe.get("environment_variance", .08)), float(recipe.get("team_variance", .12)),
+        league=str(recipe.get("league") or row.get("league") or "MLB"),
+        home_staff=recipe.get("home_staff"), away_staff=recipe.get("away_staff"),
+        home_lineup=(np.asarray(recipe["home_lineup"], dtype=float)
+                     if recipe.get("home_lineup") is not None else None),
+        away_lineup=(np.asarray(recipe["away_lineup"], dtype=float)
+                     if recipe.get("away_lineup") is not None else None),
+        home_team_variance=recipe.get("home_team_variance"),
+        away_team_variance=recipe.get("away_team_variance"),
+        headline_total_line=recipe.get("headline_total_line"),
+        headline_home_spread=recipe.get("headline_home_spread"),
+        probability_calibration=recipe.get("probability_calibration"),
+    )
+    return (float(result["home_two_way_probability"]), float(result["mean_runs"]["home"]),
+            float(result["mean_runs"]["away"]), "OPERATING_MONTE_CARLO_RECIPE")
 
 
 def _fit_logistic(x: np.ndarray, y: np.ndarray) -> tuple[float, np.ndarray]:

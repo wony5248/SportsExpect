@@ -679,9 +679,16 @@ def _lineup_split_tables(session: Session, game: Game, league: str, season: int,
                          lineups: list[LineupEntry]) -> dict[str, Any]:
     """Build the per-club hitter tables the plate-appearance engine needs.
 
-    A club is only handed to the engine when every one of its nine slots resolves to a hitter
-    with collected splits or, failing that, to the average of the hitters this game does have.
+    A club is only handed to the engine after both official batting orders are confirmed and
+    every one of its nine slots resolves to a hitter with collected splits or, failing that, to
+    the average of the hitters this game does have. Projected orders stay on the inning engine.
     """
+    confirmed = {"home": [], "away": []}
+    for entry in lineups:
+        if entry.side in confirmed:
+            confirmed[entry.side].append(bool(entry.confirmed))
+    if any(len(values) < 9 or not all(values[:9]) for values in confirmed.values()):
+        return {}
     by_side: dict[str, list[dict[str, Any]]] = {"home": [], "away": []}
     for entry in lineups:
         if entry.side in by_side and len(by_side[entry.side]) < 9:

@@ -111,7 +111,7 @@ def _play(rng: np.random.Generator, simulations: int, home: dict[str, Any], away
                                             None if extra else tier_counts["home"])
         runs, away_batter = _half_inning(
             rng, away["tables"], away_batter, away_scale * away_game_scale,
-            home_multiplier, live, None)
+            home_multiplier, live, None, runner_on_second=(extra and league == "MLB"))
         away_total += runs
         away_runs_by_inning.append(np.where(live, runs, -1) if inning >= 9 else runs)
         # Bottom half. From the ninth on, the home club bats only while level or behind, and a
@@ -123,7 +123,7 @@ def _play(rng: np.random.Generator, simulations: int, home: dict[str, Any], away
                                             None if extra else tier_counts["away"])
         runs, home_batter = _half_inning(
             rng, home["tables"], home_batter, home_scale * home_game_scale,
-            away_multiplier, bats, cap)
+            away_multiplier, bats, cap, runner_on_second=(extra and league == "MLB"))
         home_total += runs
         # A half-inning that was never played is recorded as -1 so a scorebook can show it as
         # skipped rather than as a scoreless inning.
@@ -168,13 +168,16 @@ def _staff_multiplier(profile: dict[str, Any], inning: int, lead: np.ndarray, ex
 def _half_inning(rng: np.random.Generator, tables: np.ndarray, batter: np.ndarray,
                  offense_scale: float | np.ndarray,
                  pitcher_multiplier: np.ndarray, active: np.ndarray,
-                 run_cap: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+                 run_cap: np.ndarray | None,
+                 runner_on_second: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """Bat until three outs, or until a walk-off caps the inning."""
     simulations = batter.size
     runs = np.zeros(simulations, dtype=np.int64)
     outs = np.zeros(simulations, dtype=np.int64)
     first = np.zeros(simulations, dtype=bool)
-    second = np.zeros(simulations, dtype=bool)
+    # MLB extra innings begin with an automatic runner on second. This must be represented in
+    # the base-out state itself so RISP-specific hitter probabilities and advancement rules run.
+    second = active.copy() if runner_on_second else np.zeros(simulations, dtype=bool)
     third = np.zeros(simulations, dtype=bool)
     batting = active.copy()
     if run_cap is not None:

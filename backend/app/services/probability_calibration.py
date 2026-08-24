@@ -13,16 +13,23 @@ from backend.app.models import Game, GameResult, Prediction
 
 MIN_CALIBRATION_SAMPLES = 30
 MAX_CALIBRATION_SAMPLES = 1000
+MIN_DISTRIBUTION_VALIDATION_SAMPLES = 200
 CALIBRATION_METHOD = "LEAGUE_WALK_FORWARD_PLATT_V2_IRLS"
 PLATT_L2_REGULARIZATION = 4.0
-# A calibrator is promoted per league only when chronological replay improves the proper scoring
-# rules. KBO passed on 555 games; MLB's 1,963-game replay worsened both Brier and log loss, so its
-# fitted map remains observable but cannot alter production probabilities yet.
-CALIBRATION_ENABLED_LEAGUES = {"KBO"}
+# Historical win-only checks remain the provisional gate until schema-v24 replays have collected
+# enough pre/post score-distribution diagnostics. At that point the dynamic gate below requires
+# win, run, margin, run-line and total metrics to stay within their own guardrails.
 CALIBRATION_VALIDATION = {
-    "KBO": {"status": "PASS", "sample_count": 555, "brier_delta": -.00014, "log_loss_delta": -.00029},
-    "MLB": {"status": "HOLD", "sample_count": 1963, "brier_delta": .00023, "log_loss_delta": .00050},
+    "KBO": {"status": "PASS", "sample_count": 555, "brier_delta": -.00014,
+            "log_loss_delta": -.00029, "validation_scope": "WIN_ONLY_PROVISIONAL"},
+    "MLB": {"status": "HOLD", "sample_count": 1963, "brier_delta": .00023,
+            "log_loss_delta": .00050, "validation_scope": "WIN_ONLY_PROVISIONAL"},
 }
+CALIBRATION_GUARDRAILS = {
+    "brier": 0.0, "log_loss": 0.0, "run_mae": .02, "total_mae": .03,
+    "margin_mae": .03, "handicap_brier": .002, "total_brier": .002,
+}
+TOTAL_VALIDATION_LINES = {"MLB": ("7.5", "8.5", "9.5"), "KBO": ("8.5", "9.5", "10.5")}
 
 
 @dataclass(frozen=True)
@@ -34,11 +41,22 @@ class ProbabilityObservation:
     outcome: float
 
 
+@dataclass(frozen=True)
+class DistributionCalibrationObservation:
+    game_id: int
+    raw: dict[str, Any]
+    calibrated: dict[str, Any]
+    home_score: int
+    away_score: int
+
+
 class LeagueProbabilityCalibrationHistory:
     """League-specific pregame probabilities paired only with already-final outcomes."""
 
-    def __init__(self, observations: list[ProbabilityObservation]):
+    def __init__(self, observations: list[ProbabilityObservation],
+                 validation: dict[str, Any] | None = None):
         self.observations = sorted(observations, key=lambda row: (row.available_at, row.game_id))
+        self.validation = validation
 
     @classmethod
     def from_session(cls, session: Session, league: str) -> LeagueProbabilityCalibrationHistory:
@@ -64,11 +82,20 @@ class LeagueProbabilityCalibrationHistory:
                 by_game[game.id] = (prediction, game, result)
 
         observations = []
+        distribution_observations = []
         for prediction, game, result in by_game.values():
+            payload = prediction.payload or {}
+            calibration = payload.get("probability_calibration") or {}
+            raw_distribution = calibration.get("raw_distribution")
+            calibrated_distribution = calibration.get("calibrated_distribution")
+            if isinstance(raw_distribution, dict) and isinstance(calibrated_distribution, dict):
+                distribution_observations.append(DistributionCalibrationObservation(
+                    game_id=game.id, raw=raw_distribution, calibrated=calibrated_distribution,
+                    home_score=int(result.home_score), away_score=int(result.away_score),
+                ))
             if result.home_score == result.away_score:
                 # The production KBO market is two-way with ties excluded.
                 continue
-            payload = prediction.payload or {}
             raw_probability = payload.get("raw_simulation_home_probability")
             if raw_probability is None:
                 raw_probability = payload.get("simulation_home_probability")
@@ -81,7 +108,8 @@ class LeagueProbabilityCalibrationHistory:
                 probability=_clip(float(raw_probability), .001, .999),
                 outcome=1.0 if result.home_score > result.away_score else 0.0,
             ))
-        return cls(observations)
+        validation = distribution_calibration_validation(distribution_observations, league)
+        return cls(observations, validation)
 
     def context_for(self, game: Game) -> dict[str, Any]:
         if game.start_at is None:
@@ -92,8 +120,8 @@ class LeagueProbabilityCalibrationHistory:
             and row.game_id != game.id
             and _naive(row.available_at) <= _naive(game.start_at)
         ][-MAX_CALIBRATION_SAMPLES:]
-        validation = CALIBRATION_VALIDATION.get(game.league, {"status": "HOLD"})
-        if game.league not in CALIBRATION_ENABLED_LEAGUES:
+        validation = self.validation or CALIBRATION_VALIDATION.get(game.league, {"status": "HOLD"})
+        if validation.get("status") != "PASS":
             context = identity_calibration("WALK_FORWARD_VALIDATION_HOLD", len(rows))
             context["validation"] = validation
             return context
@@ -114,6 +142,75 @@ class LeagueProbabilityCalibrationHistory:
             "future_results_used": 0,
             "validation": validation,
         }
+
+
+def distribution_calibration_validation(
+    observations: list[DistributionCalibrationObservation], league: str,
+) -> dict[str, Any]:
+    """Gate outcome reweighting on every distribution family it changes."""
+    if len(observations) < MIN_DISTRIBUTION_VALIDATION_SAMPLES:
+        provisional = dict(CALIBRATION_VALIDATION.get(league, {"status": "HOLD"}))
+        provisional.update({
+            "distribution_status": "COLLECTING",
+            "distribution_sample_count": len(observations),
+            "distribution_minimum_samples": MIN_DISTRIBUTION_VALIDATION_SAMPLES,
+        })
+        return provisional
+
+    raw = _distribution_metrics(observations, league, "raw")
+    calibrated = _distribution_metrics(observations, league, "calibrated")
+    deltas = {key: round(calibrated[key] - raw[key], 8) for key in raw}
+    failed = [key for key, tolerance in CALIBRATION_GUARDRAILS.items()
+              if deltas[key] > tolerance]
+    return {
+        "status": "PASS" if not failed else "HOLD",
+        "validation_scope": "FULL_SCORE_DISTRIBUTION",
+        "sample_count": len(observations),
+        "raw": raw, "calibrated": calibrated, "deltas": deltas,
+        "guardrails": CALIBRATION_GUARDRAILS, "failed_metrics": failed,
+    }
+
+
+def _distribution_metrics(observations: list[DistributionCalibrationObservation], league: str,
+                          side: str) -> dict[str, float]:
+    brier: list[float] = []
+    log_losses: list[float] = []
+    run_errors: list[float] = []
+    total_errors: list[float] = []
+    margin_errors: list[float] = []
+    handicap_briers: list[float] = []
+    total_briers: list[float] = []
+    for row in observations:
+        snapshot = row.raw if side == "raw" else row.calibrated
+        means = snapshot["mean_runs"]
+        home_mean, away_mean = float(means["home"]), float(means["away"])
+        actual_margin = row.home_score - row.away_score
+        if actual_margin != 0:
+            probability = _clip(float(snapshot["home_two_way_probability"]), .001, .999)
+            outcome = 1.0 if actual_margin > 0 else 0.0
+            brier.append((probability - outcome) ** 2)
+            log_losses.append(-outcome * math.log(probability) - (1 - outcome) * math.log(1 - probability))
+        run_errors.extend((abs(home_mean - row.home_score), abs(away_mean - row.away_score)))
+        total_errors.append(abs(home_mean + away_mean - row.home_score - row.away_score))
+        margin_errors.append(abs(home_mean - away_mean - actual_margin))
+        handicap = snapshot["handicap"]
+        handicap_briers.extend((
+            (float(handicap["home_minus_1_5"]) - float(actual_margin >= 2)) ** 2,
+            (float(handicap["away_minus_1_5"]) - float(actual_margin <= -2)) ** 2,
+        ))
+        actual_total = row.home_score + row.away_score
+        for line in TOTAL_VALIDATION_LINES[league]:
+            over = float(snapshot["totals"][line]["over"])
+            total_briers.append((over - float(actual_total > float(line))) ** 2)
+
+    def mean(values: list[float]) -> float:
+        return round(sum(values) / len(values), 8) if values else 0.0
+
+    return {
+        "brier": mean(brier), "log_loss": mean(log_losses), "run_mae": mean(run_errors),
+        "total_mae": mean(total_errors), "margin_mae": mean(margin_errors),
+        "handicap_brier": mean(handicap_briers), "total_brier": mean(total_briers),
+    }
 
 
 def identity_calibration(reason: str, sample_count: int = 0) -> dict[str, Any]:

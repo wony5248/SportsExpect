@@ -15,7 +15,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.collectors.kbo import KboClient
@@ -26,6 +26,7 @@ from backend.app.models import Game, GameStarter
 # A quality start is six or more innings with three or fewer earned runs.
 QUALITY_START_INNINGS = 6.0
 QUALITY_START_EARNED_RUNS = 3
+STARTER_METRIC_SCHEMA_VERSION = 2
 
 
 def backfill_archived_starters(session: Session, season: int, limit: int = 400,
@@ -34,10 +35,13 @@ def backfill_archived_starters(session: Session, season: int, limit: int = 400,
     owned = client is None
     client = client or (MlbClient() if league == "MLB" else KboClient())
     try:
+        current_games = select(GameStarter.game_id).where(
+            GameStarter.metric_schema_version >= STARTER_METRIC_SCHEMA_VERSION,
+        ).group_by(GameStarter.game_id).having(func.count(GameStarter.id) >= 2)
         pending = session.scalars(
             select(Game).where(
                 Game.league == league, Game.status == "FINAL",
-                Game.id.notin_(select(GameStarter.game_id)),
+                Game.id.notin_(current_games),
             ).order_by(Game.game_date.desc()).limit(limit)
         ).all()
         if not pending:
@@ -69,11 +73,20 @@ def backfill_archived_starters(session: Session, season: int, limit: int = 400,
             boundary = (game.venue_date or game.game_date).isoformat()
             for side, row in by_game[external_id].items():
                 totals = _totals_before(logs.data.get(row["player_id"], []), boundary)
-                session.add(GameStarter(
-                    game_id=game.id, side=side, player_id=row["player_id"], name=row.get("name"),
-                    source=f"{league} official schedule + game log",
-                    source_url=logs.source_url[:2000],
-                    collected_at=collected, **totals))
+                existing = session.scalar(select(GameStarter).where(
+                    GameStarter.game_id == game.id, GameStarter.side == side,
+                ))
+                values = {
+                    "player_id": row["player_id"], "name": row.get("name"),
+                    "source": f"{league} official schedule + game log",
+                    "source_url": logs.source_url[:2000], "collected_at": collected,
+                    "metric_schema_version": STARTER_METRIC_SCHEMA_VERSION, **totals,
+                }
+                if existing is None:
+                    session.add(GameStarter(game_id=game.id, side=side, **values))
+                else:
+                    for key, value in values.items():
+                        setattr(existing, key, value)
                 written += 1
         return {"league": league, "season": season, "pending": len(pending), "written": written,
                 "games": len(wanted), "pitchers": len(player_ids)}
@@ -93,6 +106,8 @@ def _totals_before(appearances: list[dict[str, Any]], boundary: str) -> dict[str
         "prior_earned_runs": sum(int(row["earned_runs"]) for row in prior),
         "prior_hits": sum(int(row["hits"]) for row in prior),
         "prior_walks": sum(int(row["walks"]) for row in prior),
+        "prior_hit_batters": sum(int(row.get("hit_batters") or 0) for row in prior),
+        "prior_batters_faced": sum(int(row.get("batters_faced") or 0) for row in prior),
         "prior_strikeouts": sum(int(row["strikeouts"]) for row in prior),
         "prior_home_runs": sum(int(row["home_runs"]) for row in prior),
         "prior_quality_starts": sum(
@@ -117,7 +132,8 @@ def starter_view(record: GameStarter, league_era: float) -> Any:
     whip = None if thin else (record.prior_hits + record.prior_walks) / innings
     # Defense-independent estimate on the same scale as ERA, matching the live collector.
     fip = None if thin else (
-        (13 * record.prior_home_runs + 3 * record.prior_walks - 2 * record.prior_strikeouts) / innings + 3.1
+        (13 * record.prior_home_runs + 3 * (record.prior_walks + getattr(record, "prior_hit_batters", 0))
+         - 2 * record.prior_strikeouts) / innings + 3.1
     )
     return SimpleNamespace(
         player_id=record.player_id, name=record.name,
@@ -128,7 +144,9 @@ def starter_view(record: GameStarter, league_era: float) -> Any:
         games=record.prior_starts or record.prior_games,
         avg_start_innings=(innings / record.prior_starts) if record.prior_starts else None,
         quality_starts=record.prior_quality_starts,
-        k_bb_rate=(record.prior_strikeouts / record.prior_walks) if record.prior_walks else None,
+        k_bb_rate=((record.prior_strikeouts - record.prior_walks) /
+                   getattr(record, "prior_batters_faced", 0))
+        if getattr(record, "prior_batters_faced", 0) else None,
         rest_days=None, recent_pitches=None, handedness=None,
         opponent_games=None, opponent_innings=None, opponent_era=None, opponent_whip=None,
         recent=None,

@@ -179,11 +179,12 @@ class MlbClient:
             homers = _as_int(stat.get("homeRuns"), 0) or 0
             hit_batters = _as_int(stat.get("hitBatsmen"), 0) or 0
             fip = ((13 * homers + 3 * (walks + hit_batters) - 2 * strikeouts) / innings + 3.1) if innings else None
-            prior_logs = [row for row in logs if row.get("date") and date.fromisoformat(row["date"][:10]) < game["game_date"]]
+            boundary = game.get("venue_date") or game["game_date"]
+            prior_logs = [row for row in logs if row.get("date") and date.fromisoformat(row["date"][:10]) < boundary]
             prior_logs.sort(key=lambda row: row["date"])
             last_date = date.fromisoformat(prior_logs[-1]["date"][:10]) if prior_logs else None
             recent_pitches = sum(_as_int(row.get("stat", {}).get("numberOfPitches"), 0) or 0 for row in prior_logs
-                                 if (game["game_date"] - date.fromisoformat(row["date"][:10])).days <= 5)
+                                 if (boundary - date.fromisoformat(row["date"][:10])).days <= 5)
             prior_starts = [row for row in prior_logs if (_as_int(row.get("stat", {}).get("gamesStarted"), 0) or 0) > 0]
             recent_starts = prior_starts[-3:]
             recent_innings = sum(_innings(row.get("stat", {}).get("inningsPitched")) for row in recent_starts)
@@ -205,12 +206,12 @@ class MlbClient:
             output.append({
                 "side": side, "player_id": player_id, "name": game.get(f"{side}_pitcher_name"),
                 "confirmed": True, "era": _as_float(stat.get("era")), "whip": _as_float(stat.get("whip")),
-                "war": None, "games": _as_int(stat.get("gamesPlayed")),
+                "war": None, "games": starts,
                 "avg_start_innings": innings / starts if starts else None,
                 "quality_starts": _as_int(stat.get("qualityStarts")),
                 "fip": round(fip, 3) if fip is not None else None,
                 "k_bb_rate": (strikeouts - walks) / batters if batters else None,
-                "rest_days": (game["game_date"] - last_date).days if last_date else None,
+                "rest_days": (boundary - last_date).days if last_date else None,
                 "recent_pitches": recent_pitches,
                 "handedness": person_row.get("pitchHand", {}).get("code"),
                 "opponent_games": len(opponent_logs), "opponent_innings": round(opponent_innings, 3),
@@ -434,8 +435,11 @@ class MlbClient:
                         "earned_runs": _as_int(stat.get("earnedRuns"), 0) or 0,
                         "hits": _as_int(stat.get("hits"), 0) or 0,
                         "walks": _as_int(stat.get("baseOnBalls"), 0) or 0,
+                        "hit_batters": _as_int(stat.get("hitBatsmen"), 0) or 0,
+                        "batters_faced": _as_int(stat.get("battersFaced"), 0) or 0,
                         "strikeouts": _as_int(stat.get("strikeOuts"), 0) or 0,
                         "home_runs": _as_int(stat.get("homeRuns"), 0) or 0,
+                        "pitches": _as_int(stat.get("numberOfPitches"), 0) or 0,
                         "started": bool(_as_int(stat.get("gamesStarted"), 0)),
                     })
             appearances.sort(key=lambda row: row["date"])
