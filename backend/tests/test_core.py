@@ -1100,6 +1100,12 @@ def test_market_run_line_sets_dynamic_cover_population_for_headline_score():
     assert away_primary["run_line_source"] == "MARKET"
     assert away_primary["away"] - away_primary["home"] >= 3
 
+    margins = away_favorite["frequency_tables"]["margins"]
+    home_plus_from_wins_and_close_losses = sum(
+        count for margin, count in margins.items() if int(margin) > -2.5
+    ) / 20_000
+    assert away_market["plus_probability"] == pytest.approx(home_plus_from_wins_and_close_losses)
+
 
 @pytest.mark.parametrize("home_expected,away_expected,total_line", [
     (4.8, 4.1, 8.5),
