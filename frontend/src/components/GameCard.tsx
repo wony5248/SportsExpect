@@ -72,6 +72,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const marginShape = p && coherent ? marginBuckets(p) : null
   const topOutcome = ranking?.outcomes[0]
   const handicap = p && coherent ? handicapSides(p, game) : null
+  const picks = p && coherent && ranking && handicap ? marketPicks(p, game, ranking, handicap) : null
   const requestPersonalAnalysis = async () => {
     if (!signedIn) { onRequireLogin(); return }
     setPersonalBusy(true); setPersonalError(null)
@@ -97,7 +98,8 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           : `${game.time ?? '시간 미정'} KST · ${game.stadium ?? '구장 미정'}`}</span>
         <Stack direction="row" spacing={.7}>
           {engine && <Chip size="small"
-            label={`${isReplay ? '과거 재현 · ' : ''}${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'} 시뮬레이션 엔진`}
+            label={`${isReplay ? '과거 재현 · ' : ''}${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'}`}
+            title={`${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'} 시뮬레이션 엔진`}
             className={`engine-chip${engine === 'PLATE_APPEARANCE' ? ' plate' : ''}${isReplay ? ' replay' : ''}`} />}
           <Chip size="small" label={game.freshness.status === 'FRESH' ? '최신' : '갱신 필요'} className={`freshness ${game.freshness.status.toLowerCase()}`} />
           <Chip size="small" label={gameStatusLabel(game.status)} className={`status ${game.status.toLowerCase()}`} />
@@ -152,25 +154,29 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           <Box className="probability-track"><i style={{ width: pct(p.away_win_probability) }} /><b style={{ width: pct(p.home_win_probability) }} /></Box>
         </Box>
 
+        {picks && picks.length > 0 && <Box className="pick-strip">
+          <span className="pick-strip-title">기준점별 유력한 쪽</span>
+          {picks.map((pick) => <Box key={pick.key}
+            className={`pick${pick.hit == null ? '' : pick.hit ? ' hit' : ' miss'}`}>
+            <span className="pick-market">{pick.market}{pick.line && <i>{pick.line}</i>}
+              {pick.hit != null && <em>{pick.hit ? '적중' : '미적중'}</em>}</span>
+            <strong>{pick.pick}</strong>
+            <Box className="pick-gauge"><i style={{ width: pct(pick.probability) }} /></Box>
+            <b>{pct(pick.probability)}</b>
+            {pick.note && <small>{pick.note}</small>}
+          </Box>)}
+        </Box>}
+
         <Box className="score-row">
           <Box className="primary"><span>예상 점수 · 2만 회 평균</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>같은 2만 회의 평균 총점 {stat(statisticalExpectedTotal, 1)}점</small></Box>
           <Divider orientation="vertical" flexItem />
           <Box><span>2만 회 정합 대표 점수</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{representativeSummary(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
-          <Divider orientation="vertical" flexItem />
-          <Box className={`headline-outcome${topOutcome?.hit == null ? '' : topOutcome.hit ? ' hit' : ' miss'}`}>
-            <Box className="headline-outcome-heading">
-              <span>{ranking ? '가장 유력한 결과' : modeOutcome ? '가장 많이 나온 결과' : '확률이 높은 결과'}</span>
-              {topOutcome?.hit != null && <span className="headline-outcome-verdict" aria-label={topOutcome.hit ? '실제 결과 적중' : '실제 결과 미적중'}>
-                <i aria-hidden="true">{topOutcome.hit ? '✓' : '×'}</i>{topOutcome.hit ? '적중' : '미적중'}
-              </span>}
-            </Box>
-            <strong>{topOutcome?.label ?? (modeOutcome ? outcomeLabel(modeOutcome.value, game) : favoriteLabel(p, game))}</strong>
-            <small>{topOutcome
-              ? `${pct(topOutcome.probability)}${topOutcome.note ? ` · ${topOutcome.note}` : ''}${topOutcome.actual ? ` · ${topOutcome.actual}` : ''}`
-              : modeOutcome ? modeFrequency(modeOutcome) : pct(Math.max(p.home_win_probability, p.away_win_probability))}</small>
-          </Box>
         </Box>
 
+        <Button fullWidth onClick={() => setOpen(!open)} endIcon={<ExpandMoreRounded className={open ? 'rotated' : ''} />} className="detail-button">{open ? '분석 접기' : '상세 분석 보기'}</Button>
+        <Collapse in={open}>
+          <Box className="details">
+            <Typography variant="subtitle2">예측 상세</Typography>
         {displayedScoreCandidates.length ? <Box className="score-candidates">
           <span>예측 승리·조건부 점수차·총점 방향이 같은 중앙 시나리오 3가지</span>
           <Stack direction="row" flexWrap="wrap" gap={.8}>
@@ -252,9 +258,6 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             <strong>{pct(outcome.probability)}</strong>
           </Box>)}
         </Box>}
-        <Button fullWidth onClick={() => setOpen(!open)} endIcon={<ExpandMoreRounded className={open ? 'rotated' : ''} />} className="detail-button">{open ? '분석 접기' : '상세 분석 보기'}</Button>
-        <Collapse in={open}>
-          <Box className="details">
             <Typography variant="subtitle2">선발 매치업</Typography>
             <Box className="starter-grid">
               <Starter team={game.away} /><Starter team={game.home} />
@@ -543,6 +546,56 @@ type MarketVerdict = { market: string; pick: string; probability: number; actual
 // 마핸/플핸 is a market label: the team laying the runs is whoever the book made favorite,
 // not whoever our simulation happens to like. KBO books rarely publish a run line, so fall back
 // to the moneyline gap, and only to our own model when the market says nothing at all.
+/** The three markets a reader actually came to check, each reduced to: what is the line, which
+ *  side does the simulation favour, and by how much. Everything else on the card is supporting
+ *  detail for these three answers. */
+function marketPicks(p: NonNullable<Game['prediction']>, game: Game,
+                     ranking: ReturnType<typeof rankedOutcomes>,
+                     handicap: ReturnType<typeof handicapSides>) {
+  const picks: {
+    key: string; market: string; line: string; pick: string; probability: number
+    note?: string; hit?: boolean
+  }[] = []
+
+  const result = game.status === 'FINAL' ? game.result : null
+  const margin = result ? result.home_score - result.away_score : null
+  const actualTotal = result ? result.home_score + result.away_score : null
+
+  if (typeof handicap.minusProbability === 'number' && typeof handicap.plusProbability === 'number') {
+    const takeMinus = handicap.minusProbability >= handicap.plusProbability
+    picks.push({
+      key: 'handicap',
+      market: takeMinus ? '핸디캡 · 마핸' : '핸디캡 · 플핸',
+      line: takeMinus ? `-${handicap.runLine}` : `+${handicap.runLine}`,
+      pick: takeMinus ? handicap.minusTeam : handicap.plusTeam,
+      probability: takeMinus ? handicap.minusProbability : handicap.plusProbability,
+      hit: margin == null ? undefined : (() => {
+        const minusCovered = (handicap.homeMinus ? margin : -margin) >= handicap.minimumMargin
+        return takeMinus ? minusCovered : !minusCovered
+      })(),
+      note: handicap.fromMarket
+        ? handicap.modelAgrees ? '시장과 같은 마핸 팀' : `시장 마핸은 ${handicap.minusTeam}`
+        : '배당 없어 모델 기준',
+    })
+  }
+
+  const totals = ranking.line != null ? p.totals[String(ranking.line)] : undefined
+  if (ranking.line != null && totals) {
+    const takeOver = totals.over >= totals.under
+    picks.push({
+      key: 'total',
+      market: '총점',
+      line: String(ranking.line),
+      pick: takeOver ? '오버' : '언더',
+      probability: takeOver ? totals.over : totals.under,
+      hit: actualTotal == null || actualTotal === ranking.line ? undefined
+        : takeOver ? actualTotal > ranking.line : actualTotal < ranking.line,
+      note: ranking.lineSource === '시장' ? '실제 배당 기준점' : '배당 없어 모델 기준점',
+    })
+  }
+  return picks
+}
+
 function handicapSides(p: NonNullable<Game['prediction']>, game: Game) {
   const spread = game.market?.home_spread
   const pricedMarket = p.market_handicap

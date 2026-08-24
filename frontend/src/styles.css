@@ -79,7 +79,26 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .probability-track { height: 5px; margin-top: 16px; display: flex; border-radius: 10px; overflow: hidden; background: #1c3a30; }
 .probability-track i { background: #9dafaa; }
 .probability-track b { background: #65dbaa; }
-.score-row { display: grid; grid-template-columns: 1.4fr 1px 1fr 1px 1fr; gap: 14px; padding: 22px 4px; }
+/* The three markets a reader came to check. This is the loudest block on the card by design. */
+.pick-strip { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 16px; }
+.pick-strip-title { grid-column: 1 / -1; color: #728b81; font-size: .67rem; }
+.pick { position: relative; display: grid; gap: 6px; padding: 13px 14px; border-radius: 13px;
+  border: 1px solid rgba(189,231,213,.13); background: rgba(3,16,12,.34); }
+.pick.lead { border-color: rgba(126,231,184,.3); background: rgba(126,231,184,.09); }
+.pick-market { display: flex; align-items: center; gap: 6px; color: #7d968c; font-size: .63rem; font-weight: 750; letter-spacing: .04em; }
+.pick-market i { padding: 1px 6px; border-radius: 5px; background: rgba(126,231,184,.14); color: #7ee7b8; font-style: normal; font-size: .62rem; font-variant-numeric: tabular-nums; }
+.pick-market em { margin-left: auto; padding: 1px 7px; border-radius: 5px; font-style: normal; font-size: .6rem; font-weight: 800; }
+.pick.hit .pick-market em { background: rgba(126,231,184,.16); color: #7ee7b8; }
+.pick.miss .pick-market em { background: rgba(242,155,142,.16); color: #f29b8e; }
+.pick.hit { border-color: rgba(126,231,184,.34); }
+.pick.miss { border-color: rgba(242,155,142,.28); }
+.pick > strong { color: #eaf4ef; font-size: 1.02rem; font-weight: 800; line-height: 1.25; overflow-wrap: anywhere; }
+.pick-gauge { height: 5px; border-radius: 3px; background: rgba(119,155,140,.16); overflow: hidden; }
+.pick-gauge i { display: block; height: 100%; border-radius: 3px; background: #65dbaa; }
+.pick.lead .pick-gauge i { background: #7ee7b8; }
+.pick > b { color: #7ee7b8; font-size: 1.35rem; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+.pick > small { color: #6b847b; font-size: .58rem; line-height: 1.35; }
+.score-row { display: grid; grid-template-columns: 1fr 1px 1fr; gap: 14px; padding: 18px 4px 20px; }
 .score-row > div { display: grid; align-content: center; }
 .score-row span, .market-row span { color: #728b81; font-size: .67rem; }
 .score-row strong { margin-top: 4px; font-size: 1.12rem; }
@@ -87,16 +106,6 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .score-row strong i { color: #49665b; font-style: normal; padding: 0 3px; }
 .score-row strong small { color: #718b81; font-size: .65rem; }
 .score-row > div > small { margin-top: 3px; color: #607a70; font-size: .58rem; }
-.score-row > .headline-outcome { margin: -9px -10px; padding: 9px 10px; border: 1px solid transparent; border-radius: 11px; transition: border-color .2s, background-color .2s; }
-.headline-outcome-heading { display: flex !important; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 5px; }
-.score-row .headline-outcome-verdict { display: inline-flex; align-items: center; gap: 3px; width: fit-content; padding: 3px 6px; border-radius: 999px; font-size: .58rem; font-weight: 850; line-height: 1; }
-.headline-outcome-verdict i { font-size: .72rem; font-style: normal; line-height: .8; }
-.score-row > .headline-outcome.hit { border-color: rgba(126,231,184,.3); background: rgba(126,231,184,.1); }
-.score-row > .headline-outcome.hit strong, .score-row .headline-outcome.hit .headline-outcome-verdict { color: #7ee7b8; }
-.score-row .headline-outcome.hit .headline-outcome-verdict { background: rgba(126,231,184,.15); }
-.score-row > .headline-outcome.miss { border-color: rgba(242,155,142,.28); background: rgba(242,155,142,.085); }
-.score-row > .headline-outcome.miss strong, .score-row .headline-outcome.miss .headline-outcome-verdict { color: #f29b8e; }
-.score-row .headline-outcome.miss .headline-outcome-verdict { background: rgba(242,155,142,.14); }
 .score-candidates { display: grid; gap: 6px; margin: -10px 0 16px; padding: 0 4px; }
 .score-candidates > span { color: #728b81; font-size: .67rem; }
 .score-candidates b { padding: 4px 10px; border-radius: 8px; background: rgba(119,155,140,.1); color: #b7c8c1; font-size: .74rem; font-weight: 600; }
@@ -284,14 +293,27 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .game-count { flex: 0 0 auto; padding-bottom: 3px; }
   .game-grid { grid-template-columns: minmax(0, 1fr); }
   .game-card { min-width: 0; padding: 17px; border-radius: 16px; }
-  .card-meta { align-items: flex-start !important; gap: 9px; }
+  /* Metadata should never cost more vertical space than a prediction block. */
+  .card-meta { align-items: flex-start !important; gap: 6px; font-size: .68rem; }
+  .card-meta .MuiChip-root { height: 20px !important; font-size: .58rem !important; }
+  .card-meta .MuiChip-label { padding: 0 7px !important; }
+  .card-meta > .MuiStack-root { flex-wrap: wrap; justify-content: flex-end; gap: 4px !important; }
   .card-meta > span { min-width: 0; overflow-wrap: anywhere; }
   .card-meta > .MuiStack-root { flex: 0 0 auto; }
   .matchup { grid-template-columns: minmax(0, 1fr) 38px minmax(0, 1fr); padding: 22px 0 20px; }
   .probability-block { padding: 15px 13px; }
   .probability { font-size: 1.75rem; }
   .metric-label { max-width: 84px; text-align: center; line-height: 1.25 !important; }
-  .score-row { grid-template-columns: 1.35fr 1fr 1fr; gap: 8px; padding: 19px 0; }
+  /* Three markets stay side by side even on a phone; they are the point of the card. */
+  .pick-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+  .pick { padding: 10px 9px; gap: 5px; border-radius: 11px; }
+  .pick-market { font-size: .57rem; gap: 4px; }
+  .pick-market i { padding: 1px 4px; font-size: .55rem; }
+  .pick-market em { padding: 1px 5px; font-size: .55rem; }
+  .pick > strong { font-size: .8rem; }
+  .pick > b { font-size: 1.05rem; }
+  .pick > small { font-size: .53rem; }
+  .score-row { grid-template-columns: 1fr 1fr; gap: 10px; padding: 16px 0 18px; }
   .score-row .MuiDivider-root { display: none; }
   .score-row strong { font-size: .95rem; overflow-wrap: anywhere; }
   .score-row > div.primary strong { font-size: 1.12rem; }
