@@ -84,6 +84,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const topOutcome = ranking?.outcomes[0]
   const handicap = p && coherent ? handicapSides(p, game) : null
   const picks = p && coherent && ranking && handicap ? marketPicks(p, game, ranking, handicap) : null
+  const recommendation = strongestPick(picks)
   const requestPersonalAnalysis = async () => {
     if (!signedIn) { onRequireLogin(); return }
     setPersonalBusy(true); setPersonalError(null)
@@ -118,7 +119,14 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
       </Stack>
       <Box className="matchup">
         <TeamName team={game.away} side="AWAY" />
-        <Box className="versus"><span>VS</span><small>{game.league}</small></Box>
+        <Box className="versus">
+          <span>VS</span><small>{game.league}</small>
+          {!isFinal && recommendation && recommendation.probability != null && <Box className="matchup-recommendation">
+            <em>추천 · {recommendation.market}</em>
+            <b>{recommendation.pick}</b>
+            <i>{recommendation.line ? `${recommendation.line} · ` : ''}{pct(recommendation.probability)}</i>
+          </Box>}
+        </Box>
         <TeamName team={game.home} side="HOME" />
       </Box>
       {game.status === 'LIVE' && <Box className="live-game-notice" role="status">
@@ -166,7 +174,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>
 
         {!isFinal && picks && picks.length > 0 && <Box className="pick-strip">
-          <span className="pick-strip-title">예측 흐름 · 승리팀 → 승리 시 점수차 → 총점</span>
+          <span className="pick-strip-title">예측 결과 · 승패 / 실제 핸디캡 기준 / 총점</span>
           {picks.map((pick) => <Box key={pick.key}
             className={`pick${pick.hit == null ? '' : pick.hit ? ' hit' : ' miss'}`}>
             <span className="pick-market">{pick.market}{pick.line && <i>{pick.line}</i>}
@@ -256,7 +264,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             ? ranking.lineSource === '시장'
               ? `${ranking.line} 기준 (실제 배당사 기준점)`
               : `${ranking.line} 기준 (배당 없어 우리가 계산)`
-            : '기준점 없음'} · 위 예측 흐름의 점수차만 예측팀 승리 표본 안에서 다시 계산</small>
+            : '기준점 없음'} · 세 시장 모두 전체 시뮬레이션 분포에서 계산</small>
           {ranking.outcomes.map((outcome, index) => <Box key={outcome.label} className={`outcome-row${index === 0 ? ' top' : ''}`}>
             <i>{index + 1}</i>
             <Box className="outcome-label"><span>{outcome.label}</span>{outcome.note && <small>{outcome.note}</small>}</Box>
@@ -549,6 +557,16 @@ type RankedOutcome = { label: string; probability: number; note?: string; hit?: 
 
 type MarketVerdict = { market: string; pick: string; probability: number; actual: string; hit: boolean | null }
 
+type MarketPick = {
+  key: string
+  market: string
+  line: string
+  pick: string
+  probability?: number
+  note?: string
+  hit?: boolean
+}
+
 // 마핸/플핸 is a market label: the team laying the runs is whoever the book made favorite,
 // not whoever our simulation happens to like. KBO books rarely publish a run line, so fall back
 // to the moneyline gap, and only to our own model when the market says nothing at all.
@@ -557,11 +575,8 @@ type MarketVerdict = { market: string; pick: string; probability: number; actual
  *  detail for these three answers. */
 function marketPicks(p: NonNullable<Game['prediction']>, game: Game,
                      ranking: ReturnType<typeof rankedOutcomes>,
-                     handicap: ReturnType<typeof handicapSides>) {
-  const picks: {
-    key: string; market: string; line: string; pick: string; probability?: number
-    note?: string; hit?: boolean
-  }[] = []
+                     handicap: ReturnType<typeof handicapSides>): MarketPick[] {
+  const picks: MarketPick[] = []
 
   const result = game.status === 'FINAL' ? game.result : null
   const margin = result ? result.home_score - result.away_score : null
@@ -577,37 +592,19 @@ function marketPicks(p: NonNullable<Game['prediction']>, game: Game,
     note: '전체 2만 회 기준',
   })
 
-  const score = p.primary_score
-  const coverGivenWin = score?.favorite_cover_probability_given_win
-  if (handicap.fromMarket && !handicap.modelAgrees) {
+  if (typeof handicap.minusProbability === 'number' && typeof handicap.plusProbability === 'number') {
+    const takeMinus = handicap.minusProbability >= handicap.plusProbability
+    const marketFavoriteMargin = margin == null ? null : handicap.homeMinus ? margin : -margin
+    const pushed = marketFavoriteMargin === handicap.runLine
     picks.push({
       key: 'handicap',
-      market: '플핸 · 승리 포함',
-      line: `+${handicap.runLine}`,
-      pick: `${modelFavorite} 플핸`,
-      probability: handicap.plusProbability,
-      hit: margin == null ? undefined : handicap.homeMinus
-        ? margin < handicap.runLine
-        : -margin < handicap.runLine,
-      note: `${modelFavorite} 승리 또는 ${handicap.minimumMargin - 1}점차 이내 패배를 모두 포함`,
-    })
-  } else if (score && coverGivenWin != null) {
-    const runLine = score.favorite_run_line ?? handicap.runLine
-    const minimumMargin = score.minimum_favorite_margin ?? Math.floor(runLine) + 1
-    const projectsCover = score.projects_favorite_cover === true
-    const actualFavoriteMargin = margin == null ? null : modelHomeFavored ? margin : -margin
-    picks.push({
-      key: 'handicap',
-      market: projectsCover ? '승리 시 · 마핸' : '승리 시 · 보수 분기',
-      line: projectsCover ? `-${runLine}` : `<${minimumMargin}점차`,
-      pick: projectsCover ? `${modelFavorite} ${minimumMargin}점차+` : `${modelFavorite} ${minimumMargin - 1}점차 이내`,
-      probability: projectsCover ? coverGivenWin : undefined,
-      hit: actualFavoriteMargin == null ? undefined : projectsCover
-        ? actualFavoriteMargin >= minimumMargin
-        : actualFavoriteMargin >= 1 && actualFavoriteMargin < minimumMargin,
-      note: projectsCover
-        ? `${modelFavorite}가 이긴 표본 중 · 전체 승률 ${pct(favoriteWinProbability)}`
-        : `승리 시 ${minimumMargin}점차+ ${pct(coverGivenWin)} · 대표점수 기준 72% 미만`,
+      market: '핸디캡',
+      line: `${takeMinus ? '-' : '+'}${handicap.runLine}`,
+      pick: `${takeMinus ? handicap.minusTeam : handicap.plusTeam} ${takeMinus ? '마핸' : '플핸'}`,
+      probability: takeMinus ? handicap.minusProbability : handicap.plusProbability,
+      hit: marketFavoriteMargin == null || pushed ? undefined
+        : takeMinus ? marketFavoriteMargin > handicap.runLine : marketFavoriteMargin < handicap.runLine,
+      note: handicap.fromMarket ? '실제 배당 기준점 · 전체 2만 회 기준' : '핸디 배당 없어 모델 1.5 기준 · 전체 2만 회 기준',
     })
   }
 
@@ -626,6 +623,13 @@ function marketPicks(p: NonNullable<Game['prediction']>, game: Game,
     })
   }
   return picks
+}
+
+function strongestPick(picks: MarketPick[] | null): MarketPick | null {
+  return (picks ?? []).reduce<MarketPick | null>((best, pick) => {
+    if (pick.probability == null) return best
+    return !best || best.probability == null || pick.probability > best.probability ? pick : best
+  }, null)
 }
 
 function handicapSides(p: NonNullable<Game['prediction']>, game: Game) {
@@ -653,7 +657,9 @@ function handicapSides(p: NonNullable<Game['prediction']>, game: Game) {
     plusProbability: hasPricedMarket ? pricedMarket.plus_probability
       : homeMinus ? p.handicap.away_plus_1_5 : p.handicap.home_plus_1_5,
     pushProbability: hasPricedMarket ? pricedMarket.push_probability : 0,
-    fromMarket: marketHomeMinus != null,
+    // A moneyline can identify the market favourite, but it is not an actual run-line quote.
+    // Only call this a market handicap when the stored simulation matches the posted spread.
+    fromMarket: hasPricedMarket,
     modelAgrees: homeMinus === modelHomeFavored,
     modelFavorite: modelHomeFavored ? game.home.name : game.away.name,
   }

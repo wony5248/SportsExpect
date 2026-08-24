@@ -37,7 +37,7 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .freshness { height: 24px !important; font-size: .62rem !important; background: rgba(122,151,140,.08) !important; color: #8da79d !important; }.freshness.stale { color: #f6c86b !important; }
 .engine-chip { height: 24px !important; font-size: .62rem !important; border: 1px solid rgba(95,166,194,.24) !important; background: rgba(44,112,139,.12) !important; color: #9fc8d8 !important; }
 .engine-chip.plate { border-color: rgba(126,231,184,.25) !important; background: rgba(126,231,184,.1) !important; color: #9af1c8 !important; }
-.matchup { display: grid; grid-template-columns: 1fr 56px 1fr; align-items: center; padding: 26px 0 24px; }
+.matchup { display: grid; grid-template-columns: minmax(0, 1fr) 116px minmax(0, 1fr); align-items: center; padding: 26px 0 24px; }
 .team:last-child { text-align: right; }
 .team small { color: #6e887e; font-size: .62rem; letter-spacing: .14em; font-weight: 800; }
 .team h5 { margin: 4px 0 3px; font-weight: 750; }
@@ -45,9 +45,13 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .team span { color: #819a90; font-size: .72rem; }
 .team-starter { max-width: 100%; margin-top: 8px; display: grid; gap: 2px; }.team-starter b { overflow: hidden; color: #bfd2ca; font-size: .71rem; text-overflow: ellipsis; white-space: nowrap; }.team-starter i { color: #657e74; font-size: .58rem; font-style: normal; }
 .team:last-child .team-starter { justify-items: end; }
-.versus { text-align: center; color: #46645a; font-weight: 900; }
+.versus { display: grid; justify-items: center; text-align: center; color: #46645a; font-weight: 900; }
 .versus span { display: block; }
-.versus small { font-size: .54rem; letter-spacing: .12em; }
+.versus > small { font-size: .54rem; letter-spacing: .12em; }
+.matchup-recommendation { width: 108px; margin-top: 8px; padding: 6px 7px; display: grid; gap: 2px; border: 1px solid rgba(126,231,184,.24); border-radius: 9px; background: rgba(126,231,184,.08); }
+.matchup-recommendation em { color: #7ee7b8; font-size: .52rem; font-style: normal; font-weight: 800; letter-spacing: 0; }
+.matchup-recommendation b { color: #dcebe4; font-size: .62rem; line-height: 1.25; word-break: keep-all; overflow-wrap: break-word; }
+.matchup-recommendation i { color: #8fb0a2; font-size: .55rem; font-style: normal; font-weight: 700; font-variant-numeric: tabular-nums; }
 .probability-block { padding: 18px; background: rgba(3,16,12,.32); border-radius: 14px; }
 .live-game-notice { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 11px 13px; border: 1px solid rgba(242,91,91,.22); border-radius: 11px; background: rgba(242,91,91,.075); }
 .live-game-notice b { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; color: #ffaaa2; font-size: .76rem; }
@@ -305,8 +309,10 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .card-meta > .MuiStack-root { flex-wrap: wrap; justify-content: flex-end; gap: 4px !important; }
   .card-meta > span { min-width: 0; word-break: keep-all; overflow-wrap: break-word; }
   .card-meta > .MuiStack-root { flex: 0 0 auto; }
-  .matchup { grid-template-columns: minmax(0, 1fr) 34px minmax(0, 1fr); padding: 20px 0 18px; }
+  .matchup { grid-template-columns: minmax(0, 1fr) 88px minmax(0, 1fr); padding: 20px 0 18px; }
   .matchup .team h5 { font-size: 1.12rem; line-height: 1.2; }
+  .matchup-recommendation { width: 82px; padding: 5px 4px; }
+  .matchup-recommendation b { font-size: .56rem; }
   .team span, .team-starter b { word-break: keep-all; overflow-wrap: break-word; }
   .probability + small { word-break: keep-all; overflow-wrap: break-word; line-height: 1.3; }
   .probability-block { padding: 15px 13px; }
