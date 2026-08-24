@@ -18,6 +18,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from backend.app.collectors.kbo import KboClient
 from backend.app.collectors.mlb import MlbClient
 from backend.app.config import KST
 from backend.app.models import Game, GameStarter
@@ -28,29 +29,34 @@ QUALITY_START_EARNED_RUNS = 3
 
 
 def backfill_archived_starters(session: Session, season: int, limit: int = 400,
-                               client: MlbClient | None = None) -> dict[str, Any]:
+                               league: str = "MLB", client: Any | None = None) -> dict[str, Any]:
     """Record starters for finished games that have none, newest first."""
     owned = client is None
-    client = client or MlbClient()
+    client = client or (MlbClient() if league == "MLB" else KboClient())
     try:
         pending = session.scalars(
             select(Game).where(
-                Game.league == "MLB", Game.status == "FINAL",
+                Game.league == league, Game.status == "FINAL",
                 Game.id.notin_(select(GameStarter.game_id)),
             ).order_by(Game.game_date.desc()).limit(limit)
         ).all()
         if not pending:
-            return {"season": season, "pending": 0, "written": 0, "games": 0}
+            return {"league": league, "season": season, "pending": 0, "written": 0, "games": 0}
 
-        schedule = client.archived_starters(season)
+        # MLB publishes a whole season of starters in one request; KBO only exposes them a day at
+        # a time, so it is asked for exactly the dates this batch needs.
+        if league == "MLB":
+            feed = client.archived_starters(season)
+        else:
+            feed = client.archived_starters([game.venue_date or game.game_date for game in pending])
         by_game: dict[str, dict[str, dict[str, Any]]] = {}
-        for row in schedule.data:
+        for row in feed.data:
             by_game.setdefault(row["external_id"], {})[row["side"]] = row
 
         wanted = {game.external_id: game for game in pending if game.external_id in by_game}
         if not wanted:
-            return {"season": season, "pending": len(pending), "written": 0, "games": 0,
-                    "note": "일정 피드에 예고 선발이 없는 경기들입니다."}
+            return {"league": league, "season": season, "pending": len(pending), "written": 0,
+                    "games": 0, "note": "일정 피드에 선발 정보가 없는 경기들입니다."}
 
         player_ids = sorted({row["player_id"]
                              for external_id in wanted
@@ -59,16 +65,17 @@ def backfill_archived_starters(session: Session, season: int, limit: int = 400,
         collected = datetime.now(KST)
         written = 0
         for external_id, game in wanted.items():
-            # The venue-local date is the one MLB stamps on a game log line.
+            # The venue-local date is the one a game log line is stamped with.
             boundary = (game.venue_date or game.game_date).isoformat()
             for side, row in by_game[external_id].items():
                 totals = _totals_before(logs.data.get(row["player_id"], []), boundary)
                 session.add(GameStarter(
                     game_id=game.id, side=side, player_id=row["player_id"], name=row.get("name"),
-                    source="MLB official schedule + game log", source_url=logs.source_url[:2000],
+                    source=f"{league} official schedule + game log",
+                    source_url=logs.source_url[:2000],
                     collected_at=collected, **totals))
                 written += 1
-        return {"season": season, "pending": len(pending), "written": written,
+        return {"league": league, "season": season, "pending": len(pending), "written": written,
                 "games": len(wanted), "pitchers": len(player_ids)}
     finally:
         if owned:

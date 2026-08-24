@@ -35,6 +35,7 @@ def main() -> None:
     starters = sub.add_parser("backfill-starters", help="record archived game starters with strictly-prior totals")
     starters.add_argument("--season", type=int, default=datetime.now(KST).year)
     starters.add_argument("--limit", type=int, default=400)
+    starters.add_argument("--league", choices=("KBO", "MLB"), default="MLB")
     bullpen = sub.add_parser("seed-bullpen", help="create or refresh derived bullpen leverage profiles")
     bullpen.add_argument("--league", choices=("ALL", "KBO", "MLB"), default="ALL")
     sub.add_parser("backup", help="create a consistent SQLite backup")
@@ -59,7 +60,7 @@ def main() -> None:
     elif args.command == "backfill-starters":
         init_db()
         with session_scope() as session:
-            print(json.dumps(backfill_archived_starters(session, args.season, args.limit),
+            print(json.dumps(backfill_archived_starters(session, args.season, args.limit, args.league),
                              ensure_ascii=False, indent=2))
     elif args.command == "seed-bullpen":
         init_db()

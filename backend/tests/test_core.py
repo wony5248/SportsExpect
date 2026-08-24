@@ -23,7 +23,8 @@ from backend.app.services import claude_advisor, personal_claude, runtime_secret
 from backend.app.services.claude_advisor import blend_with_claude
 from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batter_base_states,
                                                _batter_pitcher_split, _data_id_table, _hitter_name,
-                                               _pitcher_opponent_split, _rank_table, _record_rate,
+                                               _pitcher_daily_log, _pitcher_opponent_split,
+                                               _rank_table, _record_rate,
                                                _scoreboard_innings, _flag)
 from backend.app.collectors.kbo.client import SourcePayload
 from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient, _linescore, _weather_context
@@ -974,6 +975,35 @@ def test_archived_starter_totals_stop_at_the_game_being_replayed():
         prior_walks=0, prior_strikeouts=0, prior_home_runs=0, prior_starts=0, prior_games=0,
         prior_quality_starts=0), 4.10)
     assert empty.era is None and empty.whip is None and empty.fip is None
+
+
+def test_kbo_daily_log_reproduces_the_official_season_line():
+    """KBO publishes no per-game pitching feed, so the archive rebuilds it from the 일자별 기록
+    page. Parsing it wrongly would quietly feed the model bad starter rates, so the parsed rows
+    are checked against the season totals the same site reports."""
+    html = """
+    <table><thead><tr><th>4월</th><th>상대</th><th>구분</th><th>결과</th><th>ERA1</th>
+      <th>TBF</th><th>IP</th><th>H</th><th>HR</th><th>BB</th><th>HBP</th><th>SO</th>
+      <th>R</th><th>ER</th><th>ERA2</th></tr></thead>
+    <tbody>
+      <tr><td>04.01</td><td>한화</td><td>선발</td><td></td><td>5.40</td><td>26</td><td>5</td>
+          <td>7</td><td>1</td><td>1</td><td>1</td><td>7</td><td>4</td><td>3</td><td>5.40</td></tr>
+      <tr><td>04.07</td><td>롯데</td><td>구원</td><td>승</td><td>1.80</td><td>22</td><td>5 1/3</td>
+          <td>6</td><td>0</td><td>2</td><td>0</td><td>9</td><td>1</td><td>1</td><td>3.60</td></tr>
+      <tr><td>합계</td><td></td><td></td><td></td><td></td><td>48</td><td>10 1/3</td>
+          <td>13</td><td>1</td><td>3</td><td>1</td><td>16</td><td>5</td><td>4</td><td>3.60</td></tr>
+    </tbody></table>
+    """
+    rows = _pitcher_daily_log(html, 2026)
+    # The 합계 row has no date and must not be counted as a third appearance.
+    assert [row["date"] for row in rows] == ["2026-04-01", "2026-04-07"]
+    assert [row["started"] for row in rows] == [True, False]
+    assert abs(sum(row["innings"] for row in rows) - (5 + 5 + 1 / 3)) < 1e-9
+    assert sum(row["earned_runs"] for row in rows) == 4
+
+    # Same accumulation rule as MLB: the target game's own date is excluded.
+    totals = _totals_before(rows, "2026-04-07")
+    assert totals["prior_games"] == 1 and totals["prior_starts"] == 1
 
 
 def test_home_field_edge_is_not_counted_twice():

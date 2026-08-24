@@ -283,6 +283,53 @@ class KboClient:
             })
         return SourcePayload(output, ", ".join(source_urls), raw.collected_at)
 
+    def archived_starters(self, game_dates: list[date]) -> SourcePayload:
+        """Who actually started each finished game on the given dates.
+
+        The daily feed keeps its starting pitchers after the game, so this is the same
+        pre-game fact for a past date that the live collector reads for today.
+        """
+        output: list[dict[str, Any]] = []
+        urls: list[str] = []
+        for game_date in sorted(set(game_dates)):
+            try:
+                payload = self.games(game_date)
+            except httpx.HTTPError:
+                continue
+            urls.append(payload.source_url)
+            for game in payload.data:
+                if game.get("status") != "FINAL":
+                    continue
+                for side in ("away", "home"):
+                    player_id = game.get(f"{side}_pitcher_id")
+                    if not player_id:
+                        continue
+                    output.append({"external_id": game["external_id"], "side": side,
+                                   "player_id": str(player_id),
+                                   "name": game.get(f"{side}_pitcher_name")})
+        return SourcePayload(output, ", ".join(dict.fromkeys(urls)) or self.base_url,
+                             datetime.now(KST))
+
+    def pitcher_game_logs(self, player_ids: list[str], season: int) -> SourcePayload:
+        """Per-appearance pitching lines, so season-to-date rates can be rebuilt for any date.
+
+        Mirrors the MLB game log shape so both leagues share one accumulation routine.
+        """
+        path = "/Record/Player/PitcherDetail/Daily.aspx"
+        output: dict[str, list[dict[str, Any]]] = {}
+        urls: list[str] = []
+        for player_id in dict.fromkeys(str(row) for row in player_ids):
+            try:
+                page = self._get_html(f"{path}?playerId={player_id}")
+            except httpx.HTTPError:
+                continue
+            urls.append(page.source_url)
+            appearances = _pitcher_daily_log(page.data, season)
+            if appearances:
+                output[player_id] = appearances
+        return SourcePayload(output, ", ".join(dict.fromkeys(urls)) or f"{self.base_url}{path}",
+                             datetime.now(KST))
+
     def hitter_directory(self, team_codes: list[str]) -> SourcePayload:
         """Map hitter names to official player ids, one team at a time.
 
@@ -536,6 +583,47 @@ def _pitcher_opponent_split(html: str, opponent: str) -> dict[str, Any]:
             "opponent_whip": round((hits + walks) / innings, 3) if innings else None,
         }
     return {}
+
+
+def _pitcher_daily_log(html: str, season: int) -> list[dict[str, Any]]:
+    """Parse the 일자별 기록 tables into one row per appearance, oldest first.
+
+    Each month gets its own table whose first column holds a "MM.DD" date, so the rows carry the
+    calendar information the season splits page lacks.
+    """
+    appearances: list[dict[str, Any]] = []
+    soup = BeautifulSoup(html, "html.parser")
+    for table in soup.select("table"):
+        headers = [th.get_text(strip=True) for th in table.select("thead th")]
+        if not headers or "IP" not in headers:
+            continue
+        index = {name: position for position, name in enumerate(headers)}
+        if not {"TBF", "H", "BB", "SO", "ER"} <= set(index):
+            continue
+        for row in table.select("tbody tr"):
+            cells = [td.get_text(strip=True) for td in row.select("td")]
+            if len(cells) < len(headers):
+                continue
+            match = re.match(r"^(\d{2})\.(\d{2})$", cells[0])
+            if not match:
+                continue
+
+            def number(column: str, cells: list[str] = cells, index: dict[str, int] = index) -> int:
+                return _as_int(cells[index[column]], 0) or 0
+
+            appearances.append({
+                "date": f"{season}-{match.group(1)}-{match.group(2)}",
+                "innings": _baseball_innings(cells[index["IP"]]),
+                "earned_runs": number("ER"),
+                "hits": number("H"),
+                "walks": number("BB"),
+                "strikeouts": number("SO"),
+                "home_runs": number("HR"),
+                # 구분 marks the role; anything else is a relief outing.
+                "started": cells[index["구분"]] == "선발" if "구분" in index else False,
+            })
+    appearances.sort(key=lambda row: row["date"])
+    return appearances
 
 
 def _baseball_innings(value: Any) -> float:

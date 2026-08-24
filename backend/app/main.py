@@ -196,9 +196,10 @@ def cron_refresh(
 @app.post("/api/v1/admin/backfill-starters", dependencies=[Depends(require_admin)])
 def backfill_starters(season: int = Query(default_factory=lambda: datetime.now(KST).year),
                       limit: int = Query(default=400, ge=1, le=1000),
+                      league: str = Query(default="MLB", pattern="^(KBO|MLB)$"),
                       session: Session = Depends(get_session)):
     """Record archived game starters so the replay stops being blind to the starting pitcher."""
-    result = backfill_archived_starters(session, season, limit)
+    result = backfill_archived_starters(session, season, limit, league)
     session.commit()
     return result
 
