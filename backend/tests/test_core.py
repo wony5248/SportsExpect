@@ -1063,10 +1063,32 @@ def test_integer_projection_uses_full_distribution_and_respects_run_line_majorit
     favorite_margin = (close_primary["home"] - close_primary["away"]
                        if close["home_two_way_probability"] >= .5
                        else close_primary["away"] - close_primary["home"])
-    expected_minimum = 2 if close_primary["projects_favorite_cover"] else 1
-    assert favorite_margin >= expected_minimum
+    if close_primary["projects_favorite_cover"]:
+        assert favorite_margin >= close_primary["minimum_favorite_margin"]
+    else:
+        assert 1 <= favorite_margin < close_primary["minimum_favorite_margin"]
     if close_primary["favorite_cover_probability"] < 0.5:
         assert close_primary["run_line_conditioning"] != "UNCONDITIONAL_COVER_MAJORITY"
+
+
+def test_market_run_line_sets_dynamic_cover_population_for_headline_score():
+    result = simulate_scores(
+        8.0, 2.5, 20_000, 20260824, league="MLB", headline_home_spread=-2.5,
+    )
+    primary = result["projected_score"]
+    market = result["market_handicap"]
+    assert market["run_line"] == 2.5
+    assert market["minimum_margin"] == 3
+    assert market["minus_side"] == "HOME"
+    assert market["minus_probability"] > market["plus_probability"]
+    assert primary["run_line_source"] == "MARKET"
+    assert primary["favorite_run_line"] == 2.5
+    assert primary["minimum_favorite_margin"] == 3
+    assert primary["run_line_conditioning"] == "UNCONDITIONAL_COVER_MAJORITY"
+    assert primary["home"] - primary["away"] >= 3
+
+    unchanged_population = simulate_scores(8.0, 2.5, 20_000, 20260824, league="MLB")
+    assert result["frequency_tables"] == unchanged_population["frequency_tables"]
 
 
 @pytest.mark.parametrize("home_expected,away_expected,total_line", [
@@ -1112,10 +1134,17 @@ def test_market_line_changes_headline_without_changing_simulation_population():
         game, home, away, pitcher("home-p"), pitcher("away-p"),
         game_context={"market": {"total_line": 10.5}},
     )
+    spread = predict_game(
+        game, home, away, pitcher("home-p"), pitcher("away-p"),
+        game_context={"market": {"total_line": 7.5, "home_spread": -2.5}},
+    )
     assert lower["input_hash"] != upper["input_hash"]
     assert lower["payload"]["frequency_tables"] == upper["payload"]["frequency_tables"]
     assert lower["payload"]["primary_score"]["headline_total_line"] == 7.5
     assert upper["payload"]["primary_score"]["headline_total_line"] == 10.5
+    assert lower["input_hash"] != spread["input_hash"]
+    assert lower["payload"]["frequency_tables"] == spread["payload"]["frequency_tables"]
+    assert spread["payload"]["market_handicap"]["run_line"] == 2.5
 
 
 def test_ui_registered_secret_is_encrypted_and_requires_same_master_key():

@@ -240,7 +240,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             <b>유력한 결과 순위</b>
             <Chip icon={<VerifiedRounded />} label={completenessLabel(p.confidence_label)} size="small" className={`confidence ${p.confidence_label.toLowerCase()}`} />
           </Stack>
-          <small className="ranking-note">{p.model.simulations.toLocaleString()}번 돌려본 결과를 확률 높은 순으로 · 승패 / 핸디캡 ±1.5 / 총점 {ranking.line != null
+          <small className="ranking-note">{p.model.simulations.toLocaleString()}번 돌려본 결과를 확률 높은 순으로 · 승패 / 핸디캡 -{handicap?.runLine ?? 1.5}/+{handicap?.runLine ?? 1.5} / 총점 {ranking.line != null
             ? ranking.lineSource === '시장'
               ? `${ranking.line} 기준 (실제 배당 사이트 기준점)`
               : `${ranking.line} 기준 (배당 기준점 없어 모델이 대신 계산)`
@@ -545,6 +545,9 @@ type MarketVerdict = { market: string; pick: string; probability: number; actual
 // to the moneyline gap, and only to our own model when the market says nothing at all.
 function handicapSides(p: NonNullable<Game['prediction']>, game: Game) {
   const spread = game.market?.home_spread
+  const pricedMarket = p.market_handicap
+  const hasPricedMarket = spread != null && pricedMarket != null
+    && Math.abs(pricedMarket.home_spread - spread) < .001
   const homeImplied = game.market?.home_implied_probability
   const awayImplied = game.market?.away_implied_probability
   const impliedGap = homeImplied != null && awayImplied != null ? homeImplied - awayImplied : null
@@ -553,12 +556,18 @@ function handicapSides(p: NonNullable<Game['prediction']>, game: Game) {
     : null
   const modelHomeFavored = p.home_win_probability >= p.away_win_probability
   const homeMinus = marketHomeMinus ?? modelHomeFavored
+  const runLine = hasPricedMarket ? pricedMarket.run_line : 1.5
   return {
     homeMinus,
+    runLine,
+    minimumMargin: hasPricedMarket ? pricedMarket.minimum_margin : 2,
     minusTeam: homeMinus ? game.home.name : game.away.name,
     plusTeam: homeMinus ? game.away.name : game.home.name,
-    minusProbability: homeMinus ? p.handicap.home_minus_1_5 : p.handicap.away_minus_1_5,
-    plusProbability: homeMinus ? p.handicap.away_plus_1_5 : p.handicap.home_plus_1_5,
+    minusProbability: hasPricedMarket ? pricedMarket.minus_probability
+      : homeMinus ? p.handicap.home_minus_1_5 : p.handicap.away_minus_1_5,
+    plusProbability: hasPricedMarket ? pricedMarket.plus_probability
+      : homeMinus ? p.handicap.away_plus_1_5 : p.handicap.home_plus_1_5,
+    pushProbability: hasPricedMarket ? pricedMarket.push_probability : 0,
     fromMarket: marketHomeMinus != null,
     modelAgrees: homeMinus === modelHomeFavored,
     modelFavorite: modelHomeFavored ? game.home.name : game.away.name,
@@ -583,14 +592,18 @@ function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
   }]
   const handicap = handicapSides(p, game)
   if (typeof handicap.minusProbability === 'number' && typeof handicap.plusProbability === 'number') {
-    const minusCovered = (handicap.homeMinus ? margin : -margin) >= 2
+    const favoriteMargin = handicap.homeMinus ? margin : -margin
+    const minusCovered = favoriteMargin > handicap.runLine
+    const pushed = favoriteMargin === handicap.runLine
     const pickMinus = handicap.minusProbability >= handicap.plusProbability
     rows.push({
-      market: '핸디캡 ±1.5',
-      pick: pickMinus ? `마핸 ${handicap.minusTeam} -1.5` : `플핸 ${handicap.plusTeam} +1.5`,
+      market: `핸디캡 -${handicap.runLine}/+${handicap.runLine}`,
+      pick: pickMinus ? `마핸 ${handicap.minusTeam} -${handicap.runLine}` : `플핸 ${handicap.plusTeam} +${handicap.runLine}`,
       probability: Math.max(handicap.minusProbability, handicap.plusProbability),
-      actual: minusCovered ? `${handicap.minusTeam} 2점차 이상 승` : `${handicap.plusTeam} 승 또는 1점차 패`,
-      hit: pickMinus === minusCovered,
+      actual: pushed ? `${handicap.runLine}점차 · 적특` : minusCovered
+        ? `${handicap.minusTeam} ${handicap.minimumMargin}점차 이상 승`
+        : `${handicap.plusTeam} 핸디캡 승`,
+      hit: pushed ? null : pickMinus === minusCovered,
     })
   }
   const totals = ranking.line != null ? p.totals[String(ranking.line)] : undefined
@@ -626,14 +639,16 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game, includeR
     : handicap.modelAgrees ? ' · 시장이 꼽은 마핸 팀'
     : ` · 시장 마핸이지만 우리 모델은 ${handicap.modelFavorite} 우세로 봄`
   if (typeof handicap.minusProbability === 'number') outcomes.push({
-    label: `마핸 · ${handicap.minusTeam} -1.5`, probability: handicap.minusProbability,
-    note: `${handicap.minusTeam}가 2점차 이상으로 이김${handicapNote}`,
-    hit: margin == null ? undefined : (handicap.homeMinus ? margin : -margin) >= 2, actual,
+    label: `마핸 · ${handicap.minusTeam} -${handicap.runLine}`, probability: handicap.minusProbability,
+    note: `${handicap.minusTeam}가 ${handicap.minimumMargin}점차 이상으로 이김${handicapNote}`,
+    hit: margin == null || (handicap.homeMinus ? margin : -margin) === handicap.runLine ? undefined
+      : (handicap.homeMinus ? margin : -margin) > handicap.runLine, actual,
   })
   if (typeof handicap.plusProbability === 'number') outcomes.push({
-    label: `플핸 · ${handicap.plusTeam} +1.5`, probability: handicap.plusProbability,
-    note: `${handicap.plusTeam}가 이기거나 1점차로 짐${handicapNote}`,
-    hit: margin == null ? undefined : (handicap.homeMinus ? margin : -margin) < 2, actual,
+    label: `플핸 · ${handicap.plusTeam} +${handicap.runLine}`, probability: handicap.plusProbability,
+    note: `${handicap.plusTeam}가 이기거나 ${handicap.minimumMargin - 1}점차 이내로 짐${handicapNote}`,
+    hit: margin == null || (handicap.homeMinus ? margin : -margin) === handicap.runLine ? undefined
+      : (handicap.homeMinus ? margin : -margin) < handicap.runLine, actual,
   })
   // The total line is always the Odds API's real market number when we have collected one for
   // this game; the simulation only ever answers "over or under THAT line". A model-derived line
@@ -746,11 +761,13 @@ function representativeSummary(score: NonNullable<Game['prediction']>['primary_s
     parts.push(`${score.headline_total_pick === 'OVER' ? '오버' : '언더'} ${score.headline_total_line} 방향`)
   }
   if (score.favorite_cover_probability_given_win != null) {
+    const runLine = score.favorite_run_line ?? 1.5
+    const minimumMargin = score.minimum_favorite_margin ?? Math.floor(runLine) + 1
     parts.push(score.run_line_conditioning === 'UNCONDITIONAL_COVER_MAJORITY'
-      ? `마핸 우세 표본만 · 승리 시 2점차+ ${pct(score.favorite_cover_probability_given_win)}`
+      ? `-${runLine} 마핸 우세 표본만 · ${minimumMargin}점차+ ${pct(score.favorite_cover_probability_given_win)}`
       : score.projects_favorite_cover
-      ? `강한 조건부 다점차 · 승리 시 2점차+ ${pct(score.favorite_cover_probability_given_win)}`
-      : `보수적 1점차 · 승리 시 2점차+ ${pct(score.favorite_cover_probability_given_win)}`)
+      ? `-${runLine} 강한 조건부 다점차 · ${minimumMargin}점차+ ${pct(score.favorite_cover_probability_given_win)}`
+      : `-${runLine} 비마핸 중앙 표본 · ${minimumMargin}점차+ ${pct(score.favorite_cover_probability_given_win)}`)
   }
   if (score.scenario_probability != null) parts.push(`전체 분포 중 조건 일치 ${pct(score.scenario_probability)}`)
   return parts.join(' · ') || modeFrequency(score)

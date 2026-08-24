@@ -365,9 +365,10 @@ def upsert_market_consensus(session: Session, game: Game, raw: dict[str, Any], s
     latest_snapshot = session.scalar(select(MarketSnapshot).where(
         MarketSnapshot.game_id == game.id, MarketSnapshot.provider == provider,
     ).order_by(MarketSnapshot.collected_at.desc()).limit(1))
-    comparison = (values["bookmaker_count"], values["total_line"], values["home_implied_probability"],
-                  values["away_implied_probability"])
+    comparison = (values["bookmaker_count"], values["total_line"], values["home_spread"],
+                  values["home_implied_probability"], values["away_implied_probability"])
     previous = ((latest_snapshot.bookmaker_count, latest_snapshot.total_line,
+                 (latest_snapshot.raw or {}).get("home_spread"),
                  latest_snapshot.home_implied_probability, latest_snapshot.away_implied_probability)
                 if latest_snapshot else None)
     if comparison != previous:

@@ -432,11 +432,13 @@ def _headline_score_backtest(
         pregame_markets = [row for row in markets.get(game.id, []) if game.start_at is None or
                            _naive(row.collected_at) <= _naive(game.start_at)]
         total_line = pregame_markets[-1].total_line if pregame_markets else None
+        home_spread = ((pregame_markets[-1].raw or {}).get("home_spread")
+                       if pregame_markets else None)
         current, _ = _coherent_scenario_score_projection(
             score_counts, total_counts, margin_counts, simulations, game.league,
             prediction.home_expected_runs, prediction.away_expected_runs,
             prediction.home_win_probability, prediction.away_win_probability,
-            {key: float(handicap[key]) for key in required_handicap}, total_line,
+            {key: float(handicap[key]) for key in required_handicap}, total_line, home_spread,
         )
         stored_rows.append(_headline_score_row(stored, result, total_counts, simulations, total_line))
         current_rows.append(_headline_score_row(current, result, total_counts, simulations, total_line))

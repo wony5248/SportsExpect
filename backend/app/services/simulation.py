@@ -42,6 +42,14 @@ def validate_simulation_summary(summary: dict[str, Any]) -> None:
         if abs(over + under + push - 1) > tolerance:
             raise ValueError(f"total probabilities at {line} must sum to 1")
 
+    market_handicap = summary.get("market_handicap")
+    if market_handicap:
+        minus = probability("market_handicap.minus_probability", market_handicap["minus_probability"])
+        plus = probability("market_handicap.plus_probability", market_handicap["plus_probability"])
+        push = probability("market_handicap.push_probability", market_handicap["push_probability"])
+        if abs(minus + plus + push - 1) > tolerance:
+            raise ValueError("market run-line probabilities must sum to 1")
+
     quantile_groups = [summary["total_quantiles"], *summary["team_quantiles"].values()]
     if any(group["p10"] > group["p50"] or group["p50"] > group["p90"] for group in quantile_groups):
         raise ValueError("simulation quantiles must be ordered p10 <= p50 <= p90")
@@ -91,8 +99,9 @@ DENSE_INTERVAL_MASS = .60
 # JSON keys match JavaScript's String(8) rather than becoming "8.0".
 TOTAL_MARKET_LINES = tuple(value // 2 if value % 2 == 0 else value / 2 for value in range(8, 41))
 # A representative score is already conditional on the predicted winner winning. Requiring only
-# 50% cover probability inside that branch overstates weak favorites, so promotion to a 2+ run
-# headline needs a materially stronger conditional majority. This value is walk-forward tuned.
+# 50% cover probability inside that branch overstates weak favorites, so promotion beyond the
+# active market run line needs a materially stronger conditional majority. This value is
+# walk-forward tuned.
 HEADLINE_CONDITIONAL_COVER_THRESHOLD = .72
 
 
@@ -120,7 +129,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                     observed_result: dict[str, Any] | None = None,
                     home_team_variance: float | None = None,
                     away_team_variance: float | None = None,
-                    headline_total_line: float | None = None) -> dict[str, Any]:
+                    headline_total_line: float | None = None,
+                    headline_home_spread: float | None = None) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
     if home_lineup is not None and away_lineup is not None:
         # Both lineups have collected splits, so play the game out plate appearance by plate
@@ -128,7 +138,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
         return _summarize(*_plate_appearance_game(
             rng, home_expected, away_expected, simulations, league, home_staff, away_staff,
             home_lineup, away_lineup, home_team_variance, away_team_variance),
-            observed_result=observed_result, headline_total_line=headline_total_line)
+            observed_result=observed_result, headline_total_line=headline_total_line,
+            headline_home_spread=headline_home_spread)
     # A shared gamma run environment creates realistic over-dispersion and correlation
     # (weather/umpire/park conditions affect both clubs) while preserving expected means.
     variance = min(.18, max(.02, environment_variance))
@@ -248,7 +259,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     usage = {"home": _bullpen_usage(home_staff_profile, home_tier_counts),
              "away": _bullpen_usage(away_staff_profile, away_tier_counts)}
     return _summarize(home_innings, away_innings, home, away, simulations, league, usage, "INNING_RATE",
-                      observed_result=observed_result, headline_total_line=headline_total_line)
+                      observed_result=observed_result, headline_total_line=headline_total_line,
+                      headline_home_spread=headline_home_spread)
 
 
 def evaluate_simulation_recipe(recipe: dict[str, Any], observed_result: dict[str, Any]) -> dict[str, Any]:
@@ -263,6 +275,7 @@ def evaluate_simulation_recipe(recipe: dict[str, Any], observed_result: dict[str
         home_team_variance=recipe.get("home_team_variance"),
         away_team_variance=recipe.get("away_team_variance"),
         headline_total_line=recipe.get("headline_total_line"),
+        headline_home_spread=recipe.get("headline_home_spread"),
     )
     return result["observed_evaluation"]
 
@@ -380,11 +393,35 @@ def _fair_total_line(total_counts: Counter[int], simulations: int) -> float:
     ))
 
 
+def _market_handicap(home_margins: np.ndarray, simulations: int,
+                     home_spread: float | None) -> dict[str, Any] | None:
+    """Price the book's actual run line from the unchanged simulation population."""
+    if home_spread is None or not math.isfinite(float(home_spread)) or float(home_spread) == 0:
+        return None
+    spread = float(home_spread)
+    adjusted_home_margin = home_margins + spread
+    home_cover = float(np.mean(adjusted_home_margin > 0))
+    away_cover = float(np.mean(adjusted_home_margin < 0))
+    push = float(np.mean(adjusted_home_margin == 0))
+    minus_home = spread < 0
+    run_line = abs(spread)
+    return {
+        "home_spread": spread,
+        "run_line": run_line,
+        "minimum_margin": math.floor(run_line) + 1,
+        "minus_side": "HOME" if minus_home else "AWAY",
+        "minus_probability": home_cover if minus_home else away_cover,
+        "plus_probability": away_cover if minus_home else home_cover,
+        "push_probability": push,
+    }
+
+
 def _coherent_scenario_score_projection(
     score_counts: Counter[tuple[int, int]], total_counts: Counter[int], margin_counts: Counter[int],
     simulations: int, league: str, home_mean: float, away_mean: float,
     home_two_way: float, away_two_way: float, handicap: dict[str, float],
     headline_total_line: float | None = None,
+    headline_home_spread: float | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Select one decision-theoretic scenario that agrees with the same full distribution.
 
@@ -397,11 +434,26 @@ def _coherent_scenario_score_projection(
     """
     home_favored = home_two_way >= away_two_way
     favorite_win_probability = home_two_way if home_favored else away_two_way
-    favorite_cover_probability = (
-        handicap["home_minus_1_5"] if home_favored else handicap["away_minus_1_5"]
+    market_spread = (
+        float(headline_home_spread)
+        if headline_home_spread is not None and math.isfinite(float(headline_home_spread))
+        and float(headline_home_spread) != 0
+        else None
     )
+    market_minus_home = market_spread is not None and market_spread < 0
+    market_matches_model_favorite = market_spread is not None and market_minus_home == home_favored
+    favorite_run_line = abs(market_spread) if market_matches_model_favorite else 1.5
+    minimum_favorite_margin = math.floor(favorite_run_line) + 1
+    favorite_cover_probability = sum(
+        count for margin, count in margin_counts.items()
+        if (margin if home_favored else -margin) > favorite_run_line
+    ) / simulations
+    opponent_plus_probability = sum(
+        count for margin, count in margin_counts.items()
+        if (margin if home_favored else -margin) < favorite_run_line
+    ) / simulations
     favorite_cover_given_win = min(1.0, favorite_cover_probability / max(favorite_win_probability, 1e-9))
-    unconditional_cover_majority = favorite_cover_probability >= .50
+    unconditional_cover_majority = favorite_cover_probability > opponent_plus_probability
     project_cover = (
         unconditional_cover_majority
         or favorite_cover_given_win >= HEADLINE_CONDITIONAL_COVER_THRESHOLD
@@ -409,7 +461,7 @@ def _coherent_scenario_score_projection(
     run_line_conditioning = (
         "UNCONDITIONAL_COVER_MAJORITY" if unconditional_cover_majority else
         "WINNER_CONDITIONAL_COVER_SIGNAL" if project_cover else
-        "ONE_RUN_CONSERVATIVE"
+        "RUN_LINE_CONSERVATIVE"
     )
     line = float(headline_total_line) if headline_total_line is not None and math.isfinite(
         float(headline_total_line)
@@ -429,7 +481,8 @@ def _coherent_scenario_score_projection(
         and not (league == "MLB" and home_runs == away_runs)
     ]
     cover_rows = [row for row in winner_rows if (
-        favorite_margin(row[0], row[1]) >= 2 if project_cover else favorite_margin(row[0], row[1]) == 1
+        favorite_margin(row[0], row[1]) >= minimum_favorite_margin
+        if project_cover else favorite_margin(row[0], row[1]) < minimum_favorite_margin
     )]
     if not cover_rows:
         cover_rows = winner_rows
@@ -506,6 +559,9 @@ def _coherent_scenario_score_projection(
         "target_favorite_margin_median": target_favorite_margin,
         "favorite_cover_probability": round(favorite_cover_probability, 4),
         "favorite_cover_probability_given_win": round(favorite_cover_given_win, 4),
+        "favorite_run_line": favorite_run_line,
+        "minimum_favorite_margin": minimum_favorite_margin,
+        "run_line_source": "MARKET" if market_matches_model_favorite else "MODEL_FALLBACK",
         "projects_favorite_cover": project_cover,
         "run_line_conditioning": run_line_conditioning,
         "headline_total_line": line,
@@ -523,7 +579,8 @@ def _coherent_scenario_score_projection(
 def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndarray, away: np.ndarray,
                simulations: int, league: str, bullpen_usage: dict[str, Any], engine: str,
                observed_result: dict[str, Any] | None = None,
-               headline_total_line: float | None = None) -> dict[str, Any]:
+               headline_total_line: float | None = None,
+               headline_home_spread: float | None = None) -> dict[str, Any]:
     total = home + away
     home_win_probability = float(np.mean(home > away))
     away_win_probability = float(np.mean(away > home))
@@ -593,10 +650,11 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "home_plus_1_5": float(np.mean(home - away >= -1)),
         "away_plus_1_5": float(np.mean(away - home >= -1)),
     }
+    market_handicap = _market_handicap(home - away, simulations, headline_home_spread)
     projected_score, projected_score_candidates = _coherent_scenario_score_projection(
         score_counts, total_counts, margin_counts, simulations, league,
         float(home.mean()), float(away.mean()), home_two_way, away_two_way, handicap,
-        headline_total_line,
+        headline_total_line, headline_home_spread,
     )
     projected_score = with_trajectory(projected_score)
     projected_score_candidates = [
@@ -633,6 +691,7 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "away_two_way_probability": away_two_way,
         "tie_probability": tie_probability,
         "handicap": handicap,
+        "market_handicap": market_handicap,
         # Preserve the two legacy keys for callers that have not migrated to the handicap object.
         "home_minus_1_5": handicap["home_minus_1_5"],
         "away_plus_1_5": handicap["away_plus_1_5"],

@@ -109,6 +109,15 @@ export type Prediction = {
     away_minus_1_5?: number
     home_plus_1_5?: number
   }
+  market_handicap?: {
+    home_spread: number
+    run_line: number
+    minimum_margin: number
+    minus_side: 'HOME' | 'AWAY'
+    minus_probability: number
+    plus_probability: number
+    push_probability: number
+  } | null
   totals: Record<string, { over: number; under: number; push?: number }>
   tie_probability: number
   top_scores: SimulatedScore[]
@@ -173,9 +182,12 @@ export type SimulatedScore = {
   selection_score?: number | null
   population_coverage?: number
   projects_favorite_cover?: boolean
-  run_line_conditioning?: 'UNCONDITIONAL_COVER_MAJORITY' | 'WINNER_CONDITIONAL_COVER_SIGNAL' | 'ONE_RUN_CONSERVATIVE'
+  run_line_conditioning?: 'UNCONDITIONAL_COVER_MAJORITY' | 'WINNER_CONDITIONAL_COVER_SIGNAL' | 'RUN_LINE_CONSERVATIVE'
   favorite_cover_probability?: number
   favorite_cover_probability_given_win?: number
+  favorite_run_line?: number
+  minimum_favorite_margin?: number
+  run_line_source?: 'MARKET' | 'MODEL_FALLBACK'
   headline_total_line?: number
   headline_total_pick?: 'OVER' | 'UNDER'
   headline_over_probability?: number

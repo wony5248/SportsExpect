@@ -107,6 +107,7 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
         ).order_by(MarketSnapshot.collected_at.desc()).limit(1))
         market_context = ({
             "total_line": market.total_line,
+            "home_spread": (market.raw or {}).get("home_spread"),
             "home_implied_probability": market.home_implied_probability,
             "away_implied_probability": market.away_implied_probability,
             "provider": market.provider,
