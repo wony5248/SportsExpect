@@ -15,8 +15,8 @@ from backend.app.models import Game, GameResult, Prediction
 # The residual layer is active for forecasts dated August 23, 2026 and later. Earlier
 # predictions remain immutable, but their leakage-safe pregame baselines may seed the EWMA.
 RESIDUAL_FEATURE_START_DATE = date(2026, 8, 23)
-RESIDUAL_POLICY_VERSION = 2
-RESIDUAL_ENABLED_LEAGUES = {"KBO"}
+RESIDUAL_POLICY_VERSION = 3
+RESIDUAL_ENABLED_LEAGUES = {"KBO", "MLB"}
 EWMA_HALF_LIFE_GAMES = 12.0
 RESIDUAL_WINSOR_LIMIT = 6.0
 MAX_RUN_ADJUSTMENT = .45
@@ -24,6 +24,13 @@ MAX_RUN_ADJUSTMENT = .45
 # unexplained run residuals mean-revert; carrying them forward double-counted form and worsened
 # every tracked metric. Half of the shrunk signal is therefore pulled back toward the baseline.
 RESIDUAL_MEAN_REVERSION_WEIGHT = -.50
+# MLB now has a full leakage-audited replay season. General team residuals remain conservative
+# because recent form is already in the base model, while an opponent-specific residual is a
+# distinct interaction and may persist after its 40-game shrink prior. KBO keeps its validated
+# v2 policy unchanged.
+MLB_GENERAL_MEAN_REVERSION_WEIGHT = -.35
+MLB_MATCHUP_PERSISTENCE_WEIGHT = .15
+MLB_STRUCTURE_PERSISTENCE_WEIGHT = .08
 
 
 @dataclass(frozen=True)
@@ -107,13 +114,14 @@ class TeamResidualHistory:
         return residual_context(
             prior, game.home_team_id, game.away_team_id, game.game_date,
             latest_game_id=prior[-1].game_id if prior else None,
-            regime=regime,
+            regime=regime, league=game.league,
         )
 
 
 def residual_context(observations: list[ResidualObservation], home_team_id: int, away_team_id: int,
                      target_date: date, latest_game_id: int | None = None,
-                     force_enabled: bool = False, regime: dict[str, str] | None = None) -> dict[str, Any]:
+                     force_enabled: bool = False, regime: dict[str, str] | None = None,
+                     league: str = "KBO") -> dict[str, Any]:
     """Build run adjustments and variance multipliers from observations available at cutoff."""
     if target_date < RESIDUAL_FEATURE_START_DATE and not force_enabled:
         return _disabled_context(target_date)
@@ -125,12 +133,31 @@ def residual_context(observations: list[ResidualObservation], home_team_id: int,
     # A scoring residual contains both the batting club and opposing prevention signal. Their
     # weights sum to one, avoiding double-counting the same game error. Matchup residuals get
     # only a small final weight after their much stronger sample shrinkage.
-    home_signal = .70 * home["offense"] - .30 * away["defense"] + .10 * home["matchup"] + .12 * home["structure"]
-    away_signal = .70 * away["offense"] - .30 * home["defense"] + .10 * away["matchup"] + .12 * away["structure"]
-    home_adjustment = _clip(RESIDUAL_MEAN_REVERSION_WEIGHT * home_signal,
-                            -MAX_RUN_ADJUSTMENT, MAX_RUN_ADJUSTMENT)
-    away_adjustment = _clip(RESIDUAL_MEAN_REVERSION_WEIGHT * away_signal,
-                            -MAX_RUN_ADJUSTMENT, MAX_RUN_ADJUSTMENT)
+    home_general = .70 * home["offense"] - .30 * away["defense"]
+    away_general = .70 * away["offense"] - .30 * home["defense"]
+    if league == "MLB":
+        # Team-wide miss patterns mostly mean-revert after recent form has been modelled, but
+        # repeated misses against this exact opponent and in this exact game structure are
+        # interaction effects. They persist in the observed direction after heavy shrinkage.
+        home_adjustment = (MLB_GENERAL_MEAN_REVERSION_WEIGHT * home_general
+                           + MLB_MATCHUP_PERSISTENCE_WEIGHT * home["matchup"]
+                           + MLB_STRUCTURE_PERSISTENCE_WEIGHT * home["structure"])
+        away_adjustment = (MLB_GENERAL_MEAN_REVERSION_WEIGHT * away_general
+                           + MLB_MATCHUP_PERSISTENCE_WEIGHT * away["matchup"]
+                           + MLB_STRUCTURE_PERSISTENCE_WEIGHT * away["structure"])
+        mean_reversion_weight = MLB_GENERAL_MEAN_REVERSION_WEIGHT
+        matchup_weight = MLB_MATCHUP_PERSISTENCE_WEIGHT
+        structure_weight = MLB_STRUCTURE_PERSISTENCE_WEIGHT
+    else:
+        home_signal = home_general + .10 * home["matchup"] + .12 * home["structure"]
+        away_signal = away_general + .10 * away["matchup"] + .12 * away["structure"]
+        home_adjustment = RESIDUAL_MEAN_REVERSION_WEIGHT * home_signal
+        away_adjustment = RESIDUAL_MEAN_REVERSION_WEIGHT * away_signal
+        mean_reversion_weight = RESIDUAL_MEAN_REVERSION_WEIGHT
+        matchup_weight = .10 * RESIDUAL_MEAN_REVERSION_WEIGHT
+        structure_weight = .12 * RESIDUAL_MEAN_REVERSION_WEIGHT
+    home_adjustment = _clip(home_adjustment, -MAX_RUN_ADJUSTMENT, MAX_RUN_ADJUSTMENT)
+    away_adjustment = _clip(away_adjustment, -MAX_RUN_ADJUSTMENT, MAX_RUN_ADJUSTMENT)
     home_volatility = _clip(math.sqrt(home["offense_volatility"] * away["defense_volatility"]), .82, 1.35)
     away_volatility = _clip(math.sqrt(away["offense_volatility"] * home["defense_volatility"]), .82, 1.35)
     return {
@@ -146,10 +173,13 @@ def residual_context(observations: list[ResidualObservation], home_team_id: int,
         "away_variance_multiplier": round(away_volatility ** 2, 6),
         "home": _public_projection(home),
         "away": _public_projection(away),
-        "mean_reversion_weight": RESIDUAL_MEAN_REVERSION_WEIGHT,
+        "league": league,
+        "mean_reversion_weight": mean_reversion_weight,
+        "matchup_persistence_weight": matchup_weight,
+        "structure_persistence_weight": structure_weight,
         "regime": active_regime,
-        "method": ("walk-forward selected mean reversion of team offense/defense EWMA + "
-                   "venue split + shrunk matchup residual"),
+        "method": ("league-specific team offense/defense residual EWMA + venue split + "
+                   "strongly shrunk opponent-specific and game-structure residual"),
     }
 
 
@@ -170,7 +200,7 @@ def probability_from_run_means(home_runs: float, away_runs: float) -> float:
 
 
 def available_before(observation: ResidualObservation, cutoff: datetime) -> bool:
-    """A prior-day KBO final is known even if a later bulk sync rewrote its collection time."""
+    """A prior-day final is known even if a later bulk sync rewrote its collection time."""
     return observation.started_at < cutoff and (
         observation.started_at.date() < cutoff.date() or observation.finalized_at <= cutoff
     )

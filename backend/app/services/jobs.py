@@ -136,6 +136,7 @@ def run_replay_refresh(league: str, limit: int = 10) -> dict[str, Any]:
                 end_date=REPLAY_END_DATE,
                 limit=limit,
             )
+            lifecycle = run_model_lifecycle(session, league)
             return {
                 **replay,
                 "replay_window": {
@@ -143,6 +144,7 @@ def run_replay_refresh(league: str, limit: int = 10) -> dict[str, Any]:
                     "end": REPLAY_END_DATE.isoformat(),
                 },
                 "inning_backfill": innings,
+                "model_lifecycle": lifecycle,
             }
 
 

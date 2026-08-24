@@ -45,7 +45,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   // contain them.
   const decidable = <T extends { home: number; away: number }>(scores: T[]) =>
     game.league === 'MLB' ? scores.filter((score) => score.home !== score.away) : scores
-  const usableScores = decidable(p?.top_scores ?? [])
+  const usableScores = decidable(p?.projected_score_candidates ?? p?.top_scores ?? [])
   const predictedScore = p ? ((p.summary_schema_version ?? 0) >= 10 && p.primary_score
     && !(game.league === 'MLB' && p.primary_score.home === p.primary_score.away)
     ? p.primary_score
@@ -59,7 +59,6 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const meanScore = p?.score_estimates?.mean ?? (p ? {
     away: Number(p.away_expected_runs.toFixed(1)), home: Number(p.home_expected_runs.toFixed(1)),
   } : undefined)
-  const weightedScore = p?.score_estimates?.top5_weighted
   const modeTotal = p?.simulation_modes?.total_runs
   const modeOutcome = p?.simulation_modes?.outcome
   const statisticalExpectedTotal = p?.statistical_expected_total ?? (
@@ -154,9 +153,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>
 
         <Box className="score-row">
-          <Box className="primary"><span>예상 점수 · 평균</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>{weightedScore ? `자주 나온 5개 점수 평균 ${stat(weightedScore.away, 1)} : ${stat(weightedScore.home, 1)} (전체의 ${pct(weightedScore.coverage_probability)})` : `평균 총점 ${stat(statisticalExpectedTotal, 1)}점`}</small></Box>
+          <Box className="primary"><span>예상 점수 · 2만 회 평균</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>같은 2만 회의 평균 총점 {stat(statisticalExpectedTotal, 1)}점</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>가장 확률 높은 점수</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
+          <Box><span>2만 회 분포 대표 점수</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}{p.extra_innings ? ' · 승패·핸디캡 방향 반영' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
           <Divider orientation="vertical" flexItem />
           <Box className={`headline-outcome${topOutcome?.hit == null ? '' : topOutcome.hit ? ' hit' : ' miss'}`}>
             <Box className="headline-outcome-heading">
@@ -173,7 +172,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>
 
         {displayedScoreCandidates.length ? <Box className="score-candidates">
-          <span>확률과 경기 흐름을 함께 본 최종 점수 3가지</span>
+          <span>전체 시뮬레이션 분포에서 뽑은 대표 점수 3가지</span>
           <Stack direction="row" flexWrap="wrap" gap={.8}>
             {displayedScoreCandidates.map((score, index) => <b key={`${score.away}-${score.home}`} className={index === 0 ? 'top' : ''}>
               <small className="rank">{index === 0 ? '선정' : `${index + 1}위`}</small>{score.away} : {score.home}<small>{score.probability == null ? '—' : pctFine(score.probability)}</small>
@@ -329,7 +328,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
                 <small>{personalAnalysis.model} · {personalAnalysis.disclaimer}</small>
               </Box>}
             </Box>
-            <Typography className="source-note">이 경기를 {p.model.simulations.toLocaleString()}번 가상으로 치러본 결과입니다. 평균 점수는 그 {p.model.simulations.toLocaleString()}번의 평균이고, 가장 확률 높은 점수는 시뮬레이션 빈도·경기별 평균 득점·예상 총점·우세 팀 방향을 함께 반영해 상위 후보에서 고릅니다. 승률·득점대·총점도 모두 같은 계산에서 나옵니다. 평균 총점은 {stat(statisticalExpectedTotal, 2)}점입니다. {p.extra_innings
+            <Typography className="source-note">이 경기를 {p.model.simulations.toLocaleString()}번 가상으로 치러본 결과입니다. 팀 타격·수비, 선발과 불펜, 구장, 공개된 날씨·일정·라인업 요인은 모든 시행의 득점률에 반영됩니다. 타석 엔진은 타자별 득점권과 주자 상황 기록까지 매 타석에 적용합니다. 평균 점수, 대표 정수 점수, 승률, 마핸·플핸, 언더·오버는 모두 같은 {p.model.simulations.toLocaleString()}회 전체 분포에서 산출하며 미공개 자료만 중립값으로 둡니다. 평균 총점은 {stat(statisticalExpectedTotal, 2)}점입니다. {p.extra_innings
               ? game.league === 'MLB'
                 ? '연장은 실제 MLB 규정대로 승부치기(무사 2루 주자)를 적용해 승부가 날 때까지 치르기 때문에 무승부가 없습니다.'
                 : '연장은 실제 KBO 규정대로 승부치기 없이 11회까지만 치르고, 그래도 동점이면 무승부로 두고 승률 계산에서 뺍니다.'

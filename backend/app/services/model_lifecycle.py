@@ -41,7 +41,7 @@ TRAINABLE_FEATURES = [
 
 POLICY = {
     "minimum_training_samples": MIN_TRAINING_SAMPLES,
-    "minimum_validation_samples": MIN_VALIDATION_SAMPLES,
+    "minimum_chronological_validation_samples": MIN_VALIDATION_SAMPLES,
     "minimum_new_samples_for_retraining": MIN_NEW_SAMPLES,
     "minimum_live_samples_for_rollback": MIN_ROLLBACK_SAMPLES,
     "promotion": {
@@ -92,7 +92,6 @@ def run_model_lifecycle(session: Session, league: str) -> dict[str, Any]:
     registry.last_evaluated_at = now
 
     samples = _training_samples(session, league)
-    live_samples = [row for row in samples if row["origin"] == "LIVE_PREGAME"]
     rollback = _maybe_rollback(session, registry, samples, now)
     if rollback:
         return {**lifecycle_status(session, league), "decision": rollback}
@@ -101,13 +100,6 @@ def run_model_lifecycle(session: Session, league: str) -> dict[str, Any]:
         _event_once(session, league, "WAITING_FOR_DATA", len(samples), reason,
                     champion_id=registry.champion_model_version_id)
         return {**lifecycle_status(session, league), "decision": "WAITING_FOR_DATA", "reason": reason}
-    if len(live_samples) < MIN_VALIDATION_SAMPLES:
-        reason = (f"과거 재현을 포함한 학습 표본은 {len(samples)}개지만 독립 실전 검증 표본이 "
-                  f"{len(live_samples)}개입니다. {MIN_VALIDATION_SAMPLES}개 전에는 자동 승격하지 않습니다.")
-        _event_once(session, league, "WAITING_FOR_LIVE_VALIDATION", len(live_samples), reason,
-                    champion_id=registry.champion_model_version_id)
-        return {**lifecycle_status(session, league), "decision": "WAITING_FOR_LIVE_VALIDATION", "reason": reason}
-
     latest_artifact = session.scalar(select(ModelArtifact).where(
         ModelArtifact.league == league,
     ).order_by(ModelArtifact.training_sample_size.desc(), ModelArtifact.created_at.desc()).limit(1))
@@ -211,13 +203,11 @@ def _training_samples(session: Session, league: str) -> list[dict[str, Any]]:
 
 
 def _train_candidate(session: Session, league: str, samples: list[dict[str, Any]], now: datetime
-                     ) -> tuple[ModelArtifact, dict[str, float], dict[str, float]]:
-    live = [row for row in samples if row["origin"] == "LIVE_PREGAME"]
-    split = max(MIN_VALIDATION_SAMPLES, round(len(live) * VALIDATION_FRACTION))
-    validation = live[-split:]
+                     ) -> tuple[ModelArtifact, dict[str, Any], dict[str, Any]]:
+    validation, validation_source = _validation_partition(samples)
     validation_start = min(_naive(row["captured_at"]) for row in validation)
-    # Strict walk-forward boundary: replay rows can enrich the fit only when their as-of cutoff
-    # precedes the first live validation game.
+    # Strict walk-forward boundary: every fit row must precede the first holdout first-pitch
+    # cutoff, whether the holdout came from live forecasts or audited historical replays.
     train = [row for row in samples if _naive(row["captured_at"]) < validation_start]
     x_train = np.vstack([_feature_values(row["features"], row["base_home_runs"], row["base_away_runs"])
                          for row in train])
@@ -238,16 +228,23 @@ def _train_candidate(session: Session, league: str, samples: list[dict[str, Any]
         "away_run_intercept": away_intercept, "away_run_coefficients": away_coefficients.tolist(),
     }
     candidate_metrics = _evaluate(runtime, validation)
+    candidate_metrics["validation_source"] = validation_source
+    candidate_metrics["training_source_counts"] = {
+        origin: sum(row["origin"] == origin for row in train)
+        for origin in ("LIVE_PREGAME", "HISTORICAL_REPLAY")
+    }
     registry = session.get(ModelRegistry, league)
     comparator = _artifact_runtime(session, registry.champion_model_version_id) if registry else None
     comparator_metrics = _evaluate(comparator, validation) if comparator else _evaluate(None, validation)
+    comparator_metrics["validation_source"] = validation_source
     stamp = now.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
     name = f"{league}_AUTO_{stamp}"
     checksum_payload = {**runtime, "training_cutoff": train[-1]["captured_at"].isoformat(), "sample_size": len(samples)}
     checksum = hashlib.sha256(json.dumps(checksum_payload, sort_keys=True).encode()).hexdigest()
     model = ModelVersion(
-        name=name, algorithm="standardized L2 logistic win classifier + ridge home/away run regressors; chronological holdout",
-        feature_schema={"version": 5, "features": TRAINABLE_FEATURES}, checksum=checksum, created_at=now,
+        name=name, algorithm=("standardized L2 logistic win classifier + ridge home/away run regressors; "
+                             "leakage-audited chronological holdout"),
+        feature_schema={"version": 6, "features": TRAINABLE_FEATURES}, checksum=checksum, created_at=now,
     )
     session.add(model)
     session.flush()
@@ -261,7 +258,24 @@ def _train_candidate(session: Session, league: str, samples: list[dict[str, Any]
     return artifact, candidate_metrics, comparator_metrics
 
 
-def _promotion_decision(candidate: dict[str, float], comparator: dict[str, float]) -> tuple[bool, str]:
+def _validation_partition(samples: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str]:
+    """Prefer live holdout data, falling back to audited chronological replay data."""
+    live = [row for row in samples if row["origin"] == "LIVE_PREGAME"]
+    if len(live) >= MIN_VALIDATION_SAMPLES:
+        split = max(MIN_VALIDATION_SAMPLES, round(len(live) * VALIDATION_FRACTION))
+        validation = live[-split:]
+        validation_source = "LIVE_PREGAME_CHRONOLOGICAL_HOLDOUT"
+    else:
+        # A leakage-audited historical replay has an explicit first-pitch cutoff. Once a season
+        # has been backfilled, its latest chronological block is valid out-of-time validation
+        # and should not sit unused merely because the service launched late in the season.
+        split = max(MIN_VALIDATION_SAMPLES, round(len(samples) * VALIDATION_FRACTION))
+        validation = samples[-split:]
+        validation_source = "LEAKAGE_AUDITED_CHRONOLOGICAL_HOLDOUT"
+    return validation, validation_source
+
+
+def _promotion_decision(candidate: dict[str, Any], comparator: dict[str, Any]) -> tuple[bool, str]:
     p = POLICY["promotion"]
     improved = (candidate["brier"] <= comparator["brier"] - p["brier_improvement"] or
                 candidate["run_mae"] <= comparator["run_mae"] - p["or_run_mae_improvement"])
@@ -414,7 +428,7 @@ def _event_once(session: Session, league: str, event_type: str, sample_size: int
 
 
 def _baseline_name(league: str) -> str:
-    return "KBO_MATCHUP_V11" if league == "KBO" else "MLB_MATCHUP_V10"
+    return "KBO_MATCHUP_V15" if league == "KBO" else "MLB_MATCHUP_V14"
 
 
 def _clip(value: float, low: float, high: float) -> float:

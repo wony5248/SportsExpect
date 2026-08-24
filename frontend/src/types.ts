@@ -95,9 +95,8 @@ export type Prediction = {
   score_estimates?: {
     headline: 'MEAN'
     mean: { away: number; home: number }
-    top5_weighted: null | { away: number; home: number; scores_used: number; coverage_probability: number }
     mode: { away: number; home: number; count?: number | null; probability?: number | null }
-    representative?: { away: number; home: number; count?: number | null; probability?: number | null; selection_method?: string; selection_score?: number | null }
+    representative?: { away: number; home: number; count?: number | null; probability?: number | null; selection_method?: string; selection_score?: number | null; population_coverage?: number; projects_favorite_cover?: boolean }
   }
   confidence: number
   confidence_label: 'HIGH' | 'MEDIUM' | 'LOW'
@@ -113,6 +112,7 @@ export type Prediction = {
   totals: Record<string, { over: number; under: number; push?: number }>
   tie_probability: number
   top_scores: SimulatedScore[]
+  projected_score_candidates?: SimulatedScore[]
   frequency_tables?: {
     scores?: Record<string, number>
     totals?: Record<string, number>

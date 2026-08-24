@@ -217,7 +217,7 @@ def _residual_walk_forward(
         context = residual_context(
             eligible, game.home_team_id, game.away_team_id, game.game_date,
             latest_game_id=eligible[-1].game_id if eligible else None, force_enabled=True,
-            regime=_prediction_regime(prediction.payload or {}, game.game_date),
+            regime=_prediction_regime(prediction.payload or {}, game.game_date), league=game.league,
         )
         adjusted_home, adjusted_away = apply_residual_adjustment(baseline_home, baseline_away, context)
         outcome = 1.0 if result.home_score > result.away_score else (

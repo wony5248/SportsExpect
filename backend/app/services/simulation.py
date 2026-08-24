@@ -343,6 +343,103 @@ def _outcome_scores(score_counts: Counter[tuple[int, int]], outcome_counts: Coun
     return scores
 
 
+def _counter_quantile(counts: Counter[int], probability: float) -> int:
+    """Exact integer quantile over a frequency table without expanding it back into rows."""
+    target = probability * sum(counts.values())
+    cumulative = 0
+    for value, count in sorted(counts.items()):
+        cumulative += count
+        if cumulative >= target:
+            return int(value)
+    return int(max(counts))
+
+
+def _full_distribution_score_projection(
+    score_counts: Counter[tuple[int, int]], total_counts: Counter[int], margin_counts: Counter[int],
+    simulations: int, league: str, home_mean: float, away_mean: float,
+    home_two_way: float, away_two_way: float, handicap: dict[str, float],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Choose stable integer score candidates from the complete simulation population.
+
+    An exact-score mode systematically gravitates to a one-run result because every MLB game is
+    forced to have a winner and central tied scores are unavailable.  This projection instead
+    scores every final score observed across all simulations against the distribution's median
+    total, median margin, team means, exact-score frequency and -1.5 cover shape.  It therefore
+    keeps a close-game forecast close, while allowing a genuine multi-run favorite to display a
+    multi-run score whenever the same population makes its run line more likely than not.
+    """
+    target_total = _counter_quantile(total_counts, .50)
+    target_margin = _counter_quantile(margin_counts, .50)
+    home_favored = home_two_way >= away_two_way
+    favorite_cover_probability = (
+        handicap["home_minus_1_5"] if home_favored else handicap["away_minus_1_5"]
+    )
+    project_cover = favorite_cover_probability >= .50
+    maximum_count = max(score_counts.values()) or 1
+
+    def favorite_margin(home_runs: int, away_runs: int) -> int:
+        return home_runs - away_runs if home_favored else away_runs - home_runs
+
+    # The representative score follows the simulated favorite. Within that outcome, the
+    # simulation's own run-line majority determines whether the point estimate is a one-run or
+    # multi-run win. This is a constraint from all 20,000 outcomes, not a hand-picked margin.
+    eligible = [
+        (home_runs, away_runs, count)
+        for (home_runs, away_runs), count in score_counts.items()
+        if favorite_margin(home_runs, away_runs) >= (2 if project_cover else 1)
+        and not (league == "MLB" and home_runs == away_runs)
+    ]
+    if not eligible:
+        eligible = [(home_runs, away_runs, count)
+                    for (home_runs, away_runs), count in score_counts.items()
+                    if not (league == "MLB" and home_runs == away_runs)]
+
+    def fit(row: tuple[int, int, int]) -> tuple[float, int, float]:
+        home_runs, away_runs, count = row
+        total = home_runs + away_runs
+        margin = home_runs - away_runs
+        frequency_fit = count / maximum_count
+        team_fit = 1 / (1 + (abs(home_runs - home_mean) + abs(away_runs - away_mean)) / 2)
+        total_fit = 1 / (1 + abs(total - target_total))
+        margin_fit = 1 / (1 + abs(margin - target_margin))
+        selection_score = (
+            .30 * frequency_fit + .30 * team_fit + .20 * total_fit + .20 * margin_fit
+        )
+        return selection_score, count, -abs(total - target_total)
+
+    ranked = sorted(eligible, key=fit, reverse=True)
+    candidates: list[dict[str, Any]] = []
+    # Keep several credible alternatives from the full support. A soft diversity rule avoids
+    # returning the same total/margin shape three times while never admitting a weak tail score.
+    used_shapes: set[tuple[int, int]] = set()
+    for row in ranked:
+        home_runs, away_runs, count = row
+        shape = (min(3, abs(home_runs - away_runs)), (home_runs + away_runs) // 2)
+        if candidates and shape in used_shapes and len(candidates) < 6:
+            continue
+        candidates.append({
+            "rank": len(candidates) + 1,
+            "home": home_runs,
+            "away": away_runs,
+            "count": count,
+            "probability": round(count / simulations, 4),
+            "selection_method": "FULL_DISTRIBUTION_PROJECTION_V2",
+            "selection_score": round(fit(row)[0], 6),
+        })
+        used_shapes.add(shape)
+        if len(candidates) >= 8:
+            break
+    primary = dict(candidates[0])
+    primary.update({
+        "target_total_median": target_total,
+        "target_margin_median": target_margin,
+        "favorite_cover_probability": round(favorite_cover_probability, 4),
+        "projects_favorite_cover": project_cover,
+        "population_coverage": 1.0,
+    })
+    return primary, candidates
+
+
 def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndarray, away: np.ndarray,
                simulations: int, league: str, bullpen_usage: dict[str, Any], engine: str,
                observed_result: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -366,8 +463,8 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         return tuple(pairs)
 
     score_counts = Counter(zip(home.tolist(), away.tolist(), strict=False))
-    top_scores = []
-    for rank, ((h, a), count) in enumerate(score_counts.most_common(16), 1):
+    def with_trajectory(payload: dict[str, Any]) -> dict[str, Any]:
+        h, a, count = int(payload["home"]), int(payload["away"]), int(payload["count"])
         indices = np.flatnonzero((home == h) & (away == a))
         trajectory_counts = Counter(trajectory_of(index) for index in indices)
         trajectory, trajectory_count = trajectory_counts.most_common(1)[0]
@@ -380,13 +477,20 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
                 "inning": inning, "away": away_runs, "home": home_runs,
                 "away_cumulative": away_cumulative, "home_cumulative": home_cumulative,
             })
-        top_scores.append({
-            "rank": rank, "home": h, "away": a, "count": count,
-            "probability": round(count / simulations, 4),
+        return {
+            **payload,
             "inning_line": inning_line,
             "trajectory_count": trajectory_count,
             "trajectory_probability_given_score": round(trajectory_count / count, 4),
+        }
+
+    top_scores = [
+        with_trajectory({
+            "rank": rank, "home": h, "away": a, "count": count,
+            "probability": round(count / simulations, 4),
         })
+        for rank, ((h, a), count) in enumerate(score_counts.most_common(16), 1)
+    ]
     outcome_counts = Counter({
         "HOME_WIN": int(np.count_nonzero(home > away)),
         "AWAY_WIN": int(np.count_nonzero(away > home)),
@@ -408,6 +512,15 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "home_plus_1_5": float(np.mean(home - away >= -1)),
         "away_plus_1_5": float(np.mean(away - home >= -1)),
     }
+    projected_score, projected_score_candidates = _full_distribution_score_projection(
+        score_counts, total_counts, margin_counts, simulations, league,
+        float(home.mean()), float(away.mean()), home_two_way, away_two_way, handicap,
+    )
+    projected_score = with_trajectory(projected_score)
+    projected_score_candidates = [
+        with_trajectory(score) if index < 3 else score
+        for index, score in enumerate(projected_score_candidates)
+    ]
     totals = {
         str(line): {
             "over": float(np.mean(total > line)),
@@ -443,6 +556,8 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "away_plus_1_5": handicap["away_plus_1_5"],
         "totals": totals,
         "top_scores": top_scores,
+        "projected_score": projected_score,
+        "projected_score_candidates": projected_score_candidates,
         "outcome_scores": outcome_scores,
         # Per-club run histograms, so the shape can be compared against real results.
         "team_run_distribution": {

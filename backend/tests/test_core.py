@@ -38,10 +38,11 @@ from backend.app.services.simulation import evaluate_simulation_recipe
 from backend.app.services.prediction import (SIMULATION_SUMMARY_SCHEMA_VERSION,
                                              _apply_daily_bullpen_workload,
                                              blend_classifier_into_means, build_score_estimates,
-                                             predict_game, select_primary_score)
+                                             predict_game)
 from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
                                        _missing_leagues_for_date, checkpoint_stage_for_minutes)
-from backend.app.services.model_lifecycle import _promotion_decision, predict_with_runtime
+from backend.app.services.model_lifecycle import (_promotion_decision, _validation_partition,
+                                                  predict_with_runtime)
 from backend.app.services.historical_replay import run_historical_replay
 from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
 from backend.app.services.team_residuals import (ResidualObservation, TeamResidualHistory,
@@ -485,6 +486,10 @@ def test_supabase_database_url_selects_psycopg_driver(monkeypatch):
     )
 
 
+def test_forecasts_never_run_below_twenty_thousand_simulations():
+    assert settings.simulations >= 20_000
+
+
 def test_model_algorithm_accepts_auditable_long_descriptions():
     assert isinstance(ModelVersion.__table__.c.algorithm.type, Text)
 
@@ -848,6 +853,23 @@ def test_lifecycle_event_type_column_fits_every_decision_constant():
         assert len(value) <= column_length, f"{value} ({len(value)} chars) exceeds column width {column_length}"
 
 
+def test_model_training_uses_audited_historical_holdout_until_live_sample_is_large_enough():
+    start = datetime(2026, 1, 1)
+    historical = [{"origin": "HISTORICAL_REPLAY", "captured_at": start + timedelta(days=index)}
+                  for index in range(200)]
+    validation, source = _validation_partition(historical)
+    assert len(validation) == 40
+    assert validation[0]["captured_at"] == start + timedelta(days=160)
+    assert source == "LEAKAGE_AUDITED_CHRONOLOGICAL_HOLDOUT"
+
+    live = [{"origin": "LIVE_PREGAME", "captured_at": start + timedelta(days=200 + index)}
+            for index in range(50)]
+    validation, source = _validation_partition(historical + live)
+    assert len(validation) == 40
+    assert all(row["origin"] == "LIVE_PREGAME" for row in validation)
+    assert source == "LIVE_PREGAME_CHRONOLOGICAL_HOLDOUT"
+
+
 def test_mlb_never_reports_a_tied_score_and_branches_beat_the_raw_mode():
     result = simulate_scores(4.6, 4.2, 20_000, 42, league="MLB")
     # No MLB game can end level, so nothing in the payload may describe one.
@@ -941,21 +963,7 @@ def test_classifier_blend_flips_marginal_runs_favorite_when_records_disagree():
     assert tempered_home < 6.9
 
 
-def test_representative_score_balances_frequency_with_matchup_shape():
-    scores = [
-        {"away": 3, "home": 4, "probability": .08},
-        {"away": 4, "home": 6, "probability": .06},
-        {"away": 5, "home": 3, "probability": .07},
-    ]
-    selected = select_primary_score(scores, home_expected=5.6, away_expected=4.2, home_win_probability=.61)
-    assert selected["away"] == 4
-    assert selected["home"] == 6
-    assert selected["probability"] == .06
-    assert selected["selection_method"] == "BALANCED_LIKELIHOOD_V1"
-    assert 0 < selected["selection_score"] <= 1
-
-
-def test_score_estimates_combine_mean_mode_and_weighted_top_scores():
+def test_score_estimates_combine_full_population_mean_mode_and_projection():
     top_scores = [
         {"away": 3, "home": 4, "count": 1200, "probability": .06},
         {"away": 4, "home": 3, "count": 1000, "probability": .05},
@@ -963,19 +971,13 @@ def test_score_estimates_combine_mean_mode_and_weighted_top_scores():
         {"away": 2, "home": 4, "count": 600, "probability": .03},
         {"away": 4, "home": 4, "count": 400, "probability": .02},
     ]
-    estimates = build_score_estimates(top_scores, top_scores[0], home_expected=4.27, away_expected=3.61,
-                                      simulations=20_000)
+    representative = {**top_scores[0], "population_coverage": 1.0, "projects_favorite_cover": True}
+    estimates = build_score_estimates(top_scores, representative, home_expected=4.27, away_expected=3.61)
     assert estimates["headline"] == "MEAN"
     assert estimates["mean"] == {"away": 3.6, "home": 4.3}
     assert estimates["mode"] == {"away": 3, "home": 4, "count": 1200, "probability": .06}
-    weighted = estimates["top5_weighted"]
-    assert weighted["scores_used"] == 5
-    assert weighted["coverage_probability"] == round(4000 / 20_000, 4)
-    assert weighted["away"] == round((3 * 1200 + 4 * 1000 + 3 * 800 + 2 * 600 + 4 * 400) / 4000, 1)
-    assert weighted["home"] == round((4 * 1200 + 3 * 1000 + 3 * 800 + 4 * 600 + 4 * 400) / 4000, 1)
-    # Without any simulated scores the weighted estimate is honestly absent, never fabricated.
-    assert build_score_estimates([], {"away": 4, "home": 4, "probability": None},
-                                 home_expected=4.1, away_expected=3.9, simulations=20_000)["top5_weighted"] is None
+    assert estimates["representative"]["population_coverage"] == 1.0
+    assert estimates["representative"]["projects_favorite_cover"] is True
 
 
 def test_claude_advice_cannot_overpower_statistical_baseline():
@@ -1018,12 +1020,13 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     assert any(
         score["away"] == after["payload"]["primary_score"]["away"]
         and score["home"] == after["payload"]["primary_score"]["home"]
-        for score in after["payload"]["top_scores"]
+        for score in after["payload"]["projected_score_candidates"]
     )
-    assert after["payload"]["primary_score"]["selection_method"] == "BALANCED_LIKELIHOOD_V1"
+    assert after["payload"]["primary_score"]["selection_method"] == "FULL_DISTRIBUTION_PROJECTION_V2"
+    assert after["payload"]["primary_score"]["population_coverage"] == 1.0
     estimates = after["payload"]["score_estimates"]
     # Hybrid headline: the displayed score is the distribution mean, while the exact-score
-    # mode and the top-5 weighted average travel alongside it for the UI.
+    # mode and the complete-distribution integer projection travel alongside it for the UI.
     assert after["payload"]["display_expected_score"] == estimates["mean"]
     assert estimates["headline"] == "MEAN"
     assert estimates["mode"]["away"] == after["payload"]["top_scores"][0]["away"]
@@ -1031,14 +1034,28 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     assert 0 < estimates["mode"]["probability"] <= 1
     assert estimates["representative"]["away"] == after["payload"]["primary_score"]["away"]
     assert estimates["representative"]["home"] == after["payload"]["primary_score"]["home"]
-    weighted = estimates["top5_weighted"]
-    assert weighted["scores_used"] == 5
-    assert 0 < weighted["coverage_probability"] <= 1
-    top5 = after["payload"]["top_scores"][:5]
-    assert min(s["away"] for s in top5) <= weighted["away"] <= max(s["away"] for s in top5)
-    assert min(s["home"] for s in top5) <= weighted["home"] <= max(s["home"] for s in top5)
+    assert estimates["representative"]["population_coverage"] == 1.0
     assert after["home_win_probability"] == after["payload"]["simulation_home_probability"]
     assert after["away_win_probability"] == round(1 - after["home_win_probability"], 4)
+
+
+def test_integer_projection_uses_full_distribution_and_respects_run_line_majority():
+    strong = simulate_scores(6.8, 3.1, 20_000, 20260824, league="MLB")
+    primary = strong["projected_score"]
+    assert primary["population_coverage"] == 1.0
+    assert primary["projects_favorite_cover"] is True
+    assert primary["home"] - primary["away"] >= 2
+    assert len(strong["projected_score_candidates"]) >= 3
+    assert all(score["selection_method"] == "FULL_DISTRIBUTION_PROJECTION_V2"
+               for score in strong["projected_score_candidates"])
+
+    close = simulate_scores(4.5, 4.4, 20_000, 20260824, league="MLB")
+    close_primary = close["projected_score"]
+    favorite_margin = (close_primary["home"] - close_primary["away"]
+                       if close["home_two_way_probability"] >= .5
+                       else close_primary["away"] - close_primary["home"])
+    expected_minimum = 2 if close_primary["projects_favorite_cover"] else 1
+    assert favorite_margin >= expected_minimum
 
 
 def test_ui_registered_secret_is_encrypted_and_requires_same_master_key():
@@ -1236,13 +1253,37 @@ def test_kbo_residual_calibration_separates_venue_shrinks_matchups_and_respects_
     assert history.context_for(target)["source_game_count"] == 12
 
 
-def test_residual_calibration_is_kbo_only_until_mlb_history_is_ready():
+def test_mlb_residual_calibration_activates_from_replay_history():
     game = SimpleNamespace(league="MLB", game_date=date(2026, 8, 23),
                            start_at=datetime(2026, 8, 23, 10, 0), home_team_id=1, away_team_id=2)
     context = TeamResidualHistory([]).context_for(game)
-    assert context["enabled"] is False
-    assert context["reason"] == "LEAGUE_NOT_ENABLED"
+    assert context["enabled"] is True
+    assert context["league"] == "MLB"
+    assert context["source_game_count"] == 0
     assert apply_residual_adjustment(4.5, 4.2, context) == (4.5, 4.2)
+
+
+def test_mlb_opponent_residual_persists_after_strong_sample_shrinkage():
+    start = datetime(2026, 4, 1, 18, 30)
+    observations = [ResidualObservation(
+        game_id=index + 1, started_at=start + timedelta(days=index),
+        finalized_at=start + timedelta(days=index, hours=3),
+        home_team_id=1, away_team_id=2, home_expected=4.5, away_expected=4.5,
+        home_actual=7, away_actual=4,
+    ) for index in range(20)]
+    versus_repeat = residual_context(
+        observations, 1, 2, date(2026, 8, 23), force_enabled=True, league="MLB",
+    )
+    assert versus_repeat["home"]["matchup_games"] == 20
+    assert versus_repeat["home"]["matchup"] > 0
+    assert versus_repeat["matchup_persistence_weight"] > 0
+    general_only = versus_repeat["mean_reversion_weight"] * (
+        .70 * versus_repeat["home"]["offense"] - .30 * versus_repeat["away"]["defense"]
+    )
+    with_matchup = general_only + (
+        versus_repeat["matchup_persistence_weight"] * versus_repeat["home"]["matchup"]
+    )
+    assert with_matchup > general_only
 
 
 def test_structural_residual_needs_twenty_matching_regime_games():

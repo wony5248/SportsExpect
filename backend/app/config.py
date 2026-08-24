@@ -44,7 +44,8 @@ class Settings:
     cache_ttl_minutes: int = int(os.getenv("CACHE_TTL_MINUTES", "120"))
     mlb_stats_ttl_minutes: int = int(os.getenv("MLB_STATS_TTL_MINUTES", "720"))
     live_update_window_minutes: int = int(os.getenv("LIVE_UPDATE_WINDOW_MINUTES", "180"))
-    simulations: int = int(os.getenv("MONTE_CARLO_SIMS", "20000"))
+    # Production forecasts must never silently fall below the audited 20,000-game population.
+    simulations: int = max(20_000, int(os.getenv("MONTE_CARLO_SIMS", "20000")))
     retry_attempts: int = int(os.getenv("COLLECTOR_RETRY_ATTEMPTS", "3"))
     retry_base_seconds: float = float(os.getenv("COLLECTOR_RETRY_BASE_SECONDS", "0.75"))
     backup_retention_days: int = int(os.getenv("BACKUP_RETENTION_DAYS", "14"))
