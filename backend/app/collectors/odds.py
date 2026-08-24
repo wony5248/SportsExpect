@@ -45,6 +45,15 @@ def _consensus_event(event: dict[str, Any]) -> dict[str, Any]:
     away_probabilities: list[float] = []
     total_lines: list[float] = []
     home_spreads: list[float] = []
+    # A line on its own says where the market set the bar; the price beside it says how likely
+    # the market thinks that bar is to be cleared. Without the price a model can only compare
+    # itself against a flat 50%, which is not a market reading: a run line clears in nearly every
+    # matchup once a winner is assumed, so every card would report the same side.
+    #
+    # A price belongs to the exact line it was quoted at, so both markets are collected as whole
+    # quotes and de-vigged afterwards using only the books posting the consensus line.
+    total_quotes: list[tuple[float, float, float]] = []
+    spread_quotes: list[tuple[float, float, float]] = []
     used_books: set[str] = set()
     for bookmaker in event.get("bookmakers", []):
         book_used = False
@@ -63,18 +72,66 @@ def _consensus_event(event: dict[str, Any]) -> dict[str, Any]:
                 points = [point for point in points if point is not None]
                 if points:
                     total_lines.append(median(points)); book_used = True
+                quote = _two_way_quote(outcomes, "Over", "Under")
+                if quote:
+                    total_quotes.append(quote); book_used = True
             elif market.get("key") == "spreads":
                 point = next((_as_float(row.get("point")) for row in outcomes if row.get("name") == home_name), None)
                 if point is not None:
                     home_spreads.append(point); book_used = True
+                quote = _two_way_quote(outcomes, home_name, away_name)
+                if quote:
+                    spread_quotes.append(quote); book_used = True
         if book_used:
             used_books.add(str(bookmaker.get("key") or bookmaker.get("title") or len(used_books)))
+    total_line = median(total_lines) if total_lines else None
+    home_spread = median(home_spreads) if home_spreads else None
     return {
         "provider": "The Odds API", "external_event_id": str(event.get("id", "")),
         "commence_time": event.get("commence_time"), "home_name": home_name, "away_name": away_name,
         "bookmaker_count": len(used_books),
-        "total_line": median(total_lines) if total_lines else None,
-        "home_spread": median(home_spreads) if home_spreads else None,
+        "total_line": total_line,
+        "home_spread": home_spread,
+        # Vig removed, so each is the market's own probability for its side at the consensus
+        # line. The opposite side is the complement: a half-run line cannot push.
+        "total_over_probability": _devigged_at_line(total_quotes, total_line),
+        "home_spread_probability": _devigged_at_line(spread_quotes, home_spread),
         "home_implied_probability": median(home_probabilities) if home_probabilities else None,
         "away_implied_probability": median(away_probabilities) if away_probabilities else None,
     }
+
+
+def _two_way_quote(outcomes: list[dict[str, Any]], first: str,
+                   second: str) -> tuple[float, float, float] | None:
+    """One book's complete two-way quote as (line, first price, second price).
+
+    Both sides must be quoted at the same line. A book offering the two halves at different
+    numbers is quoting two different bets, and de-vigging across them would invent a price.
+    """
+    rows = {row.get("name"): row for row in outcomes}
+    first_row, second_row = rows.get(first), rows.get(second)
+    if not first_row or not second_row:
+        return None
+    first_point, second_point = _as_float(first_row.get("point")), _as_float(second_row.get("point"))
+    first_price, second_price = _as_float(first_row.get("price")), _as_float(second_row.get("price"))
+    if first_point is None or first_price is None or second_price is None:
+        return None
+    # Totals quote the same number on both sides; a spread quotes mirrored numbers.
+    if second_point is not None and second_point not in (first_point, -first_point):
+        return None
+    if not (first_price > 1 and second_price > 1):
+        return None
+    return first_point, first_price, second_price
+
+
+def _devigged_at_line(quotes: list[tuple[float, float, float]], line: float | None) -> float | None:
+    """Median de-vigged probability of the first side, across the books quoting `line`.
+
+    A price only means anything next to the line it was quoted at, so books posting a different
+    number are dropped rather than blended into a probability for a line none of them offered.
+    """
+    if line is None:
+        return None
+    values = [(1 / first) / ((1 / first) + (1 / second))
+              for point, first, second in quotes if point == line]
+    return round(median(values), 6) if values else None

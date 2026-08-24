@@ -22,6 +22,8 @@ MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-lo
                    "+ leakage-safe team offense/defense residual EWMA calibration "
                    "+ conservative pregame bookmaker-consensus total/win anchor when available "
                    "+ league walk-forward Platt win calibration with outcome-branch reweighting "
+                   "+ two-stage market read: the run line and total are priced inside only the simulations "
+                   "the forecast winner wins "
                    "+ decision-theoretic Bayes-median headline scenario coherent with winner, run line and total "
                    "+ league-accurate extra innings "
                    "(MLB ghost-runner tiebreaker until decided, KBO ties stand after inning 11)")
@@ -31,7 +33,10 @@ MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-lo
 # 25: adds leakage-safe opponent strength, official player Statcast snapshots, actual reliever
 # workload by tier, and handed/event-specific park effects inside the PA engine. Older replays
 # must be regenerated under those semantics.
-SIMULATION_SUMMARY_SCHEMA_VERSION = 27
+# 28: adds the two-stage market read. Stage one names a winner from the full population; the run
+# line and the total are then priced inside only the simulations that winner wins, and the
+# headline integer score is selected under those same conditional decisions.
+SIMULATION_SUMMARY_SCHEMA_VERSION = 28
 
 
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,
@@ -121,7 +126,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         # integer headline scenario agrees with the exact total and run line shown beside it.
         "headline_market": {
             key: headline_market.get(key) for key in (
-                "total_line", "home_spread", "home_implied_probability",
+                "total_line", "home_spread", "home_spread_probability", "total_over_probability",
+                "home_implied_probability",
                 "away_implied_probability", "bookmaker_count", "provider", "collected_at",
             )
         },
@@ -170,6 +176,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         home_team_variance=home_team_variance, away_team_variance=away_team_variance,
         headline_total_line=headline_market.get("total_line"),
         headline_home_spread=headline_market.get("home_spread"),
+        headline_spread_probability=headline_market.get("home_spread_probability"),
+        headline_total_over_probability=headline_market.get("total_over_probability"),
         probability_calibration=probability_calibration,
         home_event_factors=park_events.get("home"), away_event_factors=park_events.get("away"),
     )
@@ -183,6 +191,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "away_lineup": away_table.tolist() if away_table is not None and home_table is not None else None,
         "headline_total_line": headline_market.get("total_line"),
         "headline_home_spread": headline_market.get("home_spread"),
+        "headline_spread_probability": headline_market.get("home_spread_probability"),
+        "headline_total_over_probability": headline_market.get("total_over_probability"),
         "probability_calibration": probability_calibration,
         "home_event_factors": park_events.get("home"), "away_event_factors": park_events.get("away"),
     }
@@ -292,6 +302,13 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "features": features,
             "handicap": {key: round(value, 4) for key, value in simulation["handicap"].items()},
             "market_handicap": simulation["market_handicap"],
+            # The run line and total the model reached on its own, stored beside the ones the
+            # market posted so every finished game becomes a labelled comparison row.
+            "model_fair_lines": simulation["model_fair_lines"],
+            # Second-stage markets, priced inside the branch the forecast winner actually wins.
+            # The card reads its handicap and total picks from here; the unconditional blocks
+            # above remain as the full-population reference.
+            "winner_conditional_market": simulation["winner_conditional_market"],
             "totals": simulation["totals"],
             "tie_probability": round(simulation["tie_probability"], 4),
             "top_scores": simulation["top_scores"],

@@ -370,9 +370,12 @@ def upsert_market_consensus(session: Session, game: Game, raw: dict[str, Any], s
         MarketSnapshot.game_id == game.id, MarketSnapshot.provider == provider,
     ).order_by(MarketSnapshot.collected_at.desc()).limit(1))
     comparison = (values["bookmaker_count"], values["total_line"], values["home_spread"],
+                  raw.get("home_spread_probability"), raw.get("total_over_probability"),
                   values["home_implied_probability"], values["away_implied_probability"])
     previous = ((latest_snapshot.bookmaker_count, latest_snapshot.total_line,
                  (latest_snapshot.raw or {}).get("home_spread"),
+                 (latest_snapshot.raw or {}).get("home_spread_probability"),
+                 (latest_snapshot.raw or {}).get("total_over_probability"),
                  latest_snapshot.home_implied_probability, latest_snapshot.away_implied_probability)
                 if latest_snapshot else None)
     if comparison != previous:
@@ -766,6 +769,8 @@ def _market_payload(market: MarketConsensus, prediction: Prediction | None) -> d
     output = {
         "provider": market.provider, "bookmaker_count": market.bookmaker_count,
         "total_line": market.total_line, "home_spread": market.home_spread,
+        "home_spread_probability": (market.raw or {}).get("home_spread_probability"),
+        "total_over_probability": (market.raw or {}).get("total_over_probability"),
         "home_implied_probability": market.home_implied_probability,
         "away_implied_probability": market.away_implied_probability,
         "source_url": market.source_url, "collected_at": _iso(market.collected_at),

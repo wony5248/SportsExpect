@@ -132,6 +132,8 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
         market_context = ({
             "total_line": market.total_line,
             "home_spread": (market.raw or {}).get("home_spread"),
+            "home_spread_probability": (market.raw or {}).get("home_spread_probability"),
+            "total_over_probability": (market.raw or {}).get("total_over_probability"),
             "home_implied_probability": market.home_implied_probability,
             "away_implied_probability": market.away_implied_probability,
             "bookmaker_count": market.bookmaker_count,

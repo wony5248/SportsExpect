@@ -52,6 +52,67 @@ def validate_simulation_summary(summary: dict[str, Any]) -> None:
         if abs(minus + plus + push - 1) > tolerance:
             raise ValueError("market run-line probabilities must sum to 1")
 
+    conditional = summary.get("winner_conditional_market")
+    if conditional:
+        scenario = probability("winner_conditional_market.scenario_probability",
+                               conditional["scenario_probability"])
+        expected_winner = "HOME" if home_two_way >= away_two_way else "AWAY"
+        if conditional["winner"] != expected_winner:
+            raise ValueError("the conditional branch must be the club the two-way probability favors")
+        conditional_handicap = conditional["handicap"]
+        minus = probability("winner_conditional_market.handicap.model_minus_probability",
+                            conditional_handicap["model_minus_probability"])
+        plus = probability("winner_conditional_market.handicap.model_plus_probability",
+                           conditional_handicap["model_plus_probability"])
+        if abs(minus + plus - 1) > .0002:
+            raise ValueError("run-line two-way probabilities must sum to 1")
+        market_minus = conditional_handicap["market_minus_probability"]
+        if market_minus is not None:
+            priced = probability("winner_conditional_market.handicap.market_minus_probability",
+                                 market_minus)
+            expected_edge = round(minus - priced, 4)
+            if abs(float(conditional_handicap["edge"]) - expected_edge) > .0002:
+                raise ValueError("run-line edge must be the model probability less the market price")
+        cover = probability("winner_conditional_market.handicap.winner_cover_probability",
+                            conditional_handicap["winner_cover_probability"])
+        short = probability("winner_conditional_market.handicap.winner_short_probability",
+                            conditional_handicap["winner_short_probability"])
+        push = probability("winner_conditional_market.handicap.winner_push_probability",
+                           conditional_handicap["winner_push_probability"])
+        if abs(cover + short + push - 1) > .0002:
+            raise ValueError("winner-conditional run-line probabilities must sum to 1")
+        total = conditional["headline_total"]
+        over = probability("winner_conditional_market.headline_total.over_probability",
+                           total["over_probability"])
+        under = probability("winner_conditional_market.headline_total.under_probability",
+                            total["under_probability"])
+        total_push = probability("winner_conditional_market.headline_total.push_probability",
+                                 total["push_probability"])
+        if abs(over + under + total_push - 1) > .0002:
+            raise ValueError("conditional total probabilities must sum to 1")
+        model_over = probability("winner_conditional_market.headline_total.model_over_probability",
+                                 total["model_over_probability"])
+        model_under = probability("winner_conditional_market.headline_total.model_under_probability",
+                                  total["model_under_probability"])
+        if abs(model_over + model_under - 1) > .0002:
+            raise ValueError("total two-way probabilities must sum to 1")
+        market_over = total["market_over_probability"]
+        if market_over is not None:
+            priced_over = probability("winner_conditional_market.headline_total.market_over_probability",
+                                      market_over)
+            if abs(float(total["edge"]) - round(model_over - priced_over, 4)) > .0002:
+                raise ValueError("total edge must be the model probability less the market price")
+        # A conditional percentage describes only its own branch, so the chance of the pick
+        # landing at all can never exceed the chance the branch happens.
+        joint_cover = probability(
+            "winner_conditional_market.handicap.joint_winner_cover_probability",
+            conditional_handicap["joint_winner_cover_probability"])
+        if joint_cover > scenario + 1e-6:
+            raise ValueError("winner-conditional cover cannot exceed its scenario probability")
+        if probability("winner_conditional_market.headline_total.joint_pick_probability",
+                       total["joint_pick_probability"]) > scenario + 1e-6:
+            raise ValueError("headline_total joint probability cannot exceed its scenario probability")
+
     quantile_groups = [summary["total_quantiles"], *summary["team_quantiles"].values()]
     if any(group["p10"] > group["p50"] or group["p50"] > group["p90"] for group in quantile_groups):
         raise ValueError("simulation quantiles must be ordered p10 <= p50 <= p90")
@@ -224,6 +285,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                     away_team_variance: float | None = None,
                     headline_total_line: float | None = None,
                     headline_home_spread: float | None = None,
+                    headline_spread_probability: float | None = None,
+                    headline_total_over_probability: float | None = None,
                     probability_calibration: dict[str, Any] | None = None,
                     home_event_factors: dict[str, float] | None = None,
                     away_event_factors: dict[str, float] | None = None) -> dict[str, Any]:
@@ -237,6 +300,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
             home_event_factors, away_event_factors),
             observed_result=observed_result, headline_total_line=headline_total_line,
             headline_home_spread=headline_home_spread,
+            headline_spread_probability=headline_spread_probability,
+            headline_total_over_probability=headline_total_over_probability,
             probability_calibration=probability_calibration)
     # A shared gamma run environment creates realistic over-dispersion and correlation
     # (weather/umpire/park conditions affect both clubs) while preserving expected means.
@@ -359,6 +424,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     return _summarize(home_innings, away_innings, home, away, simulations, league, usage, "INNING_RATE",
                       observed_result=observed_result, headline_total_line=headline_total_line,
                       headline_home_spread=headline_home_spread,
+                      headline_spread_probability=headline_spread_probability,
+                      headline_total_over_probability=headline_total_over_probability,
                       probability_calibration=probability_calibration)
 
 
@@ -375,6 +442,8 @@ def evaluate_simulation_recipe(recipe: dict[str, Any], observed_result: dict[str
         away_team_variance=recipe.get("away_team_variance"),
         headline_total_line=recipe.get("headline_total_line"),
         headline_home_spread=recipe.get("headline_home_spread"),
+        headline_spread_probability=recipe.get("headline_spread_probability"),
+        headline_total_over_probability=recipe.get("headline_total_over_probability"),
         probability_calibration=recipe.get("probability_calibration"),
     )
     return result["observed_evaluation"]
@@ -497,6 +566,28 @@ def _fair_total_line(total_counts: Counter[int], simulations: int) -> float:
     ))
 
 
+# Widest run line worth quoting: beyond this the two sides stop being a real two-way market.
+FAIR_SPREAD_LINES = tuple(value + .5 for value in range(0, 7))
+
+
+def _fair_home_spread(margin_counts: Counter[int], simulations: int) -> float:
+    """The home run line our own distribution would post, in the book's sign convention.
+
+    Negative means we would lay the runs on the home club. Recorded on every forecast, market or
+    not, so the number the model arrived at on its own can later be compared against the number
+    the market actually posted for the same game.
+    """
+    def imbalance(spread: float) -> float:
+        home_cover = sum(count for margin, count in margin_counts.items()
+                         if margin + spread > 0) / simulations
+        away_cover = sum(count for margin, count in margin_counts.items()
+                         if margin + spread < 0) / simulations
+        return abs(home_cover - away_cover)
+
+    candidates = [-line for line in FAIR_SPREAD_LINES] + list(FAIR_SPREAD_LINES)
+    return min(candidates, key=lambda spread: (imbalance(spread), abs(spread)))
+
+
 def _market_handicap(home_margins: np.ndarray, simulations: int,
                      home_spread: float | None) -> dict[str, Any] | None:
     """Price the book's actual run line from the unchanged simulation population."""
@@ -520,21 +611,278 @@ def _market_handicap(home_margins: np.ndarray, simulations: int,
     }
 
 
+# Minimum simulations that must land inside the winning branch before it is priced. Below this
+# the conditional percentages are sampling noise, so the card falls back to the full-population
+# markets rather than showing a confident number built on a handful of runs.
+MINIMUM_CONDITIONAL_BRANCH = 500
+
+
+def _winner_conditional_market(score_counts: Counter[tuple[int, int]], simulations: int,
+                               home_two_way: float, away_two_way: float,
+                               headline_total_line: float | None,
+                               headline_home_spread: float | None,
+                               headline_spread_probability: float | None = None,
+                               headline_total_over_probability: float | None = None) -> dict[str, Any] | None:
+    """Price the run line and the total inside only the simulations the forecast winner wins.
+
+    Stage one names a winner from the whole population. Reading the derived markets from that
+    same whole population then answers a question nobody asked: an unconditional run line is
+    dominated by the games the favourite loses, so it reports the plus side almost every time,
+    and an unconditional total inherits the low-scoring losing branch, so it reports under
+    almost every time. Both collapse to the same answer for every matchup on the slate.
+
+    Conditioning on the winner actually winning is the second stage. Filtering the population
+    that already exists is exact rejection sampling from that conditional distribution, so a
+    second Monte Carlo run would add cost without adding information.
+
+    Conditional percentages are not the chance of the bet landing: that is the joint
+    probability, conditional x winner. Both are returned so the card can show the scenario
+    number it is describing without ever implying the bet is more likely than it is.
+    """
+    home_favored = home_two_way >= away_two_way
+    favorite_side = "HOME" if home_favored else "AWAY"
+    branch: Counter[tuple[int, int]] = Counter({
+        (home_runs, away_runs): count
+        for (home_runs, away_runs), count in score_counts.items()
+        if (home_runs > away_runs if home_favored else away_runs > home_runs)
+    })
+    branch_size = sum(branch.values())
+    if branch_size < MINIMUM_CONDITIONAL_BRANCH:
+        return None
+    scenario_probability = branch_size / simulations
+    total_counts: Counter[int] = Counter()
+    # The favourite's own margin is positive by construction inside its winning branch.
+    favorite_margin_counts: Counter[int] = Counter()
+    home_counts: Counter[int] = Counter()
+    away_counts: Counter[int] = Counter()
+    for (home_runs, away_runs), count in branch.items():
+        total_counts[home_runs + away_runs] += count
+        favorite_margin_counts[
+            home_runs - away_runs if home_favored else away_runs - home_runs
+        ] += count
+        home_counts[home_runs] += count
+        away_counts[away_runs] += count
+
+    def branch_share(counts: Counter[int], matches: Any) -> float:
+        return sum(count for value, count in counts.items() if matches(value)) / branch_size
+
+    def branch_mean(counts: Counter[int]) -> float:
+        return sum(value * count for value, count in counts.items()) / branch_size
+
+    # The line itself is the market's number and is never replaced by one of ours. A run line is
+    # a single two-sided quote - home -1.5 is away +1.5 - so its magnitude prices both clubs and
+    # stays the reference whichever club the book made favourite. The sign records which club the
+    # book laid the runs on, and that is the side the market's own price refers to.
+    market_spread = (float(headline_home_spread)
+                     if headline_home_spread is not None and math.isfinite(float(headline_home_spread))
+                     and float(headline_home_spread) != 0 else None)
+    market_agrees = market_spread is not None and (market_spread < 0) == home_favored
+    run_line = abs(market_spread) if market_spread is not None else 1.5
+    run_line_source = "MARKET" if market_spread is not None else "MODEL_FALLBACK"
+    minus_side = ("HOME" if market_spread < 0 else "AWAY") if market_spread is not None else favorite_side
+
+    # How the forecast winner gets there, inside its own branch. This is the narrative the card
+    # tells, not the decision: given a club wins a baseball game it clears a 1.5 line about 58%
+    # to 78% of the time in every matchup, so a 50% bar on this number would name the same side
+    # on every card in the slate. It is evidence, not a comparison.
+    cover = branch_share(favorite_margin_counts, lambda margin: margin > run_line)
+    short = branch_share(favorite_margin_counts, lambda margin: margin < run_line)
+    branch_push = branch_share(favorite_margin_counts, lambda margin: margin == run_line)
+
+    # The decision is made on the market's own event, over the whole population, because that is
+    # what the book priced: does the club laying the runs clear the line, counting the games it
+    # loses. Both sides are renormalised over the decidable outcomes so they meet the two-way
+    # price the de-vig produced.
+    def signed(margin: int) -> int:
+        return margin if minus_side == "HOME" else -margin
+
+    population_margins: Counter[int] = Counter()
+    for (home_runs, away_runs), count in score_counts.items():
+        population_margins[home_runs - away_runs] += count
+    model_minus_raw = sum(count for margin, count in population_margins.items()
+                          if signed(margin) > run_line) / simulations
+    model_plus_raw = sum(count for margin, count in population_margins.items()
+                         if signed(margin) < run_line) / simulations
+    decidable = model_minus_raw + model_plus_raw
+    model_minus = model_minus_raw / decidable if decidable else .5
+    market_minus = (float(headline_spread_probability)
+                    if headline_spread_probability is not None
+                    and math.isfinite(float(headline_spread_probability))
+                    and 0 < float(headline_spread_probability) < 1 else None)
+    if market_minus is not None and minus_side == "AWAY":
+        # The collected price is always the home club's chance of covering `home_spread`.
+        market_minus = 1 - market_minus
+    edge = model_minus - market_minus if market_minus is not None else None
+    if edge is not None:
+        pick_minus = edge > 0
+        pick_basis = "EDGE_VS_MARKET"
+    else:
+        # No collected run-line price, so there is nothing to disagree with and no pick worth
+        # calling one. The card reports the branch narrative instead and says the comparison is
+        # unavailable; the recommendation race excludes it. The unconditional majority is not a
+        # substitute here - on a 1.5 line it names the plus side in nearly every game, which is
+        # what used to force every headline score to a one-run win.
+        pick_minus = cover >= short
+        pick_basis = "NO_MARKET_PRICE"
+    handicap = {
+        "run_line": run_line,
+        "run_line_source": run_line_source,
+        "market_home_spread": market_spread,
+        # True when the book lays the runs on the same club the model made favourite.
+        "market_agrees_with_model": market_agrees,
+        "minus_side": minus_side,
+        "plus_side": "AWAY" if minus_side == "HOME" else "HOME",
+        "minimum_margin": math.floor(run_line) + 1,
+        "model_minus_probability": round(model_minus, 4),
+        "model_plus_probability": round(1 - model_minus, 4),
+        "market_minus_probability": round(market_minus, 4) if market_minus is not None else None,
+        "market_plus_probability": round(1 - market_minus, 4) if market_minus is not None else None,
+        # Positive means we give the club laying the runs a better chance than the book does.
+        "edge": round(edge, 4) if edge is not None else None,
+        "pick": "MINUS" if pick_minus else "PLUS",
+        # Priced against the market, the pick is quoted on the market's own unconditional event.
+        # With no price the card is showing the branch narrative, so the number matches that.
+        "pick_probability": round(
+            (model_minus if pick_minus else 1 - model_minus) if edge is not None
+            else (cover if pick_minus else short), 4),
+        "pick_edge": round(edge if pick_minus else -edge, 4) if edge is not None else None,
+        "pick_basis": pick_basis,
+        # Only a market-priced comparison is a recommendation; everything else is information.
+        "comparable": bool(edge is not None),
+        # Branch narrative, kept beside the decision: how the forecast winner clears the line.
+        "winner_side": favorite_side,
+        "winner_cover_probability": round(cover, 4),
+        "winner_short_probability": round(short, 4),
+        "winner_push_probability": round(branch_push, 4),
+        "joint_winner_cover_probability": round(cover * scenario_probability, 4),
+    }
+
+    market_line = (float(headline_total_line)
+                   if headline_total_line is not None and math.isfinite(float(headline_total_line))
+                   else None)
+    line = market_line if market_line is not None else _fair_total_line(total_counts, branch_size)
+    line_source = "MARKET" if market_line is not None else "MODEL_FAIR"
+    # Branch narrative for the total, on the same footing as the run line above.
+    probabilities = _total_probabilities(total_counts, branch_size, line)
+
+    # The decision, again on the market's own unconditional event. A book sets the total so the
+    # two sides are close to even and then states the rest in the price, so the number worth
+    # answering is not "which side is over half" but "where do we disagree with what was quoted".
+    population_totals: Counter[int] = Counter()
+    for (home_runs, away_runs), count in score_counts.items():
+        population_totals[home_runs + away_runs] += count
+    population = _total_probabilities(population_totals, simulations, line)
+    decidable_total = population["over"] + population["under"]
+    model_over = population["over"] / decidable_total if decidable_total else .5
+    market_over = (float(headline_total_over_probability)
+                   if headline_total_over_probability is not None
+                   and math.isfinite(float(headline_total_over_probability))
+                   and 0 < float(headline_total_over_probability) < 1 else None)
+    # A collected price belongs to the line it was quoted at, so it is only usable while the
+    # line being priced here is that same market line.
+    if market_over is not None and line_source != "MARKET":
+        market_over = None
+    total_edge = model_over - market_over if market_over is not None else None
+    if total_edge is not None:
+        pick_over = total_edge > 0
+        total_pick_basis = "EDGE_VS_MARKET"
+    else:
+        # No collected price, so nothing to disagree with. Report the branch read instead and
+        # let the card say the comparison is unavailable.
+        pick_over = probabilities["over"] >= probabilities["under"]
+        total_pick_basis = "NO_MARKET_PRICE"
+    headline_total = {
+        "line": line,
+        "line_source": line_source,
+        # Conditional on the forecast winner winning: how the total looks inside that branch.
+        "over_probability": round(probabilities["over"], 4),
+        "under_probability": round(probabilities["under"], 4),
+        "push_probability": round(probabilities["push"], 4),
+        # The market's own event, over the whole population, two-way.
+        "model_over_probability": round(model_over, 4),
+        "model_under_probability": round(1 - model_over, 4),
+        "market_over_probability": round(market_over, 4) if market_over is not None else None,
+        "market_under_probability": round(1 - market_over, 4) if market_over is not None else None,
+        "edge": round(total_edge, 4) if total_edge is not None else None,
+        "pick": "OVER" if pick_over else "UNDER",
+        "pick_probability": round(
+            (model_over if pick_over else 1 - model_over) if total_edge is not None
+            else max(probabilities["over"], probabilities["under"]), 4),
+        "pick_edge": round(total_edge if pick_over else -total_edge, 4) if total_edge is not None else None,
+        "pick_basis": total_pick_basis,
+        "comparable": bool(total_edge is not None),
+        "joint_over_probability": round(probabilities["over"] * scenario_probability, 4),
+        "joint_under_probability": round(probabilities["under"] * scenario_probability, 4),
+        "joint_pick_probability": round(
+            (probabilities["over"] if pick_over else probabilities["under"]) * scenario_probability, 4,
+        ),
+    }
+
+    return {
+        "winner": favorite_side,
+        "winner_probability": round(home_two_way if home_favored else away_two_way, 4),
+        # Share of all simulations in this branch. Below the two-way probability whenever the
+        # league allows the game to end level, because ties belong to neither branch.
+        "scenario_probability": round(scenario_probability, 4),
+        "sample_size": branch_size,
+        "population_size": simulations,
+        "conditioning": "WINNER_WINS_OUTRIGHT",
+        "mean_runs": {"home": round(branch_mean(home_counts), 3),
+                      "away": round(branch_mean(away_counts), 3)},
+        "median_runs": {"home": _counter_quantile(home_counts, .50),
+                        "away": _counter_quantile(away_counts, .50)},
+        "median_total": _counter_quantile(total_counts, .50),
+        "median_margin": _counter_quantile(favorite_margin_counts, .50),
+        "handicap": handicap,
+        "headline_total": headline_total,
+        "totals": {
+            str(candidate): _total_probabilities(total_counts, branch_size, candidate)
+            for candidate in TOTAL_MARKET_LINES
+        },
+        # The headline integer score is chosen inside this same branch under these decisions. It
+        # follows the pick, so the score and the handicap on the card can never disagree - but
+        # only while the pick constrains our winner's margin at all. When the book laid the runs
+        # on the other club, its plus side is satisfied by any win, leaving the margin free.
+        "favorite_run_line": run_line,
+        "minimum_favorite_margin": math.floor(run_line) + 1,
+        "favorite_cover_probability": round(cover, 4),
+        "projects_favorite_cover": bool(pick_minus if minus_side == favorite_side else cover >= .5),
+        # True when the displayed pick is what set the margin above. False only when the book laid
+        # the runs on the other club, where its plus side is satisfied by any win and leaves our
+        # winner's margin free; the branch's own cover majority sets it instead.
+        "headline_follows_pick": bool(minus_side == favorite_side),
+        "margin_probabilities": {
+            str(margin): round(count / branch_size, 4)
+            for margin, count in sorted(favorite_margin_counts.items())
+        },
+        "top_scores": [
+            {"home": home_runs, "away": away_runs, "count": count,
+             "probability_given_winner": round(count / branch_size, 4)}
+            for (home_runs, away_runs), count in branch.most_common(5)
+        ],
+    }
+
 def _coherent_scenario_score_projection(
     score_counts: Counter[tuple[int, int]], total_counts: Counter[int], margin_counts: Counter[int],
     simulations: int, league: str, home_mean: float, away_mean: float,
     home_two_way: float, away_two_way: float, handicap: dict[str, float],
     headline_total_line: float | None = None,
     headline_home_spread: float | None = None,
+    conditional: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Select one decision-theoretic scenario that agrees with the same full distribution.
 
     The unconditional joint mode is biased toward low, one-run scores.  A headline score already
     commits to one winner, so its relevant population is the simulations in which the forecast
-    winner actually wins. Component medians from the complete population are the Bayes action for
-    absolute error; winner, strong conditional-cover evidence and the full population's displayed
-    over/under majority act only as coherence constraints. The market line never changes a
-    simulation; it only chooses a representative from outcomes the model already generated.
+    winner actually wins, and component medians of that branch are the Bayes action for absolute
+    error inside it. The run line and the total act only as coherence constraints on top: they
+    filter which candidates are admissible, they never re-centre the target, because re-centring
+    after a cover or over/under filter exaggerates a mild lean into a tail score. The market line
+    never changes a simulation; it only chooses a representative from outcomes already generated.
+
+    Both the target and the constraints come from the second-stage conditional read, so the
+    headline score and the picks on the card are two views of one branch. A branch too small to
+    price falls back to the older full-population rules.
     """
     home_favored = home_two_way >= away_two_way
     favorite_win_probability = home_two_way if home_favored else away_two_way
@@ -546,7 +894,9 @@ def _coherent_scenario_score_projection(
     )
     market_minus_home = market_spread is not None and market_spread < 0
     market_matches_model_favorite = market_spread is not None and market_minus_home == home_favored
-    favorite_run_line = abs(market_spread) if market_matches_model_favorite else 1.5
+    favorite_run_line = float(conditional["favorite_run_line"]) if conditional else (
+        abs(market_spread) if market_matches_model_favorite else 1.5
+    )
     minimum_favorite_margin = math.floor(favorite_run_line) + 1
     favorite_cover_probability = sum(
         count for margin, count in margin_counts.items()
@@ -556,24 +906,45 @@ def _coherent_scenario_score_projection(
         count for margin, count in margin_counts.items()
         if (margin if home_favored else -margin) < favorite_run_line
     ) / simulations
-    favorite_cover_given_win = min(1.0, favorite_cover_probability / max(favorite_win_probability, 1e-9))
+    favorite_cover_given_win = float(conditional["favorite_cover_probability"]) if conditional else min(
+        1.0, favorite_cover_probability / max(favorite_win_probability, 1e-9)
+    )
     unconditional_cover_majority = favorite_cover_probability > opponent_plus_probability
-    project_cover = (
+    # Second stage: inside the branch the favourite wins, a plain majority is the decision. The
+    # older full-population rule needed a .72 conditional bar because it was competing with an
+    # unconditional majority that the losing branch had already decided; that bar exists only on
+    # the fallback path now.
+    project_cover = bool(conditional["projects_favorite_cover"]) if conditional else (
         unconditional_cover_majority
         or favorite_cover_given_win >= HEADLINE_CONDITIONAL_COVER_THRESHOLD
     )
     run_line_conditioning = (
+        "WINNER_CONDITIONAL_COVER_MAJORITY" if conditional else
         "UNCONDITIONAL_COVER_MAJORITY" if unconditional_cover_majority else
         "WINNER_CONDITIONAL_COVER_SIGNAL" if project_cover else
         "RUN_LINE_CONSERVATIVE"
     )
-    line = float(headline_total_line) if headline_total_line is not None and math.isfinite(
-        float(headline_total_line)
-    ) else _fair_total_line(total_counts, simulations)
+    line = float(conditional["headline_total"]["line"]) if conditional else (
+        float(headline_total_line) if headline_total_line is not None and math.isfinite(
+            float(headline_total_line)
+        ) else _fair_total_line(total_counts, simulations)
+    )
     total_probabilities = _total_probabilities(total_counts, simulations, line)
-    decidable_total_probability = total_probabilities["over"] + total_probabilities["under"]
-    over_given_decision = total_probabilities["over"] / max(decidable_total_probability, 1e-9)
-    total_pick = "OVER" if over_given_decision >= .50 else "UNDER"
+    if conditional:
+        scenario_total = conditional["headline_total"]
+        total_pick = scenario_total["pick"]
+        scenario_over = float(scenario_total["over_probability"])
+        scenario_under = float(scenario_total["under_probability"])
+        # Named for what actually decided the direction, so a stored score can be audited
+        # against the rule that produced it.
+        total_conditioning = ("MARKET_EDGE" if scenario_total["pick_basis"] == "EDGE_VS_MARKET"
+                              else "WINNER_CONDITIONAL")
+    else:
+        decidable_total_probability = total_probabilities["over"] + total_probabilities["under"]
+        over_given_decision = total_probabilities["over"] / max(decidable_total_probability, 1e-9)
+        total_pick = "OVER" if over_given_decision >= .50 else "UNDER"
+        scenario_over, scenario_under = total_probabilities["over"], total_probabilities["under"]
+        total_conditioning = "FULL_POPULATION"
 
     def favorite_margin(home_runs: int, away_runs: int) -> int:
         return home_runs - away_runs if home_favored else away_runs - home_runs
@@ -598,22 +969,34 @@ def _coherent_scenario_score_projection(
         eligible = [(home_runs, away_runs, count) for (home_runs, away_runs), count in score_counts.items()
                     if not (league == "MLB" and home_runs == away_runs)]
 
-    # Keep the target functional on the complete predictive population. Re-centering after an
-    # over/under or cover filter exaggerates a mild lean into a tail score. The scenario filters
-    # are constraints only; complete-population medians continue to minimize absolute error.
     branch_count = sum(row[2] for row in eligible)
-    home_branch: Counter[int] = Counter()
-    away_branch: Counter[int] = Counter()
-    for (home_runs, away_runs), count in score_counts.items():
-        home_branch[home_runs] += count
-        away_branch[away_runs] += count
-    favorite_margin_branch = Counter({
-        (margin if home_favored else -margin): count for margin, count in margin_counts.items()
-    })
-    target_home = _counter_quantile(home_branch, .50)
-    target_away = _counter_quantile(away_branch, .50)
-    target_total = _counter_quantile(total_counts, .50)
-    target_favorite_margin = _counter_quantile(favorite_margin_branch, .50)
+    if conditional:
+        # Aim at the branch the candidates are drawn from. Full-population medians describe a
+        # population that includes every game the forecast winner loses, so for a mild favourite
+        # they point at a level or one-run score the branch cannot even contain, and the selector
+        # then settles on whichever admissible score sits nearest that unreachable target.
+        target_home = int(conditional["median_runs"]["home"])
+        target_away = int(conditional["median_runs"]["away"])
+        target_total = int(conditional["median_total"])
+        target_favorite_margin = int(conditional["median_margin"])
+        mean_home = float(conditional["mean_runs"]["home"])
+        mean_away = float(conditional["mean_runs"]["away"])
+        target_population = "WINNER_BRANCH"
+    else:
+        home_branch: Counter[int] = Counter()
+        away_branch: Counter[int] = Counter()
+        for (home_runs, away_runs), count in score_counts.items():
+            home_branch[home_runs] += count
+            away_branch[away_runs] += count
+        favorite_margin_branch = Counter({
+            (margin if home_favored else -margin): count for margin, count in margin_counts.items()
+        })
+        target_home = _counter_quantile(home_branch, .50)
+        target_away = _counter_quantile(away_branch, .50)
+        target_total = _counter_quantile(total_counts, .50)
+        target_favorite_margin = _counter_quantile(favorite_margin_branch, .50)
+        mean_home, mean_away = home_mean, away_mean
+        target_population = "FULL_POPULATION"
     maximum_count = max(row[2] for row in eligible) or 1
 
     def fit(row: tuple[int, int, int]) -> tuple[float, int, float]:
@@ -623,7 +1006,7 @@ def _coherent_scenario_score_projection(
         frequency_fit = count / maximum_count
         team_fit = 1 / (1 + (abs(home_runs - target_home) + abs(away_runs - target_away)) / 2)
         mean_fit = 1 / (1 + (
-            abs(home_runs - home_mean) + abs(away_runs - away_mean)
+            abs(home_runs - mean_home) + abs(away_runs - mean_away)
         ) / 2)
         total_fit = 1 / (1 + abs(total - target_total))
         margin_fit = 1 / (1 + abs(margin - target_favorite_margin))
@@ -661,6 +1044,7 @@ def _coherent_scenario_score_projection(
         "target_away_median": target_away,
         "target_total_median": target_total,
         "target_favorite_margin_median": target_favorite_margin,
+        "target_population": target_population,
         "favorite_cover_probability": round(favorite_cover_probability, 4),
         "favorite_cover_probability_given_win": round(favorite_cover_given_win, 4),
         "favorite_run_line": favorite_run_line,
@@ -670,9 +1054,15 @@ def _coherent_scenario_score_projection(
         "run_line_conditioning": run_line_conditioning,
         "headline_total_line": line,
         "headline_total_pick": total_pick,
+        "total_conditioning": total_conditioning,
+        # Full-population reference numbers, kept so the conditional read can be audited against
+        # the distribution it was drawn from.
         "headline_over_probability": round(total_probabilities["over"], 4),
         "headline_under_probability": round(total_probabilities["under"], 4),
         "headline_push_probability": round(total_probabilities["push"], 4),
+        # The same two numbers inside the winning branch, which is what the pick was made on.
+        "scenario_over_probability": round(scenario_over, 4),
+        "scenario_under_probability": round(scenario_under, 4),
         "scenario_probability": round(branch_count / simulations, 4),
         "scenario_conditioning": "FAVORITE_WIN+CONDITIONAL_RUN_LINE+HEADLINE_TOTAL",
         "population_coverage": 1.0,
@@ -685,6 +1075,8 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
                observed_result: dict[str, Any] | None = None,
                headline_total_line: float | None = None,
                headline_home_spread: float | None = None,
+               headline_spread_probability: float | None = None,
+               headline_total_over_probability: float | None = None,
                probability_calibration: dict[str, Any] | None = None) -> dict[str, Any]:
     if len(home) != simulations or len(away) != simulations:
         raise ValueError("simulation population size does not match its recipe")
@@ -765,10 +1157,35 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "away_plus_1_5": float(np.mean(away - home >= -1)),
     }
     market_handicap = _market_handicap(home - away, simulations, headline_home_spread)
+    # The reference points the model reaches on its own, independent of anything the market
+    # posted. Stored on every forecast so the two can be compared once the game is final.
+    model_fair_lines = {
+        "total_line": _fair_total_line(total_counts, simulations),
+        "home_spread": _fair_home_spread(margin_counts, simulations),
+        "market_total_line": float(headline_total_line) if headline_total_line is not None
+        and math.isfinite(float(headline_total_line)) else None,
+        "market_home_spread": float(headline_home_spread) if headline_home_spread is not None
+        and math.isfinite(float(headline_home_spread)) and float(headline_home_spread) != 0 else None,
+        "market_total_over_probability": (
+            float(headline_total_over_probability)
+            if headline_total_over_probability is not None
+            and math.isfinite(float(headline_total_over_probability)) else None),
+        "market_home_spread_probability": (
+            float(headline_spread_probability) if headline_spread_probability is not None
+            and math.isfinite(float(headline_spread_probability)) else None),
+    }
+    # Stage two. Every derived market on the card is priced here, inside the branch where the
+    # club stage one named actually wins, and the headline score is selected under the same
+    # decisions so the score and the picks can never contradict each other.
+    winner_conditional_market = _winner_conditional_market(
+        score_counts, simulations, home_two_way, away_two_way,
+        headline_total_line, headline_home_spread, headline_spread_probability,
+        headline_total_over_probability,
+    )
     projected_score, projected_score_candidates = _coherent_scenario_score_projection(
         score_counts, total_counts, margin_counts, simulations, league,
         float(home.mean()), float(away.mean()), home_two_way, away_two_way, handicap,
-        headline_total_line, headline_home_spread,
+        headline_total_line, headline_home_spread, winner_conditional_market,
     )
     projected_score = with_trajectory(projected_score)
     projected_score_candidates = [
@@ -806,6 +1223,8 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "tie_probability": tie_probability,
         "handicap": handicap,
         "market_handicap": market_handicap,
+        "model_fair_lines": model_fair_lines,
+        "winner_conditional_market": winner_conditional_market,
         # Preserve the two legacy keys for callers that have not migrated to the handicap object.
         "home_minus_1_5": handicap["home_minus_1_5"],
         "away_plus_1_5": handicap["away_plus_1_5"],

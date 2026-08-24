@@ -183,6 +183,12 @@ export type Prediction = {
     push_probability: number
   } | null
   totals: Record<string, { over: number; under: number; push?: number }>
+  /** Second stage. The run line and the total priced inside only the simulations the forecast
+   *  winner actually wins. `*_probability` fields are conditional on that branch happening;
+   *  `joint_*` fields also include the chance the branch happens at all, which is what a
+   *  reader is really risking. Absent on forecasts saved before schema 28, and null when the
+   *  winning branch held too few simulations to price. */
+  winner_conditional_market?: WinnerConditionalMarket | null
   tie_probability: number
   top_scores: SimulatedScore[]
   full_distribution_score?: SimulatedScore
@@ -269,6 +275,90 @@ export type ResidualTeamProjection = {
   matchup_residual_flag?: boolean
 }
 
+export type WinnerConditionalMarket = {
+  winner: 'HOME' | 'AWAY'
+  winner_probability: number
+  /** Share of all simulations inside the branch. Below `winner_probability` in a league that
+   *  allows ties, because a tie belongs to neither club's branch. */
+  scenario_probability: number
+  sample_size: number
+  population_size: number
+  conditioning: 'WINNER_WINS_OUTRIGHT'
+  mean_runs: { home: number; away: number }
+  median_runs: { home: number; away: number }
+  median_total: number
+  median_margin: number
+  handicap: {
+    run_line: number
+    /** A run line is one two-sided quote, so the posted magnitude prices both clubs and stays
+     *  the reference whichever club the book made favourite. MODEL_FALLBACK only when no spread
+     *  was collected for this game at all. */
+    run_line_source: 'MARKET' | 'MODEL_FALLBACK'
+    market_home_spread: number | null
+    /** Whether the book laid the runs on the same club the model made favourite. */
+    market_agrees_with_model: boolean
+    /** The club laying the runs per the posted spread — the side the market's price refers to. */
+    minus_side: 'HOME' | 'AWAY'
+    plus_side: 'HOME' | 'AWAY'
+    minimum_margin: number
+    /** Our probability for the book's own event, over the whole population, two-way. */
+    model_minus_probability: number
+    model_plus_probability: number
+    /** The book's de-vigged price for the same event, null when no run-line price was collected. */
+    market_minus_probability: number | null
+    market_plus_probability: number | null
+    /** model_minus - market_minus. Positive means we give the club laying the runs a better
+     *  chance than the book does. Null without a collected price. */
+    edge: number | null
+    pick: 'MINUS' | 'PLUS'
+    pick_probability: number
+    pick_edge: number | null
+    /** EDGE_VS_MARKET is a real recommendation. NO_MARKET_PRICE means no run-line price was
+     *  collected, so the card is showing the branch narrative rather than a comparison. */
+    pick_basis: 'EDGE_VS_MARKET' | 'NO_MARKET_PRICE'
+    comparable: boolean
+    /** How the forecast winner gets there, conditional on it winning. Evidence, not the
+     *  decision: a winning club clears a 1.5 line in nearly every matchup. */
+    winner_side: 'HOME' | 'AWAY'
+    winner_cover_probability: number
+    winner_short_probability: number
+    winner_push_probability: number
+    joint_winner_cover_probability: number
+  }
+  headline_total: {
+    line: number
+    line_source: 'MARKET' | 'MODEL_FAIR'
+    /** Conditional on the forecast winner winning: how the total looks inside that branch. */
+    over_probability: number
+    under_probability: number
+    push_probability: number
+    /** Our probability for the book's own event, over the whole population, two-way. */
+    model_over_probability: number
+    model_under_probability: number
+    /** The book's de-vigged price at the same line, null when none was collected for it. */
+    market_over_probability: number | null
+    market_under_probability: number | null
+    edge: number | null
+    pick: 'OVER' | 'UNDER'
+    pick_probability: number
+    pick_edge: number | null
+    pick_basis: 'EDGE_VS_MARKET' | 'NO_MARKET_PRICE'
+    comparable: boolean
+    joint_over_probability: number
+    joint_under_probability: number
+    joint_pick_probability: number
+  }
+  totals: Record<string, { over: number; under: number; push: number }>
+  favorite_run_line: number
+  minimum_favorite_margin: number
+  favorite_cover_probability: number
+  projects_favorite_cover: boolean
+  /** True when the displayed pick is what set the headline score's margin. */
+  headline_follows_pick: boolean
+  margin_probabilities: Record<string, number>
+  top_scores: { home: number; away: number; count: number; probability_given_winner: number }[]
+}
+
 export type SimulatedScore = {
   rank?: number
   home: number
@@ -279,17 +369,24 @@ export type SimulatedScore = {
   selection_score?: number | null
   population_coverage?: number
   projects_favorite_cover?: boolean
-  run_line_conditioning?: 'UNCONDITIONAL_COVER_MAJORITY' | 'WINNER_CONDITIONAL_COVER_SIGNAL' | 'RUN_LINE_CONSERVATIVE'
+  run_line_conditioning?: 'WINNER_CONDITIONAL_COVER_MAJORITY' | 'UNCONDITIONAL_COVER_MAJORITY'
+    | 'WINNER_CONDITIONAL_COVER_SIGNAL' | 'RUN_LINE_CONSERVATIVE'
   favorite_cover_probability?: number
   favorite_cover_probability_given_win?: number
   favorite_run_line?: number
   minimum_favorite_margin?: number
   run_line_source?: 'MARKET' | 'MODEL_FALLBACK'
+  target_population?: 'WINNER_BRANCH' | 'FULL_POPULATION'
   headline_total_line?: number
   headline_total_pick?: 'OVER' | 'UNDER'
+  total_conditioning?: 'MARKET_EDGE' | 'WINNER_CONDITIONAL' | 'FULL_POPULATION'
+  /** Full-population reading of the same line, kept as the reference. */
   headline_over_probability?: number
   headline_under_probability?: number
   headline_push_probability?: number
+  /** The same two numbers inside the winning branch, which is what the pick was made on. */
+  scenario_over_probability?: number
+  scenario_under_probability?: number
   scenario_probability?: number
   scenario_conditioning?: string
   trajectory_count?: number
@@ -333,6 +430,10 @@ export type Game = {
     bookmaker_count: number
     total_line: number | null
     home_spread: number | null
+    /** The book's de-vigged probability that the home club covers `home_spread`. */
+    home_spread_probability?: number | null
+    /** The book's de-vigged probability that the total goes over `total_line`. */
+    total_over_probability?: number | null
     home_implied_probability: number | null
     away_implied_probability: number | null
     model_total_difference: number | null

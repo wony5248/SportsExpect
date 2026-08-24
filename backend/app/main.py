@@ -20,6 +20,7 @@ from backend.app.repositories.repository import (cancelled_game_pregame_integrit
 from backend.app.services.operations import LockUnavailable, backup_database, operational_status
 from backend.app.services.archived_starters import backfill_archived_starters
 from backend.app.services.backtest import walk_forward_backtest
+from backend.app.services.derived_market_calibration import DerivedMarketHistory
 from backend.app.services.bullpen import TIERS, apply_profile_update, load_profiles
 from backend.app.services.jobs import run_cron_refresh, run_full_refresh, run_replay_refresh
 from backend.app.services.model_lifecycle import evaluate_candidate, lifecycle_status
@@ -142,6 +143,16 @@ def metrics(session: Session = Depends(get_session)):
 def backtest(league: str = Query(default="ALL", pattern="^(ALL|KBO|MLB)$"),
              stage: str | None = Query(default=None), session: Session = Depends(get_session)):
     return walk_forward_backtest(session, league, stage)
+
+
+@app.get("/api/v1/model/market-calibration")
+def market_calibration(league: str = Query(default="ALL", pattern="^(ALL|KBO|MLB)$"),
+                       session: Session = Depends(get_session)):
+    """How the model's own run line and total compare with the ones the market posted.
+
+    Accumulated from finished games only, using forecasts that could not have seen their result.
+    """
+    return DerivedMarketHistory.from_session(session, league).report()
 
 
 @app.get("/api/v1/model/lifecycle")

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 import json
 import logging
+from statistics import median
 from types import SimpleNamespace
 import httpx
 import numpy as np
@@ -62,6 +63,7 @@ from backend.app.services.team_residuals import (ResidualObservation, TeamResidu
                                                  residual_context)
 from backend.app.services.pregame_context import prediction_context
 from backend.app.services.data_integrity import summarize_pitcher_rows
+from backend.app.services.derived_market_calibration import DerivedMarketHistory
 from backend.app.services.probability_calibration import (LeagueProbabilityCalibrationHistory,
                                                           DistributionCalibrationObservation,
                                                           ProbabilityObservation,
@@ -1407,7 +1409,7 @@ def test_integer_projection_uses_full_distribution_and_respects_run_line_majorit
     assert primary["population_coverage"] == 1.0
     assert primary["projects_favorite_cover"] is True
     assert primary["favorite_cover_probability"] >= 0.5
-    assert primary["run_line_conditioning"] == "UNCONDITIONAL_COVER_MAJORITY"
+    assert primary["run_line_conditioning"] == "WINNER_CONDITIONAL_COVER_MAJORITY"
     assert primary["home"] - primary["away"] >= 2
     assert len(strong["projected_score_candidates"]) >= 3
     assert all(score["selection_method"] == "COHERENT_BAYES_MEDIAN_V3"
@@ -1422,8 +1424,190 @@ def test_integer_projection_uses_full_distribution_and_respects_run_line_majorit
         assert favorite_margin >= close_primary["minimum_favorite_margin"]
     else:
         assert 1 <= favorite_margin < close_primary["minimum_favorite_margin"]
-    if close_primary["favorite_cover_probability"] < 0.5:
-        assert close_primary["run_line_conditioning"] != "UNCONDITIONAL_COVER_MAJORITY"
+    # The headline score follows whatever the run-line decision was, so the score and the pick
+    # on the card can never disagree.
+    conditional = close["winner_conditional_market"]
+    assert close_primary["projects_favorite_cover"] is conditional["projects_favorite_cover"]
+    assert conditional["headline_follows_pick"] is True
+    assert close_primary["projects_favorite_cover"] is (conditional["handicap"]["pick"] == "MINUS")
+
+
+def test_second_stage_markets_are_priced_only_inside_the_winning_branch():
+    result = simulate_scores(5.6, 3.9, 20_000, 20260824, league="MLB",
+                             headline_total_line=8.5, headline_home_spread=-1.5)
+    conditional = result["winner_conditional_market"]
+    assert conditional["winner"] == "HOME"
+    assert conditional["conditioning"] == "WINNER_WINS_OUTRIGHT"
+
+    # The branch is exactly the simulations the forecast winner won, and nothing else.
+    margins = result["frequency_tables"]["margins"]
+    home_wins = sum(count for margin, count in margins.items() if int(margin) > 0)
+    assert conditional["sample_size"] == home_wins
+    assert conditional["scenario_probability"] == pytest.approx(home_wins / 20_000, abs=1e-4)
+
+    # The narrative the branch supplies: given the favourite wins, it usually clears the line.
+    # True in essentially every matchup, which is exactly why it is not the decision.
+    handicap = conditional["handicap"]
+    assert handicap["winner_cover_probability"] > handicap["winner_short_probability"]
+    assert (handicap["winner_cover_probability"] + handicap["winner_short_probability"]
+            + handicap["winner_push_probability"]) == pytest.approx(1)
+    # A conditional percentage is not the chance it lands; the joint figure is.
+    assert handicap["joint_winner_cover_probability"] == pytest.approx(
+        handicap["winner_cover_probability"] * conditional["scenario_probability"], abs=1e-3)
+    assert handicap["joint_winner_cover_probability"] == pytest.approx(
+        result["market_handicap"]["minus_probability"], abs=1e-3)
+    # With no collected run-line price there is no market statement to disagree with, so the
+    # handicap is information rather than a recommendation.
+    assert handicap["pick_basis"] == "NO_MARKET_PRICE"
+    assert handicap["edge"] is None
+    assert handicap["comparable"] is False
+
+    # Conditioning on the winner lifts the total, which is what stops every game reading under.
+    total = conditional["headline_total"]
+    assert total["line"] == 8.5
+    assert total["line_source"] == "MARKET"
+    assert total["over_probability"] > result["totals"]["8.5"]["over"]
+    assert conditional["mean_runs"]["home"] > result["mean_runs"]["home"]
+
+    # The headline score is chosen under these same two decisions.
+    primary = result["projected_score"]
+    assert primary["total_conditioning"] == "WINNER_CONDITIONAL"
+    assert primary["headline_total_pick"] == total["pick"]
+    assert primary["scenario_over_probability"] == total["over_probability"]
+    assert (primary["home"] + primary["away"] > total["line"]) is (total["pick"] == "OVER")
+    assert primary["home"] - primary["away"] >= handicap["minimum_margin"]
+
+
+def test_second_stage_always_prices_against_the_posted_run_line():
+    # A run line is one two-sided quote: home -2.5 is away +2.5. Its magnitude is the market's
+    # number for both clubs, so it stays the reference even when the book made the other club
+    # favourite - only the side is read from the club this branch assumes wins.
+    for spread in (-2.5, 2.5):
+        result = simulate_scores(5.2, 4.0, 20_000, 20260824, league="MLB", headline_home_spread=spread)
+        handicap = result["winner_conditional_market"]["handicap"]
+        assert handicap["run_line_source"] == "MARKET"
+        assert handicap["run_line"] == 2.5
+        assert handicap["minimum_margin"] == 3
+        assert handicap["market_home_spread"] == spread
+        assert handicap["market_agrees_with_model"] is (spread < 0)
+        # The priced side follows the posted sign, and the model prices the same event.
+        assert handicap["minus_side"] == ("HOME" if spread < 0 else "AWAY")
+        assert 0 < handicap["model_minus_probability"] < 1
+        assert result["projected_score"]["favorite_run_line"] == 2.5
+
+    without_market = simulate_scores(4.9, 4.3, 20_000, 20260824, league="MLB")
+    assert without_market["winner_conditional_market"]["handicap"]["run_line_source"] == "MODEL_FALLBACK"
+    assert without_market["winner_conditional_market"]["handicap"]["run_line"] == 1.5
+    assert without_market["winner_conditional_market"]["handicap"]["market_home_spread"] is None
+
+
+def test_run_line_pick_is_decided_against_the_market_price_not_a_flat_half():
+    # Given a club wins a baseball game it clears a 1.5 line in every matchup, so a 50% bar names
+    # the same side on every card. The book already priced that event; the pick is the
+    # disagreement with that price, which is what differs from game to game.
+    generous = simulate_scores(5.2, 4.0, 20_000, 20260824, league="MLB",
+                               headline_home_spread=-1.5, headline_spread_probability=.35)
+    stingy = simulate_scores(5.2, 4.0, 20_000, 20260824, league="MLB",
+                             headline_home_spread=-1.5, headline_spread_probability=.60)
+    generous_handicap = generous["winner_conditional_market"]["handicap"]
+    stingy_handicap = stingy["winner_conditional_market"]["handicap"]
+
+    # Same matchup, same simulations, same line - only the price differs, and it flips the side.
+    assert generous["frequency_tables"] == stingy["frequency_tables"]
+    assert generous_handicap["model_minus_probability"] == stingy_handicap["model_minus_probability"]
+    assert generous_handicap["pick_basis"] == "EDGE_VS_MARKET"
+    assert generous_handicap["comparable"] is True
+    assert generous_handicap["pick"] == "MINUS"
+    assert generous_handicap["edge"] > 0
+    assert stingy_handicap["pick"] == "PLUS"
+    assert stingy_handicap["edge"] < 0
+    assert stingy_handicap["pick_edge"] == pytest.approx(-stingy_handicap["edge"])
+
+    # The headline score follows the pick, so the card cannot show a cover beside a plus pick.
+    assert generous["projected_score"]["home"] - generous["projected_score"]["away"] >= 2
+    assert stingy["projected_score"]["home"] - stingy["projected_score"]["away"] == 1
+
+    # The collected price always describes the home club, so an away run line inverts it.
+    away_line = simulate_scores(4.0, 5.2, 20_000, 20260824, league="MLB",
+                                headline_home_spread=1.5, headline_spread_probability=.35)
+    away_handicap = away_line["winner_conditional_market"]["handicap"]
+    assert away_handicap["minus_side"] == "AWAY"
+    assert away_handicap["market_minus_probability"] == pytest.approx(.65)
+
+
+def test_total_pick_is_decided_against_the_market_price_not_a_flat_half():
+    # A book sets the total so the two sides are near even and states the rest in the price, so
+    # the question worth answering is where we disagree with the quote, not which side clears 50%.
+    common = dict(league="MLB", headline_total_line=8.5, headline_home_spread=-1.5)
+    cheap = simulate_scores(5.4, 4.0, 20_000, 20260824, headline_total_over_probability=.40, **common)
+    dear = simulate_scores(5.4, 4.0, 20_000, 20260824, headline_total_over_probability=.60, **common)
+    cheap_total = cheap["winner_conditional_market"]["headline_total"]
+    dear_total = dear["winner_conditional_market"]["headline_total"]
+
+    assert cheap["frequency_tables"] == dear["frequency_tables"]
+    assert cheap_total["model_over_probability"] == dear_total["model_over_probability"]
+    assert cheap_total["pick_basis"] == "EDGE_VS_MARKET"
+    assert cheap_total["comparable"] is True
+    assert cheap_total["pick"] == "OVER" and cheap_total["edge"] > 0
+    assert dear_total["pick"] == "UNDER" and dear_total["edge"] < 0
+    # The headline score follows the pick, so the score and the total on the card agree.
+    assert cheap["projected_score"]["home"] + cheap["projected_score"]["away"] > 8.5
+    assert dear["projected_score"]["home"] + dear["projected_score"]["away"] < 8.5
+    assert cheap["projected_score"]["total_conditioning"] == "MARKET_EDGE"
+
+    # Both sides leaned over inside the winning branch, so a branch-majority rule would have
+    # named the same side for both prices. The price is what separates them.
+    assert cheap_total["over_probability"] == dear_total["over_probability"] > .5
+
+    without_price = simulate_scores(5.4, 4.0, 20_000, 20260824, **common)
+    without_total = without_price["winner_conditional_market"]["headline_total"]
+    assert without_total["pick_basis"] == "NO_MARKET_PRICE"
+    assert without_total["comparable"] is False
+    assert without_total["edge"] is None
+    assert without_price["projected_score"]["total_conditioning"] == "WINNER_CONDITIONAL"
+
+    # A price only means anything at the line it was quoted for, so a model-derived line
+    # (no market total collected) never borrows it.
+    model_line = simulate_scores(5.4, 4.0, 20_000, 20260824, league="MLB",
+                                 headline_total_over_probability=.40)
+    model_total = model_line["winner_conditional_market"]["headline_total"]
+    assert model_total["line_source"] == "MODEL_FAIR"
+    assert model_total["market_over_probability"] is None
+    assert model_total["pick_basis"] == "NO_MARKET_PRICE"
+
+
+def test_headline_score_is_centred_on_the_branch_it_is_selected_from():
+    # Full-population medians describe a population that includes every game the forecast winner
+    # loses. For a mild favourite they point at a level score the winning branch cannot contain,
+    # which is what used to drag every headline onto the smallest admissible margin.
+    result = simulate_scores(4.6, 4.4, 20_000, 20260824, league="MLB",
+                             headline_total_line=8.5, headline_home_spread=-1.5)
+    primary = result["projected_score"]
+    conditional = result["winner_conditional_market"]
+    assert primary["target_population"] == "WINNER_BRANCH"
+    assert primary["target_home_median"] == conditional["median_runs"]["home"]
+    assert primary["target_away_median"] == conditional["median_runs"]["away"]
+    assert primary["target_favorite_margin_median"] == conditional["median_margin"]
+    # The branch median is a winning score, unlike the full-population median it replaced.
+    assert conditional["median_runs"]["home"] > conditional["median_runs"]["away"]
+    assert primary["home"] > primary["away"]
+
+
+def test_second_stage_branch_excludes_ties_and_matches_the_forecast_winner():
+    result = simulate_scores(5.5, 4.6, 20_000, 20260824, league="KBO",
+                             headline_total_line=9.5, headline_home_spread=-1.5)
+    conditional = result["winner_conditional_market"]
+    assert conditional["winner"] == "HOME"
+    # KBO ties belong to neither branch, so the branch share sits below the two-way probability.
+    assert result["tie_probability"] > 0
+    assert conditional["scenario_probability"] < conditional["winner_probability"]
+    assert conditional["scenario_probability"] == pytest.approx(
+        result["home_win_probability"], abs=1e-4)
+
+    away_favorite = simulate_scores(3.4, 5.9, 20_000, 20260825, league="MLB")
+    assert away_favorite["winner_conditional_market"]["winner"] == "AWAY"
+    assert away_favorite["winner_conditional_market"]["handicap"]["minus_side"] == "AWAY"
+    assert away_favorite["winner_conditional_market"]["handicap"]["plus_side"] == "HOME"
 
 
 def test_market_run_line_sets_dynamic_cover_population_for_headline_score():
@@ -1439,7 +1623,7 @@ def test_market_run_line_sets_dynamic_cover_population_for_headline_score():
     assert primary["run_line_source"] == "MARKET"
     assert primary["favorite_run_line"] == 2.5
     assert primary["minimum_favorite_margin"] == 3
-    assert primary["run_line_conditioning"] == "UNCONDITIONAL_COVER_MAJORITY"
+    assert primary["run_line_conditioning"] == "WINNER_CONDITIONAL_COVER_MAJORITY"
     assert primary["home"] - primary["away"] >= 3
 
     unchanged_population = simulate_scores(8.0, 2.5, 20_000, 20260824, league="MLB")
@@ -1476,7 +1660,10 @@ def test_coherent_headline_score_matches_same_population_total_direction(
     )
     primary = result["projected_score"]
     total = primary["home"] + primary["away"]
-    probabilities = result["totals"][str(total_line)]
+    # The direction is decided inside the winning branch, so that is the population it must
+    # agree with. The full-population totals stay on the payload as the reference reading.
+    probabilities = result["winner_conditional_market"]["headline_total"]
+    probabilities = {"over": probabilities["over_probability"], "under": probabilities["under_probability"]}
     if probabilities["over"] >= probabilities["under"]:
         assert primary["headline_total_pick"] == "OVER"
         assert total > total_line
@@ -2087,3 +2274,183 @@ def test_market_consensus_removes_two_way_margin_and_uses_median_lines():
     # The home team's median run-line point: negative means the market's -1.5 favorite is home.
     assert row["home_spread"] == -1.5
     assert abs(row["home_implied_probability"] + row["away_implied_probability"] - 1) < 1e-9
+    # The run line's point barely moves, so its price is where the market states how likely the
+    # favourite is to clear it. Without a price there is nothing to compare a model against.
+    assert row["home_spread_probability"] is None
+
+    priced = {**event, "bookmakers": [{"key": "a", "markets": [{"key": "spreads", "outcomes": [
+        {"name": "KIA Tigers", "point": -1.5, "price": 2.30},
+        {"name": "Kiwoom Heroes", "point": 1.5, "price": 1.62}]}]}]}
+    priced_row = _consensus_event(priced)
+    assert priced_row["home_spread_probability"] == pytest.approx(
+        (1 / 2.30) / ((1 / 2.30) + (1 / 1.62)), abs=1e-6)
+    # De-vigged, so the two sides are complements rather than summing above one.
+    assert priced_row["home_spread_probability"] < 1 / 2.30
+
+
+def test_market_prices_are_only_devigged_at_the_line_they_were_quoted_for():
+    def event(first_point, second_point):
+        return {"id": "e", "home_team": "KIA Tigers", "away_team": "Kiwoom Heroes", "bookmakers": [
+            {"key": "a", "markets": [{"key": "totals", "outcomes": [
+                {"name": "Over", "point": first_point, "price": 1.95},
+                {"name": "Under", "point": first_point, "price": 1.87}]}]},
+            {"key": "b", "markets": [{"key": "totals", "outcomes": [
+                {"name": "Over", "point": second_point, "price": 2.40},
+                {"name": "Under", "point": second_point, "price": 1.58}]}]},
+        ]}
+
+    agreed = _consensus_event(event(8.5, 8.5))
+    assert agreed["total_line"] == 8.5
+    assert agreed["total_over_probability"] == pytest.approx(
+        median([(1 / 1.95) / ((1 / 1.95) + (1 / 1.87)),
+                (1 / 2.40) / ((1 / 2.40) + (1 / 1.58))]), abs=1e-6)
+
+    # The books straddle the line, so the median total is a number neither of them quoted. A
+    # price for a bet nobody offered would be invented, so none is reported.
+    split = _consensus_event(event(8.5, 9.5))
+    assert split["total_line"] == 9.0
+    assert split["total_over_probability"] is None
+
+    # A book quoting its two halves at different numbers is quoting two different bets.
+    mismatched = _consensus_event({"id": "e", "home_team": "H", "away_team": "A", "bookmakers": [
+        {"key": "a", "markets": [{"key": "totals", "outcomes": [
+            {"name": "Over", "point": 8.5, "price": 1.95},
+            {"name": "Under", "point": 9.5, "price": 1.87}]}]},
+    ]})
+    assert mismatched["total_over_probability"] is None
+
+
+def test_derived_market_comparison_accumulates_from_finished_games_only():
+    """Each finished game becomes one labelled row per derived market, market price included."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        away = Team(league="MLB", code="AW", name="Away")
+        home = Team(league="MLB", code="HM", name="Home")
+        session.add_all([away, home]); session.flush()
+        model = ModelVersion(name="MLB_TEST", algorithm="test", feature_schema={}, checksum="c")
+        session.add(model); session.flush()
+        base = datetime(2026, 4, 1, 18, 30)
+
+        def add(index, home_score, away_score, *, leaked=False, legacy=False):
+            start = base + timedelta(days=index)
+            game = Game(external_id=f"MC-{index}", league="MLB", game_date=start.date(),
+                        start_at=start, start_time=start.time(), away_team_id=away.id,
+                        home_team_id=home.id, status="FINAL", source="t", source_url="t",
+                        collected_at=start)
+            session.add(game); session.flush()
+            session.add(GameResult(game_id=game.id, away_score=away_score, home_score=home_score,
+                                   finalized_at=start + timedelta(hours=3), source_url="t"))
+            payload = {"summary_schema_version": SIMULATION_SUMMARY_SCHEMA_VERSION}
+            if not legacy:
+                payload |= {
+                    # The model reached 9.5 and -2.5 on its own; the book posted 8.5 and -1.5.
+                    "model_fair_lines": {"total_line": 9.5, "home_spread": -2.5,
+                                         "market_total_line": 8.5, "market_home_spread": -1.5},
+                    "winner_conditional_market": {
+                        "headline_total": {"line": 8.5, "line_source": "MARKET",
+                                           "model_over_probability": .60,
+                                           "market_over_probability": .50},
+                        "handicap": {"run_line": 1.5, "minus_side": "HOME",
+                                     "model_minus_probability": .55,
+                                     "market_minus_probability": .45},
+                    },
+                }
+            session.add(Prediction(
+                game_id=game.id, model_version_id=model.id, input_hash=f"h{index}",
+                origin="HISTORICAL_REPLAY" if leaked else "LIVE_PREGAME",
+                data_cutoff=start - timedelta(hours=1),
+                home_win_probability=.6, away_win_probability=.4,
+                home_expected_runs=5.0, away_expected_runs=3.0, confidence=.5,
+                payload=payload, created_at=start - timedelta(hours=1),
+                training_eligible=not leaked,
+                leakage_audit={"passed": False} if leaked else {"passed": True},
+            ))
+            return game
+
+        add(0, 7, 3)   # total 10 over 8.5, home by 4 covers -1.5
+        add(1, 6, 4)   # total 10 over, home by 2 covers
+        add(2, 2, 1)   # total 3 under, home by 1 does not cover
+        add(3, 5, 5)   # total 10 over, level margin does not cover
+        add(4, 4, 4)   # total 8 under, level margin does not cover
+        # An unaudited replay could have seen its own result, so it must never be scored.
+        add(5, 9, 0, leaked=True)
+        # A forecast saved before the model recorded its own reference points has nothing to compare.
+        add(6, 9, 0, legacy=True)
+        session.flush()
+
+        report = DerivedMarketHistory.from_session(session, "MLB").report()
+        assert report["sample_size"] == 10  # five usable games x two derived markets
+        total = report["markets"]["TOTAL"]
+        run_line = report["markets"]["RUN_LINE"]
+
+        # Our own line sat a run above the posted total in every game.
+        assert total["line_comparison"]["sample_size"] == 5
+        assert total["line_comparison"]["mean_difference"] == pytest.approx(1.0)
+        assert total["line_comparison"]["agreement_rate"] == 0.0
+        assert run_line["line_comparison"]["mean_difference"] == pytest.approx(-1.0)
+
+        # Three of five went over, and we said 60% every time.
+        assert total["realized"]["priced_side_win_rate"] == pytest.approx(.6)
+        assert total["probability_comparison"]["mean_difference"] == pytest.approx(.10)
+        assert total["probability_comparison"]["model_brier"] == pytest.approx(
+            (3 * .4 ** 2 + 2 * .6 ** 2) / 5)
+        assert total["probability_comparison"]["market_brier"] == pytest.approx(.25)
+        assert total["probability_comparison"]["brier_improvement"] > 0
+
+        # Two of five covered the run line while we said 55%, so we were worse than the book here.
+        assert run_line["realized"]["priced_side_win_rate"] == pytest.approx(.4)
+        assert run_line["probability_comparison"]["brier_improvement"] < 0
+
+        # Measured, but nowhere near enough games to fit a correction from.
+        assert total["status"]["state"] == "COLLECTING"
+        assert run_line["status"]["state"] == "COLLECTING"
+        assert report["leagues"]["MLB"]["TOTAL"]["sample_size"] == 5
+
+
+def test_derived_market_comparison_skips_pushes_and_unpriced_games():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        away = Team(league="KBO", code="AW", name="Away")
+        home = Team(league="KBO", code="HM", name="Home")
+        session.add_all([away, home]); session.flush()
+        model = ModelVersion(name="KBO_TEST", algorithm="test", feature_schema={}, checksum="c")
+        session.add(model); session.flush()
+        start = datetime(2026, 4, 1, 18, 30)
+        game = Game(external_id="MC-PUSH", league="KBO", game_date=start.date(), start_at=start,
+                    start_time=start.time(), away_team_id=away.id, home_team_id=home.id,
+                    status="FINAL", source="t", source_url="t", collected_at=start)
+        session.add(game); session.flush()
+        # Total lands exactly on an integer line and the margin lands exactly on the run line.
+        session.add(GameResult(game_id=game.id, away_score=4, home_score=5,
+                               finalized_at=start + timedelta(hours=3), source_url="t"))
+        session.add(Prediction(
+            game_id=game.id, model_version_id=model.id, input_hash="push",
+            origin="LIVE_PREGAME", data_cutoff=start - timedelta(hours=1),
+            home_win_probability=.6, away_win_probability=.4,
+            home_expected_runs=5.0, away_expected_runs=4.0, confidence=.5,
+            created_at=start - timedelta(hours=1), training_eligible=True, leakage_audit={},
+            payload={"summary_schema_version": SIMULATION_SUMMARY_SCHEMA_VERSION,
+                     "model_fair_lines": {"total_line": 9.5, "home_spread": -1.5,
+                                          "market_total_line": 9.0, "market_home_spread": None},
+                     "winner_conditional_market": {
+                         "headline_total": {"line": 9.0, "line_source": "MARKET",
+                                            "model_over_probability": .55,
+                                            "market_over_probability": None},
+                         "handicap": {"run_line": 1.0, "minus_side": "HOME",
+                                      "model_minus_probability": .52,
+                                      "market_minus_probability": None}}},
+        ))
+        session.flush()
+        report = DerivedMarketHistory.from_session(session, "KBO").report()
+        # Both rows exist, but a push is not a labelled outcome and an unpriced game is not a
+        # comparison, so neither market can be scored from this game.
+        assert report["sample_size"] == 2
+        assert report["markets"]["TOTAL"]["realized"]["sample_size"] == 0
+        assert report["markets"]["TOTAL"]["probability_comparison"]["sample_size"] == 0
+        assert report["markets"]["TOTAL"]["probability_comparison"]["brier_improvement"] is None
+        assert report["markets"]["RUN_LINE"]["realized"]["sample_size"] == 0
+        # The line comparison still works for the market that published a number.
+        assert report["markets"]["TOTAL"]["line_comparison"]["mean_difference"] == pytest.approx(.5)
+        assert report["markets"]["RUN_LINE"]["line_comparison"]["sample_size"] == 0
