@@ -89,12 +89,12 @@ alembic upgrade head
 - `game_results.finalized_at`은 결과를 처음 확인한 시각으로 고정
 - `prediction.created_at <= game.start_at`이고 결과 저장 전인 예측만 평가
 - 같은 경기에서는 요청한 stage의 마지막 예측 또는 전체 마지막 경기 전 예측 하나만 사용
-- walk-forward 확률 보정은 해당 경기보다 앞선 결과만 사용하며 최소 30경기 전에는 원 확률 유지
+- 운영 승률 보정은 리그·시즌별로 해당 경기 시작 전에 종료 확인된 결과만 사용하는 expanding Platt 방식이다. 최소 30경기 전에는 원 확률을 유지하고, 보정된 홈승·원정승 비중으로 20,000회 표본을 결정론적으로 재가중한 뒤 승률·핸디캡·언더오버·점수 분포를 모두 다시 계산한다.
 - 현재 시즌 누적값을 과거 날짜에 역으로 붙이지 않음
 
 `python -m backend.app.cli backtest --league ALL`에서 Accuracy, Brier, Log Loss, 득점 MAE·RMSE, calibration error, 월·리그·모델별 결과와 expanding home-rate 기준 모델을 함께 확인합니다. 두 모델이 같은 경기를 예측한 경우에는 paired 차이와 bootstrap 95% 신뢰구간을 추가로 계산합니다. 200경기는 예비 판단선, 500경기는 권장 판단선이며 그 전에는 승격 결론을 내리지 않습니다.
 
-`team_residual_walk_forward`는 팀 공격·수비 EWMA, 홈·원정 분리, 축소된 맞대결 잔차를 과거 경기마다 순서대로 다시 계산해 보정 전후 득점 MAE·RMSE와 승률 보정 지표를 비교합니다. 200경기 이상에서 MAE·RMSE·Brier·Log Loss·calibration error가 모두 악화되지 않아야 `deployment_gate=PASS`입니다. 운영 활성화는 2026-08-23 KBO 경기부터이며 MLB는 과거 예측-결과 표본 확보 후 별도 검증·활성화합니다. 종료 결과는 최초 `finalized_at`을 보존하므로 다음 refresh부터 자동으로 잔차 이력에 포함됩니다.
+`team_residual_walk_forward`는 팀 공격·수비 EWMA, 홈·원정 분리, 축소된 맞대결 잔차를 과거 경기마다 순서대로 다시 계산해 보정 전후 득점 MAE·RMSE와 승률 보정 지표를 비교합니다. 200경기 이상에서 MAE·RMSE·Brier·Log Loss·calibration error가 모두 악화되지 않아야 `deployment_gate=PASS`입니다. 팀 잔차 계층은 2026-08-23 경기부터 KBO와 MLB에 활성화되어 있으며, 종료 결과는 최초 `finalized_at`을 보존하므로 다음 refresh부터 잔차 이력과 리그 승률 보정 이력에 자동으로 포함됩니다.
 
 과거 아카이브 재현은 `python -m backend.app.cli historical-replay --league KBO --limit 20`으로 백필합니다. 재현은 경기 시작 전 종료 경기만으로 팀 기록을 다시 만들며 `HISTORICAL_REPLAY`로 저장됩니다. 백테스트의 공식 실전 지표와 재현 지표는 분리되고, 재현 표본은 학습을 보조할 수 있지만 최소 40개의 독립 실전 검증 표본 없이는 자동 모델 승격에 사용되지 않습니다.
 

@@ -15,6 +15,7 @@ from backend.app.repositories.repository import save_prediction
 from backend.app.services.prediction import SIMULATION_SUMMARY_SCHEMA_VERSION, predict_game
 from backend.app.services.prediction_evaluation import evaluate_game_predictions
 from backend.app.services.team_residuals import TeamResidualHistory
+from backend.app.services.probability_calibration import LeagueProbabilityCalibrationHistory
 
 
 def run_historical_replay(session: Session, league: str, start_date: date | None = None,
@@ -39,6 +40,7 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
         Game.league == league,
     )).all()
     residual_history = TeamResidualHistory.from_session(session, league)
+    probability_history = LeagueProbabilityCalibrationHistory.from_session(session, league)
     by_game: dict[int, list[Prediction]] = defaultdict(list)
     for prediction in predictions:
         by_game[prediction.game_id].append(prediction)
@@ -133,6 +135,7 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             {"home_games_today": 1, "away_games_today": 1,
              "league_average_runs": league_average_runs,
              "team_residuals": residual_history.context_for(game),
+             "probability_calibration": probability_history.context_for(game),
              "market": market_context},
             model_runtime=None, bullpens={}, lineup_tables={},
             prediction_context={

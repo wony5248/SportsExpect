@@ -50,6 +50,9 @@ from backend.app.services.team_residuals import (ResidualObservation, TeamResidu
                                                  residual_context)
 from backend.app.services.pregame_context import prediction_context
 from backend.app.services.data_integrity import summarize_pitcher_rows
+from backend.app.services.probability_calibration import (LeagueProbabilityCalibrationHistory,
+                                                          ProbabilityObservation,
+                                                          calibrated_probability)
 
 
 def test_rank_and_data_tables_are_schema_driven():
@@ -1001,8 +1004,10 @@ def test_score_estimates_combine_full_population_mean_mode_and_projection():
     assert estimates["headline"] == "MEAN"
     assert estimates["mean"] == {"away": 3.6, "home": 4.3}
     assert estimates["mode"] == {"away": 3, "home": 4, "count": 1200, "probability": .06}
+    assert estimates["full_distribution"] == estimates["mode"]
     assert estimates["representative"]["population_coverage"] == 1.0
     assert estimates["representative"]["projects_favorite_cover"] is True
+    assert estimates["winner_conditional"] == estimates["representative"]
 
 
 def test_claude_advice_cannot_overpower_statistical_baseline():
@@ -1062,6 +1067,23 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     assert estimates["representative"]["population_coverage"] == 1.0
     assert after["home_win_probability"] == after["payload"]["simulation_home_probability"]
     assert after["away_win_probability"] == round(1 - after["home_win_probability"], 4)
+    assert after["payload"]["raw_simulation_home_probability"] == (
+        after["payload"]["probability_calibration"]["raw_home_two_way_probability"]
+    )
+    assert after["payload"]["full_distribution_score"] == after["payload"]["top_scores"][0]
+    assert after["payload"]["winner_conditional_score"] == after["payload"]["primary_score"]
+
+    close = predict_game(
+        game, home, away, pitcher("home-p"), pitcher("away-p"), base,
+        game_context={"probability_calibration": {
+            "enabled": True, "method": "TEST", "sample_count": 100,
+            "slope": 0.0, "intercept": 0.0,
+        }},
+    )
+    assert close["home_win_probability"] == .5
+    assert set(close["payload"]["close_game_scenarios"]) == {"AWAY_WIN", "HOME_WIN"}
+    assert close["payload"]["close_game_scenarios"]["AWAY_WIN"][0]["away"] > close["payload"]["close_game_scenarios"]["AWAY_WIN"][0]["home"]
+    assert close["payload"]["close_game_scenarios"]["HOME_WIN"][0]["home"] > close["payload"]["close_game_scenarios"]["HOME_WIN"][0]["away"]
 
 
 def test_integer_projection_uses_full_distribution_and_respects_run_line_majority():
@@ -1407,6 +1429,53 @@ def test_mlb_opponent_residual_persists_after_strong_sample_shrinkage():
         versus_repeat["matchup_persistence_weight"] * versus_repeat["home"]["matchup"]
     )
     assert with_matchup > general_only
+
+
+def test_league_probability_calibration_uses_only_results_final_before_first_pitch():
+    target_start = datetime(2026, 8, 24, 18, 30)
+    observations = [ProbabilityObservation(
+        game_id=index + 1, season=2026,
+        available_at=target_start - timedelta(days=35 - index),
+        probability=.64, outcome=float(index % 2),
+    ) for index in range(35)]
+    observations.extend([
+        ProbabilityObservation(game_id=100, season=2025, available_at=target_start - timedelta(days=1),
+                               probability=.99, outcome=1.0),
+        ProbabilityObservation(game_id=101, season=2026, available_at=target_start + timedelta(hours=1),
+                               probability=.99, outcome=1.0),
+    ])
+    game = SimpleNamespace(id=999, external_id="KBO-20260824-TEST", game_date=date(2026, 8, 24),
+                           start_at=target_start)
+    context = LeagueProbabilityCalibrationHistory(observations).context_for(game)
+    assert context["enabled"] is True
+    assert context["sample_count"] == 35
+    assert context["future_results_used"] == 0
+    # Repeated 64% forecasts that actually won only about half the time must be pulled inward.
+    assert calibrated_probability(.64, context) < .64
+
+
+def test_calibrated_winner_branch_reweighting_recomputes_one_coherent_population():
+    baseline = simulate_scores(4.9, 4.2, 20_000, 20260824, league="MLB",
+                               headline_total_line=8.5, headline_home_spread=-1.5)
+    context = {
+        "enabled": True, "method": "TEST_PLATT", "sample_count": 400,
+        "slope": .58, "intercept": -.12, "future_results_used": 0,
+    }
+    calibrated = simulate_scores(4.9, 4.2, 20_000, 20260824, league="MLB",
+                                 headline_total_line=8.5, headline_home_spread=-1.5,
+                                 probability_calibration=context)
+    metadata = calibrated["probability_calibration"]
+    target = calibrated_probability(metadata["raw_home_two_way_probability"], context)
+    assert metadata["raw_home_two_way_probability"] == pytest.approx(
+        baseline["probability_calibration"]["raw_home_two_way_probability"])
+    assert calibrated["home_two_way_probability"] == pytest.approx(target, abs=1 / 20_000)
+    assert sum(calibrated["frequency_tables"]["outcomes"].values()) == 20_000
+    assert sum(calibrated["frequency_tables"]["scores"].values()) == 20_000
+    assert calibrated["handicap"]["home_minus_1_5"] + calibrated["handicap"]["away_plus_1_5"] == pytest.approx(1)
+    assert calibrated["market_handicap"]["minus_probability"] + calibrated["market_handicap"]["plus_probability"] == pytest.approx(1)
+    assert calibrated["totals"]["8.5"]["over"] + calibrated["totals"]["8.5"]["under"] == pytest.approx(1)
+    assert calibrated["full_distribution_score"] == calibrated["top_scores"][0]
+    assert calibrated["winner_conditional_score"] == calibrated["projected_score"]
 
 
 def test_structural_residual_needs_twenty_matching_regime_games():

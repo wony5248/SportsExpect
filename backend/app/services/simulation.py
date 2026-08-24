@@ -6,6 +6,8 @@ from typing import Any
 
 import numpy as np
 
+from backend.app.services.probability_calibration import calibrated_probability
+
 
 def validate_simulation_summary(summary: dict[str, Any]) -> None:
     """Reject a simulation summary when probabilities or intervals are internally inconsistent."""
@@ -121,6 +123,71 @@ def highest_density_interval(values: np.ndarray, mass: float = DENSE_INTERVAL_MA
     return {"low": best_low, "high": best_high, "mass": round(best_count / values.size, 4)}
 
 
+def _systematic_branch_sample(indices: np.ndarray, target_size: int) -> np.ndarray:
+    """Resize one outcome branch without favoring its most common scores.
+
+    The source simulation is already exchangeable, so evenly spaced deterministic positions
+    preserve its within-branch score and inning-path shape while making stored replays exactly
+    reproducible.
+    """
+    if target_size <= 0:
+        return np.empty(0, dtype=np.int64)
+    if indices.size == 0:
+        raise ValueError("cannot assign calibrated mass to an empty outcome branch")
+    positions = np.floor((np.arange(target_size, dtype=float) + .5) * indices.size / target_size).astype(np.int64)
+    return indices[np.minimum(positions, indices.size - 1)]
+
+
+def _reweight_win_branches(home_innings: np.ndarray, away_innings: np.ndarray,
+                           home: np.ndarray, away: np.ndarray,
+                           calibration: dict[str, Any] | None
+                           ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    """Match the simulated winner mix to a leakage-safe calibrated two-way probability.
+
+    KBO tie mass is retained unchanged. Only the decided-game home/away mixture is resized, and
+    every downstream metric is subsequently calculated from this same integer population.
+    """
+    home_indices = np.flatnonzero(home > away)
+    away_indices = np.flatnonzero(away > home)
+    tie_indices = np.flatnonzero(home == away)
+    decided = home_indices.size + away_indices.size
+    raw_home_two_way = home_indices.size / decided if decided else .5
+    target_home_two_way = calibrated_probability(raw_home_two_way, calibration)
+    if not decided or not home_indices.size or not away_indices.size:
+        target_home_count = home_indices.size
+        target_home_two_way = raw_home_two_way
+    else:
+        target_home_count = int(round(target_home_two_way * decided))
+    target_away_count = decided - target_home_count
+    selected = np.concatenate([
+        _systematic_branch_sample(home_indices, target_home_count),
+        _systematic_branch_sample(away_indices, target_away_count),
+        tie_indices,
+    ])
+    # Sorting restores chronological draw order where possible. Repeated indices remain exact
+    # copies of the same simulated game, including its full inning trajectory.
+    selected.sort(kind="stable")
+    metadata = {
+        **(calibration or {}),
+        "enabled": bool((calibration or {}).get("enabled")),
+        "raw_home_two_way_probability": round(raw_home_two_way, 8),
+        "raw_away_two_way_probability": round(1 - raw_home_two_way, 8),
+        "target_home_two_way_probability": round(target_home_two_way, 8),
+        "target_away_two_way_probability": round(1 - target_home_two_way, 8),
+        "raw_branch_counts": {
+            "home_win": int(home_indices.size), "away_win": int(away_indices.size),
+            "tie": int(tie_indices.size),
+        },
+        "reweighted_branch_counts": {
+            "home_win": target_home_count, "away_win": target_away_count,
+            "tie": int(tie_indices.size),
+        },
+        "population_size": int(selected.size),
+        "population_method": "DETERMINISTIC_STRATIFIED_OUTCOME_RESAMPLING",
+    }
+    return (home_innings[selected], away_innings[selected], home[selected], away[selected], metadata)
+
+
 def simulate_scores(home_expected: float, away_expected: float, simulations: int, seed: int,
                     environment_variance: float = .08, team_variance: float = .12,
                     league: str = "MLB", home_staff: dict[str, Any] | None = None,
@@ -130,7 +197,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                     home_team_variance: float | None = None,
                     away_team_variance: float | None = None,
                     headline_total_line: float | None = None,
-                    headline_home_spread: float | None = None) -> dict[str, Any]:
+                    headline_home_spread: float | None = None,
+                    probability_calibration: dict[str, Any] | None = None) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
     if home_lineup is not None and away_lineup is not None:
         # Both lineups have collected splits, so play the game out plate appearance by plate
@@ -139,7 +207,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
             rng, home_expected, away_expected, simulations, league, home_staff, away_staff,
             home_lineup, away_lineup, home_team_variance, away_team_variance),
             observed_result=observed_result, headline_total_line=headline_total_line,
-            headline_home_spread=headline_home_spread)
+            headline_home_spread=headline_home_spread,
+            probability_calibration=probability_calibration)
     # A shared gamma run environment creates realistic over-dispersion and correlation
     # (weather/umpire/park conditions affect both clubs) while preserving expected means.
     variance = min(.18, max(.02, environment_variance))
@@ -260,7 +329,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
              "away": _bullpen_usage(away_staff_profile, away_tier_counts)}
     return _summarize(home_innings, away_innings, home, away, simulations, league, usage, "INNING_RATE",
                       observed_result=observed_result, headline_total_line=headline_total_line,
-                      headline_home_spread=headline_home_spread)
+                      headline_home_spread=headline_home_spread,
+                      probability_calibration=probability_calibration)
 
 
 def evaluate_simulation_recipe(recipe: dict[str, Any], observed_result: dict[str, Any]) -> dict[str, Any]:
@@ -276,6 +346,7 @@ def evaluate_simulation_recipe(recipe: dict[str, Any], observed_result: dict[str
         away_team_variance=recipe.get("away_team_variance"),
         headline_total_line=recipe.get("headline_total_line"),
         headline_home_spread=recipe.get("headline_home_spread"),
+        probability_calibration=recipe.get("probability_calibration"),
     )
     return result["observed_evaluation"]
 
@@ -580,7 +651,13 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
                simulations: int, league: str, bullpen_usage: dict[str, Any], engine: str,
                observed_result: dict[str, Any] | None = None,
                headline_total_line: float | None = None,
-               headline_home_spread: float | None = None) -> dict[str, Any]:
+               headline_home_spread: float | None = None,
+               probability_calibration: dict[str, Any] | None = None) -> dict[str, Any]:
+    if len(home) != simulations or len(away) != simulations:
+        raise ValueError("simulation population size does not match its recipe")
+    home_innings, away_innings, home, away, calibration_summary = _reweight_win_branches(
+        home_innings, away_innings, home, away, probability_calibration,
+    )
     total = home + away
     home_win_probability = float(np.mean(home > away))
     away_win_probability = float(np.mean(away > home))
@@ -629,6 +706,7 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         })
         for rank, ((h, a), count) in enumerate(score_counts.most_common(16), 1)
     ]
+    full_distribution_score = dict(top_scores[0])
     outcome_counts = Counter({
         "HOME_WIN": int(np.count_nonzero(home > away)),
         "AWAY_WIN": int(np.count_nonzero(away > home)),
@@ -697,9 +775,12 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "away_plus_1_5": handicap["away_plus_1_5"],
         "totals": totals,
         "top_scores": top_scores,
+        "full_distribution_score": full_distribution_score,
         "projected_score": projected_score,
+        "winner_conditional_score": projected_score,
         "projected_score_candidates": projected_score_candidates,
         "outcome_scores": outcome_scores,
+        "probability_calibration": calibration_summary,
         # Per-club run histograms, so the shape can be compared against real results.
         "team_run_distribution": {
             "home": _run_histogram(home, simulations), "away": _run_histogram(away, simulations),

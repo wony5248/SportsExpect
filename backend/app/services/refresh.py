@@ -36,6 +36,7 @@ from backend.app.services.bullpen import load_profiles, seed_league
 from backend.app.services.model_lifecycle import load_champion_runtime
 from backend.app.services.prediction_evaluation import evaluate_pending_predictions
 from backend.app.services.team_residuals import TeamResidualHistory
+from backend.app.services.probability_calibration import LeagueProbabilityCalibrationHistory
 from backend.app.services.pregame_context import prediction_context
 
 
@@ -237,6 +238,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
         games = session.scalars(query).all()
         model_runtime = load_champion_runtime(session, league)
         residual_history = TeamResidualHistory.from_session(session, league)
+        probability_history = LeagueProbabilityCalibrationHistory.from_session(session, league)
         # Seed any team that has no profile yet, then read them all back, so a bullpen update
         # made since the last refresh reaches this slate's predictions. Both are optional
         # enrichments: if their tables are not migrated yet the slate still gets predictions.
@@ -296,6 +298,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 "away_games_today": appearances[game.away_team_id],
                 "league_average_runs": league_average_runs,
                 "team_residuals": residual_history.context_for(game, regime),
+                "probability_calibration": probability_history.context_for(game),
                 "pregame": prediction_context(session, game),
                 "market": market_context,
             }

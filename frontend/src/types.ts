@@ -96,13 +96,34 @@ export type Prediction = {
     headline: 'MEAN'
     mean: { away: number; home: number }
     mode: { away: number; home: number; count?: number | null; probability?: number | null }
+    full_distribution?: { away: number; home: number; count?: number | null; probability?: number | null }
     representative?: SimulatedScore
+    winner_conditional?: SimulatedScore
   }
   confidence: number
   confidence_label: 'HIGH' | 'MEDIUM' | 'LOW'
   confidence_missing: string[]
   classification_home_probability?: number
   simulation_home_probability?: number
+  raw_simulation_home_probability?: number
+  raw_simulation_away_probability?: number
+  probability_calibration?: {
+    enabled: boolean
+    method?: string
+    sample_count?: number
+    minimum_samples?: number
+    slope?: number
+    intercept?: number
+    data_cutoff?: string
+    reason?: string
+    raw_home_two_way_probability?: number
+    raw_away_two_way_probability?: number
+    target_home_two_way_probability?: number
+    target_away_two_way_probability?: number
+    raw_branch_counts?: Record<'home_win' | 'away_win' | 'tie', number>
+    reweighted_branch_counts?: Record<'home_win' | 'away_win' | 'tie', number>
+    population_size?: number
+  }
   handicap: {
     home_minus_1_5: number
     away_plus_1_5: number
@@ -121,6 +142,8 @@ export type Prediction = {
   totals: Record<string, { over: number; under: number; push?: number }>
   tie_probability: number
   top_scores: SimulatedScore[]
+  full_distribution_score?: SimulatedScore
+  winner_conditional_score?: SimulatedScore
   projected_score_candidates?: SimulatedScore[]
   frequency_tables?: {
     scores?: Record<string, number>
@@ -129,6 +152,12 @@ export type Prediction = {
     outcomes?: Record<string, number>
   }
   outcome_scores?: Partial<Record<'HOME_WIN' | 'AWAY_WIN' | 'TIE', {
+    home: number
+    away: number
+    count: number
+    probability_given_outcome: number
+  }[]>>
+  close_game_scenarios?: null | Partial<Record<'HOME_WIN' | 'AWAY_WIN', {
     home: number
     away: number
     count: number

@@ -59,6 +59,13 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const meanScore = p?.score_estimates?.mean ?? (p ? {
     away: Number(p.away_expected_runs.toFixed(1)), home: Number(p.home_expected_runs.toFixed(1)),
   } : undefined)
+  const fullDistributionScore = p?.full_distribution_score
+    ?? p?.score_estimates?.full_distribution
+    ?? p?.score_estimates?.mode
+  const closeGame = Boolean(p && Math.max(p.home_win_probability, p.away_win_probability) < .55)
+  const scenarioBranches = p?.close_game_scenarios ?? p?.outcome_scores
+  const awayWinScenario = scenarioBranches?.AWAY_WIN?.[0]
+  const homeWinScenario = scenarioBranches?.HOME_WIN?.[0]
   const modeTotal = p?.simulation_modes?.total_runs
   const modeOutcome = p?.simulation_modes?.outcome
   const statisticalExpectedTotal = p?.statistical_expected_total ?? (
@@ -174,8 +181,19 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <Box className="score-row">
           <Box className="primary"><span>평균 점수 · 2만 회 전체</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>평균 총점 {stat(statisticalExpectedTotal, 1)}점{battingLastGap ? ` · ${game.home.name}는 앞서면 9회말을 치지 않아 평균이 낮게 나옵니다` : ''}</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>실제로 이렇게 끝날 점수</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{representativeSummary(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
+          <Box><span>전체 분포에서 가장 잦은 결말</span><strong>{stat(fullDistributionScore?.away, 0)} <i>:</i> {stat(fullDistributionScore?.home, 0)}</strong><small>승패 조건 없이 2만 회 전체에서 최다{fullDistributionScore?.probability != null ? ` · ${pctFine(fullDistributionScore.probability)}` : ''}</small></Box>
         </Box>
+
+        {closeGame && awayWinScenario && homeWinScenario ? <Box className="branch-scores">
+          <span>승률 55% 미만 접전 · 한 점수로 단정하지 않고 양 팀 승리 시나리오를 함께 봅니다</span>
+          <Box className="branch-grid">
+            <Box className={`branch${!homeFavored ? ' likely' : ''}`}><span>{game.away.name}가 이길 때 대표</span><strong>{awayWinScenario.away} <i>:</i> {awayWinScenario.home}</strong><small>원정승 표본 안에서 {pctFine(awayWinScenario.probability_given_outcome)}</small></Box>
+            <Box className={`branch${homeFavored ? ' likely' : ''}`}><span>{game.home.name}가 이길 때 대표</span><strong>{homeWinScenario.away} <i>:</i> {homeWinScenario.home}</strong><small>홈승 표본 안에서 {pctFine(homeWinScenario.probability_given_outcome)}</small></Box>
+          </Box>
+        </Box> : !closeGame && predictedScore ? <Box className="branch-scores">
+          <span>예상 승리팀이 실제로 이긴다는 조건의 대표 점수</span>
+          <Box className="branch-grid"><Box className="branch likely"><span>{homeFavored ? game.home.name : game.away.name} 승리 시나리오</span><strong>{expectedScore?.away} <i>:</i> {expectedScore?.home}</strong><small>{representativeSummary(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box></Box>
+        </Box> : null}
 
         <Button fullWidth onClick={() => setOpen(!open)} endIcon={<ExpandMoreRounded className={open ? 'rotated' : ''} />} className="detail-button">{open ? '분석 접기' : '상세 분석 보기'}</Button>
         <Collapse in={open}>

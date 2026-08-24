@@ -15,6 +15,7 @@ from backend.app.services.team_residuals import (ResidualObservation, apply_resi
                                                  residual_context, RESIDUAL_ENABLED_LEAGUES,
                                                  _prediction_regime)
 from backend.app.services.simulation import _coherent_scenario_score_projection
+from backend.app.services.probability_calibration import calibrated_probability, fit_platt
 
 
 EXACT_CHECKPOINT_STAGES = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_15M"}
@@ -81,25 +82,35 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
             "readiness": _readiness(0, completed_results),
         }
 
-    history: list[tuple[float, float]] = []
+    calibration_history: dict[str, list[tuple[float, float]]] = defaultdict(list)
     evaluated: list[dict[str, Any]] = []
     league_history: dict[str, list[float]] = defaultdict(list)
     for prediction, game, result, snapshot in rows:
         outcome = 1.0 if result.home_score > result.away_score else (0.5 if result.home_score == result.away_score else 0.0)
         prior_outcomes = league_history[game.league]
         empirical_home = (sum(prior_outcomes) + 1) / (len(prior_outcomes) + 2)
-        calibrated = _platt_predict(prediction.home_win_probability, history) if len(history) >= 30 else prediction.home_win_probability
+        payload = prediction.payload or {}
+        raw_probability = float(payload.get("raw_simulation_home_probability", prediction.home_win_probability))
+        history = calibration_history[game.league]
+        if len(history) >= 30:
+            slope, intercept = fit_platt(history)
+            calibrated = calibrated_probability(raw_probability, {
+                "enabled": True, "slope": slope, "intercept": intercept,
+            })
+        else:
+            calibrated = raw_probability
         evaluated.append({
             "game_id": game.id, "date": game.game_date.isoformat(), "league": game.league,
             "model": prediction.model_version.name, "stage": snapshot.stage if snapshot else "LEGACY",
-            "probability": prediction.home_win_probability, "calibrated_probability": calibrated,
+            "probability": raw_probability, "calibrated_probability": calibrated,
             "baseline_probability": empirical_home, "outcome": outcome,
             "home_run_error": prediction.home_expected_runs - result.home_score,
             "away_run_error": prediction.away_expected_runs - result.away_score,
             "context_features": _context_availability(prediction.payload or {}),
             **_run_distribution_fields(prediction, result),
         })
-        history.append((prediction.home_win_probability, outcome))
+        if outcome != .5:
+            history.append((raw_probability, outcome))
         prior_outcomes.append(outcome)
 
     replay_evaluated: list[dict[str, Any]] = []
@@ -495,21 +506,6 @@ def _headline_score_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _population_sd(values: list[float]) -> float:
     average = sum(float(value) for value in values) / len(values)
     return math.sqrt(sum((float(value) - average) ** 2 for value in values) / len(values))
-
-
-def _platt_predict(probability: float, history: list[tuple[float, float]]) -> float:
-    a, b = 1.0, 0.0
-    learning_rate = .04 / math.sqrt(len(history))
-    for _ in range(160):
-        grad_a = grad_b = 0.0
-        for p, outcome in history:
-            x = _logit(p)
-            estimate = _sigmoid(a * x + b)
-            grad_a += (estimate - outcome) * x
-            grad_b += estimate - outcome
-        a -= learning_rate * grad_a / len(history)
-        b -= learning_rate * grad_b / len(history)
-    return min(.98, max(.02, _sigmoid(a * _logit(probability) + b)))
 
 
 def _logit(value: float) -> float:

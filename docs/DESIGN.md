@@ -131,8 +131,8 @@ Raw 수치보다 홈 기준 차이값을 우선하고, 미래 경기 결과나 �
 
 계수는 훈련된 것처럼 포장하지 않는다. 결과 DB가 충분히 쌓이면 시간순 walk-forward 학습으로 실제 Logistic Regression 계수를 교체하고 model version을 올린다.
 
-백테스트는 경기별 마지막 사전 예측 하나만 선택하고, 확률 보정은 앞선 경기만 사용하는 expanding Platt 방식이다. 최소 30경기 전에는 원 확률을 유지하며 expanding home-rate 기준 모델과 Brier/Log Loss를 비교한다.
-잔차 보정 비교도 매 경기보다 먼저 종료된 경기만 순차 누적해 원 기대득점 대비 보정 기대득점의 MAE·RMSE와 승률 Brier/Log Loss/calibration error를 함께 반환한다. 200경기 이상에서 모든 비교 지표가 악화되지 않아야 `deployment_gate=PASS`가 된다. MLB는 과거 예측-결과 표본이 충분해질 때까지 잔차 보정을 비활성화한다.
+백테스트는 경기별 마지막 사전 예측 하나만 선택한다. 운영과 백테스트의 확률 보정은 리그·시즌별 앞선 종료 경기만 사용하는 expanding Platt 방식이며, 최소 30경기 전에는 원 확률을 유지한다. 운영 시에는 보정 확률에 맞춰 원본 Monte Carlo의 홈승·원정승 경로를 결정론적으로 재표집하고, 승패·핸디캡·언더오버·전체 분포 대표를 한 표본에서 다시 계산한다. expanding home-rate는 비교 기준일 뿐 예측 입력으로 사용하지 않는다.
+잔차 보정 비교도 매 경기보다 먼저 종료된 경기만 순차 누적해 원 기대득점 대비 보정 기대득점의 MAE·RMSE와 승률 Brier/Log Loss/calibration error를 함께 반환한다. 200경기 이상에서 모든 비교 지표가 악화되지 않아야 `deployment_gate=PASS`가 된다. KBO와 MLB 모두 누수 감사를 통과한 과거 재현 표본을 잔차 이력에 사용할 수 있으며, 실전 검증 지표와는 분리한다.
 
 ## 8. Monte Carlo Algorithm
 
