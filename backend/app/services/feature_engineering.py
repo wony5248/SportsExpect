@@ -13,6 +13,16 @@ from typing import Any
 # observed home/away run ratio (MLB 1,938 games, KBO 555 games).
 HOME_FIELD_MULTIPLIERS = {"MLB": (1.005, 0.995), "KBO": (0.985, 1.015)}
 
+# League-average slash lines, measured from the collected team stats (MLB 30 clubs, KBO 10).
+# Anchoring the batting factor here rather than to the two clubs in this game matters: with a
+# shared two-team anchor, raising one club's OBP mechanically lowered the OTHER club's projected
+# runs, because the opponent's line was then divided by a larger denominator. A club's hitting
+# must never suppress its opponent's scoring.
+LEAGUE_SLASH_ANCHORS = {
+    "MLB": {"avg": .2436, "obp": .3182, "slg": .4004},
+    "KBO": {"avg": .2696, "obp": .3484, "slg": .4053},
+}
+
 KBO_PARK_FACTORS = {
     "잠실": 0.96, "고척": 0.98, "대전": 1.02, "문학": 1.03, "창원": 1.01,
     "대구": 1.04, "사직": 1.01, "수원": 1.02, "광주": 1.01,
@@ -254,9 +264,8 @@ def expected_runs(home: Any, away: Any, home_pitcher: Any | None, away_pitcher: 
     home_base = league_avg * home_offense ** .90 * away_defense ** .78
     away_base = league_avg * away_offense ** .90 * home_defense ** .78
 
-    avg_anchor = max(.210, (_v(getattr(home, "avg", None), .260) + _v(getattr(away, "avg", None), .260)) / 2)
-    obp_anchor = max(.280, (_v(getattr(home, "obp", None), .330) + _v(getattr(away, "obp", None), .330)) / 2)
-    slg_anchor = max(.330, (_v(getattr(home, "slg", None), .410) + _v(getattr(away, "slg", None), .410)) / 2)
+    anchors = LEAGUE_SLASH_ANCHORS.get(league or "MLB", LEAGUE_SLASH_ANCHORS["MLB"])
+    avg_anchor, obp_anchor, slg_anchor = anchors["avg"], anchors["obp"], anchors["slg"]
     home_batting = math.exp(_clip(
         .20 * (_v(getattr(home, "avg", None), avg_anchor) / avg_anchor - 1)
         + .40 * (_v(getattr(home, "obp", None), obp_anchor) / obp_anchor - 1)

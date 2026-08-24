@@ -27,7 +27,7 @@ from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batt
 from backend.app.collectors.kbo.client import SourcePayload
 from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient, _linescore, _weather_context
 from backend.app.collectors.odds import _consensus_event
-from backend.app.services.feature_engineering import (HOME_FIELD_MULTIPLIERS, _effective_lineup_ops,
+from backend.app.services.feature_engineering import (HOME_FIELD_MULTIPLIERS, expected_runs, _effective_lineup_ops,
                                                       _lineup_matchup_summary, _platoon_feature)
 from backend.app.services.refresh import (SPLIT_FETCH_BUDGET, _collect_batter_splits, _market_event_date,
                                           _market_refresh_due, _months_for_recent, _optional,
@@ -41,8 +41,10 @@ from backend.app.services.prediction import (SIMULATION_SUMMARY_SCHEMA_VERSION,
                                              predict_game)
 from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
                                        _missing_leagues_for_date, checkpoint_stage_for_minutes)
-from backend.app.services.model_lifecycle import (_promotion_decision, _validation_partition,
-                                                  predict_with_runtime)
+from pathlib import Path
+from backend.app.services import prediction as prediction_module
+from backend.app.services.model_lifecycle import (_coherent_run_means, _promotion_decision,
+                                                  _validation_partition, predict_with_runtime)
 from backend.app.services.historical_replay import run_historical_replay
 from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
 from backend.app.services.team_residuals import (ResidualObservation, TeamResidualHistory,
@@ -897,6 +899,43 @@ def test_mlb_never_reports_a_tied_score_and_branches_beat_the_raw_mode():
     kbo = simulate_scores(4.6, 4.2, 20_000, 42, league="KBO")
     assert kbo["tie_probability"] > 0
     assert all(score["home"] == score["away"] for score in kbo["outcome_scores"]["TIE"])
+
+
+def test_trained_runtime_does_not_apply_the_classifier_twice():
+    """predict_with_runtime already folds the classifier into its run means. Blending again in
+    predict_game would price the same signal twice and overstate every confident call."""
+    runtime_home, runtime_away = _coherent_run_means(.75, 4.6, 4.4)
+    blended_home, blended_away = blend_classifier_into_means(.75, runtime_home, runtime_away)
+    # The second pass demonstrably moves the margin further toward the classifier.
+    assert (blended_home - blended_away) > (runtime_home - runtime_away) + .1
+    # predict_game must therefore run the blend only on the baseline path.
+    source = Path(prediction_module.__file__).read_text(encoding="utf-8")
+    blend_line = next(line for line in source.splitlines()
+                      if "blend_classifier_into_means(logistic" in line)
+    guard = source.splitlines()[source.splitlines().index(blend_line) - 1]
+    assert "if not model_runtime" in guard
+
+
+def test_batting_factor_does_not_reach_across_to_the_opponent():
+    """The slash-line factor was anchored to the mean of the two clubs playing, so raising one
+    club's OBP shrank the OTHER club's projected runs. A club's hitting must not suppress its
+    opponent's offense."""
+    def club(**overrides):
+        base = dict(runs_per_game=4.47, runs_allowed_per_game=4.47, avg=.2436, obp=.3182,
+                    slg=.4004, era=4.10, whip=1.30, games=130, ops=.7186)
+        return SimpleNamespace(team=SimpleNamespace(league="MLB"), **{**base, **overrides})
+
+    def starter():
+        return SimpleNamespace(era=4.10, whip=1.30, avg_start_innings=5.3, fip=4.10, games=25,
+                               confirmed=True, opponent_innings=0, opponent_era=None, opponent_whip=None)
+
+    environment = {"league_average_runs": 4.47}
+    base_home, base_away, _ = expected_runs(club(), club(), starter(), starter(), 1.0, 0.0, environment)
+    for field, better in (("obp", .3782), ("slg", .4704), ("avg", .2836)):
+        home, away, _ = expected_runs(club(**{field: better}), club(), starter(), starter(),
+                                      1.0, 0.0, environment)
+        assert home > base_home + .02, f"better {field} must raise that club's own runs"
+        assert abs(away - base_away) < .005, f"better home {field} must not move the opponent"
 
 
 def test_home_field_edge_is_not_counted_twice():
