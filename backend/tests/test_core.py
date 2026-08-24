@@ -1483,7 +1483,7 @@ def test_league_probability_calibration_uses_only_results_final_before_first_pit
         ProbabilityObservation(game_id=101, season=2026, available_at=target_start + timedelta(hours=1),
                                probability=.99, outcome=1.0),
     ])
-    game = SimpleNamespace(id=999, external_id="KBO-20260824-TEST", game_date=date(2026, 8, 24),
+    game = SimpleNamespace(id=999, league="KBO", external_id="KBO-20260824-TEST", game_date=date(2026, 8, 24),
                            start_at=target_start)
     context = LeagueProbabilityCalibrationHistory(observations).context_for(game)
     assert context["enabled"] is True
@@ -1491,6 +1491,13 @@ def test_league_probability_calibration_uses_only_results_final_before_first_pit
     assert context["future_results_used"] == 0
     # Repeated 64% forecasts that actually won only about half the time must be pulled inward.
     assert calibrated_probability(.64, context) < .55
+
+    mlb = SimpleNamespace(id=998, league="MLB", external_id="MLB-20260824-TEST",
+                          game_date=date(2026, 8, 24), start_at=target_start)
+    mlb_context = LeagueProbabilityCalibrationHistory(observations).context_for(mlb)
+    assert mlb_context["enabled"] is False
+    assert mlb_context["reason"] == "WALK_FORWARD_VALIDATION_HOLD"
+    assert mlb_context["validation"]["status"] == "HOLD"
 
 
 def test_backtest_probability_calibration_ignores_results_not_final_at_cutoff():

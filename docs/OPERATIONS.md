@@ -90,6 +90,7 @@ alembic upgrade head
 - `prediction.created_at <= game.start_at`이고 결과 저장 전인 예측만 평가
 - 같은 경기에서는 요청한 stage의 마지막 예측 또는 전체 마지막 경기 전 예측 하나만 사용
 - 운영 승률 보정은 리그·시즌별로 해당 경기 시작 전에 종료 확인된 결과만 사용하는 expanding Platt 방식이다. 최소 30경기 전에는 원 확률을 유지하고, 보정된 홈승·원정승 비중으로 20,000회 표본을 결정론적으로 재가중한 뒤 승률·핸디캡·언더오버·점수 분포를 모두 다시 계산한다.
+- 리그별 chronological replay에서 Brier와 Log Loss가 모두 악화되지 않아야 운영 보정을 활성화한다. 2026-08-24 기준 KBO는 555경기에서 PASS, MLB는 1,963경기에서 두 지표가 악화되어 HOLD이며 원승률을 유지한다.
 - 현재 시즌 누적값을 과거 날짜에 역으로 붙이지 않음
 
 `python -m backend.app.cli backtest --league ALL`에서 Accuracy, Brier, Log Loss, 득점 MAE·RMSE, calibration error, 월·리그·모델별 결과와 expanding home-rate 기준 모델을 함께 확인합니다. 두 모델이 같은 경기를 예측한 경우에는 paired 차이와 bootstrap 95% 신뢰구간을 추가로 계산합니다. 200경기는 예비 판단선, 500경기는 권장 판단선이며 그 전에는 승격 결론을 내리지 않습니다.

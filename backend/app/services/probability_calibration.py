@@ -15,6 +15,14 @@ MIN_CALIBRATION_SAMPLES = 30
 MAX_CALIBRATION_SAMPLES = 1000
 CALIBRATION_METHOD = "LEAGUE_WALK_FORWARD_PLATT_V2_IRLS"
 PLATT_L2_REGULARIZATION = 4.0
+# A calibrator is promoted per league only when chronological replay improves the proper scoring
+# rules. KBO passed on 555 games; MLB's 1,963-game replay worsened both Brier and log loss, so its
+# fitted map remains observable but cannot alter production probabilities yet.
+CALIBRATION_ENABLED_LEAGUES = {"KBO"}
+CALIBRATION_VALIDATION = {
+    "KBO": {"status": "PASS", "sample_count": 555, "brier_delta": -.00014, "log_loss_delta": -.00029},
+    "MLB": {"status": "HOLD", "sample_count": 1963, "brier_delta": .00023, "log_loss_delta": .00050},
+}
 
 
 @dataclass(frozen=True)
@@ -84,8 +92,15 @@ class LeagueProbabilityCalibrationHistory:
             and row.game_id != game.id
             and _naive(row.available_at) <= _naive(game.start_at)
         ][-MAX_CALIBRATION_SAMPLES:]
+        validation = CALIBRATION_VALIDATION.get(game.league, {"status": "HOLD"})
+        if game.league not in CALIBRATION_ENABLED_LEAGUES:
+            context = identity_calibration("WALK_FORWARD_VALIDATION_HOLD", len(rows))
+            context["validation"] = validation
+            return context
         if len(rows) < MIN_CALIBRATION_SAMPLES:
-            return identity_calibration("INSUFFICIENT_PRIOR_FINALS", len(rows))
+            context = identity_calibration("INSUFFICIENT_PRIOR_FINALS", len(rows))
+            context["validation"] = validation
+            return context
         slope, intercept = fit_platt([(row.probability, row.outcome) for row in rows])
         return {
             "enabled": True,
@@ -97,6 +112,7 @@ class LeagueProbabilityCalibrationHistory:
             "data_cutoff": max(row.available_at for row in rows).isoformat(),
             "target_game_id": game.external_id,
             "future_results_used": 0,
+            "validation": validation,
         }
 
 
