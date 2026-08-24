@@ -100,6 +100,9 @@ def evaluate_candidate(session: Session, league: str) -> dict[str, Any]:
                 "reason": f"검증 구간을 제외한 학습 표본이 {len(train)}개로 부족합니다."}
     try:
         artifact, candidate_metrics, comparator_metrics = _train_candidate(session, league, samples, datetime.now(KST))
+        # Read the fitted coefficients out before the rollback: rolling back expires every
+        # attribute on the pending artifact, which silently reported every weight as zero.
+        starter_weights = _starter_feature_weights(artifact)
     finally:
         # A dry run must leave nothing behind, not even an unreferenced artifact row.
         session.rollback()
@@ -111,23 +114,35 @@ def evaluate_candidate(session: Session, league: str) -> dict[str, Any]:
         "candidate": candidate_metrics, "comparator": comparator_metrics,
         "would_promote": promoted, "reason": reason,
         "policy": POLICY["promotion"],
-        "starter_feature_weights": _starter_feature_weights(artifact),
+        "starter_feature_weights": starter_weights,
     }
 
 
-def _starter_feature_weights(artifact: ModelArtifact) -> dict[str, dict[str, float]]:
-    """Standardized coefficients for the starter-related inputs, for auditing their influence."""
-    names = artifact.feature_names
-    wanted = [name for name in names if name.startswith("starter_") or name == "quality_start_rate_diff"]
-    output: dict[str, dict[str, float]] = {}
-    for name in wanted:
-        index = names.index(name)
-        output[name] = {
-            "win": round(float(artifact.win_coefficients[index]), 4),
-            "home_runs": round(float(artifact.home_run_coefficients[index]), 4),
-            "away_runs": round(float(artifact.away_run_coefficients[index]), 4),
-        }
-    return output
+def _starter_feature_weights(artifact: ModelArtifact) -> dict[str, Any]:
+    """Standardized coefficients, for auditing how much the fit leans on each input.
+
+    Standardizing first makes the magnitudes directly comparable: each is the effect of moving
+    that input one standard deviation, so the starter's share can be read against everything else.
+    """
+    names = list(artifact.feature_names)
+    win = [float(value) for value in artifact.win_coefficients]
+    home = [float(value) for value in artifact.home_run_coefficients]
+    away = [float(value) for value in artifact.away_run_coefficients]
+
+    def row(index: int) -> dict[str, float]:
+        return {"win": round(win[index], 4), "home_runs": round(home[index], 4),
+                "away_runs": round(away[index], 4)}
+
+    starter_names = [name for name in names
+                     if name.startswith("starter_") or name == "quality_start_rate_diff"]
+    starter_total = sum(abs(win[names.index(name)]) for name in starter_names)
+    win_total = sum(abs(value) for value in win) or 1.0
+    ranked = sorted(names, key=lambda name: -abs(win[names.index(name)]))[:8]
+    return {
+        "starter_inputs": {name: row(names.index(name)) for name in starter_names},
+        "starter_share_of_win_weight": round(starter_total / win_total, 4),
+        "largest_win_weights": {name: row(names.index(name)) for name in ranked},
+    }
 
 
 def run_model_lifecycle(session: Session, league: str) -> dict[str, Any]:
