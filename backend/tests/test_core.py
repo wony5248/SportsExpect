@@ -16,7 +16,7 @@ from backend.app.database.base import Base
 from backend.app.models import (Game, GameResult, LineupEntry, ModelVersion, PitcherStat, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
                                 ModelLifecycleEvent, TeamBullpenEvent, UserClaudeSetting)
 from backend.app.repositories.repository import _prediction_changes, game_cards, game_dates, upsert_game
-from backend.app.services.backtest import walk_forward_backtest
+from backend.app.services.backtest import _walk_forward_probability, walk_forward_backtest
 from backend.app.services.bullpen import apply_profile_update, derive_profile, load_profiles, seed_league
 from backend.app.services import claude_advisor, personal_claude, runtime_secrets, user_auth
 from backend.app.services.claude_advisor import blend_with_claude
@@ -1491,6 +1491,22 @@ def test_league_probability_calibration_uses_only_results_final_before_first_pit
     assert context["future_results_used"] == 0
     # Repeated 64% forecasts that actually won only about half the time must be pulled inward.
     assert calibrated_probability(.64, context) < .55
+
+
+def test_backtest_probability_calibration_ignores_results_not_final_at_cutoff():
+    cutoff = datetime(2026, 8, 24, 18, 30)
+    prior = [
+        (cutoff - timedelta(days=30 - index), .64, float(index % 2))
+        for index in range(29)
+    ]
+    future = [
+        (cutoff + timedelta(minutes=index + 1), .99, 1.0)
+        for index in range(100)
+    ]
+    # The 100 future finals cannot push a 29-game history over the 30-game activation line.
+    assert _walk_forward_probability(.64, "MLB", cutoff, {"MLB": prior + future}) == .64
+    prior.append((cutoff - timedelta(minutes=1), .64, 1.0))
+    assert _walk_forward_probability(.64, "MLB", cutoff, {"MLB": prior + future}) < .56
 
 
 def test_calibrated_winner_branch_reweighting_recomputes_one_coherent_population():

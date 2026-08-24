@@ -15,7 +15,8 @@ from backend.app.services.team_residuals import (ResidualObservation, apply_resi
                                                  residual_context, RESIDUAL_ENABLED_LEAGUES,
                                                  _prediction_regime)
 from backend.app.services.simulation import _coherent_scenario_score_projection
-from backend.app.services.probability_calibration import calibrated_probability, fit_platt
+from backend.app.services.probability_calibration import (MAX_CALIBRATION_SAMPLES, MIN_CALIBRATION_SAMPLES,
+                                                          calibrated_probability, fit_platt)
 
 
 EXACT_CHECKPOINT_STAGES = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_15M"}
@@ -82,7 +83,7 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
             "readiness": _readiness(0, completed_results),
         }
 
-    calibration_history: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    calibration_history: dict[str, list[tuple[datetime, float, float]]] = defaultdict(list)
     evaluated: list[dict[str, Any]] = []
     league_history: dict[str, list[float]] = defaultdict(list)
     for prediction, game, result, snapshot in rows:
@@ -91,14 +92,10 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
         empirical_home = (sum(prior_outcomes) + 1) / (len(prior_outcomes) + 2)
         payload = prediction.payload or {}
         raw_probability = float(payload.get("raw_simulation_home_probability", prediction.home_win_probability))
-        history = calibration_history[game.league]
-        if len(history) >= 30:
-            slope, intercept = fit_platt(history)
-            calibrated = calibrated_probability(raw_probability, {
-                "enabled": True, "slope": slope, "intercept": intercept,
-            })
-        else:
-            calibrated = raw_probability
+        cutoff = _naive(game.start_at or result.finalized_at)
+        calibrated = _walk_forward_probability(
+            raw_probability, game.league, cutoff, calibration_history,
+        )
         evaluated.append({
             "game_id": game.id, "date": game.game_date.isoformat(), "league": game.league,
             "model": prediction.model_version.name, "stage": snapshot.stage if snapshot else "LEGACY",
@@ -110,20 +107,33 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
             **_run_distribution_fields(prediction, result),
         })
         if outcome != .5:
-            history.append((raw_probability, outcome))
+            calibration_history[game.league].append(
+                (_naive(result.finalized_at), raw_probability, outcome)
+            )
         prior_outcomes.append(outcome)
 
+    replay_calibration_history: dict[str, list[tuple[datetime, float, float]]] = defaultdict(list)
     replay_evaluated: list[dict[str, Any]] = []
     for prediction, game, result, snapshot in replay_rows:
         outcome = 1.0 if result.home_score > result.away_score else (0.5 if result.home_score == result.away_score else 0.0)
+        payload = prediction.payload or {}
+        raw_probability = float(payload.get("raw_simulation_home_probability", prediction.home_win_probability))
+        cutoff = _naive(game.start_at or result.finalized_at)
+        calibrated = _walk_forward_probability(
+            raw_probability, game.league, cutoff, replay_calibration_history,
+        )
         replay_evaluated.append({
             "game_id": game.id, "date": game.game_date.isoformat(), "league": game.league,
             "model": prediction.model_version.name, "stage": snapshot.stage if snapshot else "HISTORICAL_REPLAY",
-            "probability": prediction.home_win_probability, "outcome": outcome,
+            "probability": raw_probability, "calibrated_probability": calibrated, "outcome": outcome,
             "home_run_error": prediction.home_expected_runs - result.home_score,
             "away_run_error": prediction.away_expected_runs - result.away_score,
             **_run_distribution_fields(prediction, result),
         })
+        if outcome != .5:
+            replay_calibration_history[game.league].append(
+                (_naive(result.finalized_at), raw_probability, outcome)
+            )
 
     by_month: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_league: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -192,6 +202,10 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
         "historical_replay": {
             "sample_size": len(replay_evaluated),
             "metrics": _metrics(replay_evaluated, "probability") if replay_evaluated else {"sample_size": 0},
+            "walk_forward_calibrated": (
+                _metrics(replay_evaluated, "calibrated_probability")
+                if replay_evaluated else {"sample_size": 0}
+            ),
             "official_live_metric": False,
             "disclosure": "경기 전 데이터만 사용해 현재 코드로 다시 계산한 회고 성능입니다.",
         },
@@ -218,6 +232,21 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
         "paired_model_comparisons": paired_comparisons,
         "by_month": [{"month": key, **_metrics(value, "probability")} for key, value in sorted(by_month.items())],
     }
+
+
+def _walk_forward_probability(raw_probability: float, league: str, cutoff: datetime,
+                              histories: dict[str, list[tuple[datetime, float, float]]]) -> float:
+    history = [
+        (probability, outcome)
+        for available_at, probability, outcome in histories[league]
+        if available_at <= cutoff
+    ][-MAX_CALIBRATION_SAMPLES:]
+    if len(history) < MIN_CALIBRATION_SAMPLES:
+        return raw_probability
+    slope, intercept = fit_platt(history)
+    return calibrated_probability(raw_probability, {
+        "enabled": True, "slope": slope, "intercept": intercept,
+    })
 
 
 def _residual_walk_forward(
