@@ -184,7 +184,7 @@ def cancelled_game_data_integrity(repair: bool = Query(default=False), session: 
 @app.post("/api/v1/admin/cron/refresh", dependencies=[Depends(require_admin)])
 def cron_refresh(
     league: str = Query(pattern="^(KBO|MLB)$"),
-    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle|splits|replay)$"),
+    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle|splits|replay|innings)$"),
 ):
     try:
         return run_cron_refresh(league, scope)

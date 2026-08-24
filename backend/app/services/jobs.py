@@ -127,8 +127,15 @@ def run_lifecycle_refresh(league: str) -> dict[str, Any]:
 
 
 def run_replay_refresh(league: str, limit: int = 10, *, only_missing: bool = False) -> dict[str, Any]:
+    """Regenerate archive forecasts. Deliberately does only that.
+
+    This used to also backfill inning-by-inning scores (an unbounded external-API loop) and
+    retrain the model from scratch, every single call, inside the same lock — so a `limit=1`
+    request paid for all three regardless of how little replay work it actually needed, and held
+    the lock for however long the network calls happened to take. Both now run on their own cron
+    scope (`innings`, `lifecycle`) at their own cadence instead of piggybacking on every replay.
+    """
     with job_lock(f"historical-replay:{league}"):
-        innings = backfill_kbo_innings(limit) if league == "KBO" else backfill_mlb_innings(limit)
         with session_scope() as session:
             replay = run_historical_replay(
                 session, league,
@@ -137,16 +144,23 @@ def run_replay_refresh(league: str, limit: int = 10, *, only_missing: bool = Fal
                 limit=limit,
                 only_missing=only_missing,
             )
-            lifecycle = run_model_lifecycle(session, league)
             return {
                 **replay,
                 "replay_window": {
                     "start": REPLAY_START_DATE.isoformat(),
                     "end": REPLAY_END_DATE.isoformat(),
                 },
-                "inning_backfill": innings,
-                "model_lifecycle": lifecycle,
             }
+
+
+def run_innings_backfill(league: str, limit: int = 50) -> dict[str, Any]:
+    """Fill missing inning-by-inning scores from the official schedule/scoreboard.
+
+    Split out of run_replay_refresh: this is an external-API loop with no bound on wall time,
+    and coupling it to replay meant every replay batch paid for it regardless of `limit`.
+    """
+    with job_lock(f"innings-backfill:{league}"):
+        return backfill_kbo_innings(limit) if league == "KBO" else backfill_mlb_innings(limit)
 
 
 def run_cron_refresh(league: str, scope: str) -> dict[str, Any]:
@@ -164,6 +178,8 @@ def run_cron_refresh(league: str, scope: str) -> dict[str, Any]:
         return run_lifecycle_refresh(league)
     if scope == "replay":
         return run_replay_refresh(league)
+    if scope == "innings":
+        return run_innings_backfill(league)
     if scope == "splits":
         return backfill_batter_splits(league, datetime.now(KST).date())
     raise ValueError(f"Unsupported refresh scope: {scope}")
