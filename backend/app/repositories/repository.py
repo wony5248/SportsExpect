@@ -11,9 +11,10 @@ from sqlalchemy.orm import Session, joinedload
 
 from backend.app.config import KST, settings
 from backend.app.database import database_datetime, database_now
-from backend.app.models import (BatterSplit, Game, GameResult, LineupEntry, MarketConsensus, MarketSnapshot,
+from backend.app.models import (BatterSplit, Game, GameResult, GameStarter, LineupEntry, MarketConsensus, MarketSnapshot,
                                 ModelVersion, PitcherStat, Prediction, PredictionEvaluation, PredictionHistory, PredictionSnapshot,
                                 Team, TeamStat)
+from backend.app.services.archived_starters import starter_view
 
 
 def upsert_team(session: Session, league: str, code: str, name: str) -> Team:
@@ -530,7 +531,7 @@ def _game_serialization_context(session: Session, games: list[Game]) -> dict[str
         return {
             "predictions": empty, "replay_predictions": empty,
             "prediction_history": empty, "predictions_by_id": empty,
-            "pitchers": empty, "lineups": empty, "team_stats": empty, "results": empty,
+            "pitchers": empty, "archived_starters": empty, "lineups": empty, "team_stats": empty, "results": empty,
             "markets": empty, "snapshots": empty, "evaluations": empty,
         }
 
@@ -545,6 +546,12 @@ def _game_serialization_context(session: Session, games: list[Game]) -> dict[str
     pitchers_by_game: dict[int, list[PitcherStat]] = defaultdict(list)
     for row in session.scalars(select(PitcherStat).where(PitcherStat.game_id.in_(game_ids))).all():
         pitchers_by_game[row.game_id].append(row)
+
+    # A finished game from before the service ran never collected a live PitcherStat, so its card
+    # would show no starter at all. The archive holds the same pre-game identity the replay uses.
+    archived_starters_by_game: dict[int, list[GameStarter]] = defaultdict(list)
+    for row in session.scalars(select(GameStarter).where(GameStarter.game_id.in_(game_ids))).all():
+        archived_starters_by_game[row.game_id].append(row)
 
     lineups_by_game: dict[int, list[LineupEntry]] = defaultdict(list)
     for row in session.scalars(select(LineupEntry).where(
@@ -597,6 +604,7 @@ def _game_serialization_context(session: Session, games: list[Game]) -> dict[str
         "prediction_history": {game_id: rows[:10] for game_id, rows in predictions_by_game.items()},
         "predictions_by_id": predictions_by_id,
         "pitchers": pitchers_by_game,
+        "archived_starters": archived_starters_by_game,
         "lineups": lineups_by_game,
         "team_stats": team_stats,
         "results": results,
@@ -628,6 +636,7 @@ def _serialize_game(game: Game, context: dict[str, Any]) -> dict[str, Any]:
     pitchers = context["pitchers"].get(game.id, [])
     lineups = context["lineups"].get(game.id, [])
     pitcher_map = {p.side: p for p in pitchers}
+    archived_map = {row.side: row for row in context["archived_starters"].get(game.id, [])}
     home_stat = context["team_stats"].get(game.home_team_id)
     away_stat = context["team_stats"].get(game.away_team_id)
     # A score row is only an official result after the source marks the game final. This also
@@ -643,8 +652,8 @@ def _serialize_game(game: Game, context: dict[str, Any]) -> dict[str, Any]:
         "venue_date": game.venue_date.isoformat() if game.venue_date else game.game_date.isoformat(),
         "time": game.start_time.strftime("%H:%M") if game.start_time else None, "start_at": _iso(game.start_at) if game.start_at else None, "stadium": game.stadium,
         "status": game.status, "collected_at": _iso(game.collected_at),
-        "away": _team_payload(game.away_team, away_stat, pitcher_map.get("away")),
-        "home": _team_payload(game.home_team, home_stat, pitcher_map.get("home")),
+        "away": _team_payload(game.away_team, away_stat, _starter_for_card("away", pitcher_map, archived_map)),
+        "home": _team_payload(game.home_team, home_stat, _starter_for_card("home", pitcher_map, archived_map)),
         "result": ({"away_score": result.away_score, "home_score": result.home_score,
                     **({"innings": result.innings} if result.innings is not None else {})}
                    if result else None),
@@ -660,6 +669,19 @@ def _serialize_game(game: Game, context: dict[str, Any]) -> dict[str, Any]:
         "freshness": {"last_updated_at": _iso(latest_update), "age_minutes": age_minutes,
                       "status": "FRESH" if age_minutes <= settings.stale_after_minutes else "STALE"},
     }
+
+
+def _starter_for_card(side: str, pitcher_map: dict[str, PitcherStat], archived_map: dict[str, GameStarter]) -> Any:
+    """A live PitcherStat wins when both exist; the archive only fills a card that has neither.
+
+    Games from before the service ran never collected a live PitcherStat, so without this a
+    finished game's starter shows as unknown even after the replay archive has it.
+    """
+    live = pitcher_map.get(side)
+    if live is not None:
+        return live
+    record = archived_map.get(side)
+    return starter_view(record, 0.0) if record is not None else None
 
 
 def _team_payload(team: Team, stat: TeamStat | None, pitcher: PitcherStat | None) -> dict[str, Any]:
