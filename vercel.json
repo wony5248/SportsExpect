@@ -16,7 +16,7 @@
   "functions": {
     "api/index.py": {
       "maxDuration": 300,
-      "memory": 3009,
+      "memory": 2048,
       "excludeFiles": "{frontend/**,backend/tests/**,docs/**,data/**,scripts/**,**/__pycache__/**}"
     }
   }
