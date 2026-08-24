@@ -37,18 +37,12 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             joinedload(Game.home_team), joinedload(Game.away_team),
         ).where(Game.league == league, Game.status == "FINAL").order_by(Game.start_at, Game.id)
     ).all()
-    predictions = session.scalars(select(Prediction).join(Game, Game.id == Prediction.game_id).where(
-        Game.league == league,
-    )).all()
     residual_history = TeamResidualHistory.from_session(session, league)
     archived: dict[int, list[GameStarter]] = defaultdict(list)
     for record in session.scalars(select(GameStarter).join(Game, Game.id == GameStarter.game_id)
                                   .where(Game.league == league)).all():
         archived[record.game_id].append(record)
     probability_history = LeagueProbabilityCalibrationHistory.from_session(session, league)
-    by_game: dict[int, list[Prediction]] = defaultdict(list)
-    for prediction in predictions:
-        by_game[prediction.game_id].append(prediction)
     evaluated_prediction_ids = set(session.scalars(
         select(PredictionEvaluation.prediction_id).join(
             Prediction, Prediction.id == PredictionEvaluation.prediction_id,
@@ -59,7 +53,10 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
     outdated_replays_refreshed = 0
     processed: list[str] = []
     for game, result in candidates:
-        stored = by_game.get(game.id, [])
+        # Read one game's forecasts at a time. Prefetching the league's whole prediction table
+        # pulled every stored simulation payload into memory at once, which is what killed the
+        # serverless instance on MLB's 1,964-game archive.
+        stored = session.scalars(select(Prediction).where(Prediction.game_id == game.id)).all()
         needs_legacy_replay = False
         live_predictions = [
             row for row in stored
@@ -153,13 +150,12 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
                 "model_name": f"{league}_HISTORICAL_REPLAY_V1",
             },
         )
-        prediction = save_prediction(
+        save_prediction(
             session, game, prediction_result, stage="HISTORICAL_REPLAY", trigger="archive_replay",
             captured_at=datetime.now(KST), origin="HISTORICAL_REPLAY", data_cutoff=cutoff,
             training_eligible=True, leakage_audit=audit,
         )
         session.flush()
-        by_game[game.id].append(prediction)
         evaluated += evaluate_game_predictions(session, game, result)
         created += 1
         legacy_live_replayed += int(needs_legacy_replay)
