@@ -8,6 +8,7 @@ from backend.app.config import KST
 from backend.app.services.refresh import refresh_all, refresh_kbo, refresh_mlb
 from backend.app.database import SessionLocal, init_db, session_scope
 from backend.app.services.backtest import walk_forward_backtest
+from backend.app.services.archived_starters import backfill_archived_starters
 from backend.app.services.bullpen import seed_league
 from backend.app.services.model_lifecycle import run_model_lifecycle
 from backend.app.services.historical_replay import run_historical_replay
@@ -31,6 +32,9 @@ def main() -> None:
     replay.add_argument("--start-date", type=date.fromisoformat)
     replay.add_argument("--end-date", type=date.fromisoformat)
     replay.add_argument("--limit", type=int, default=20)
+    starters = sub.add_parser("backfill-starters", help="record archived game starters with strictly-prior totals")
+    starters.add_argument("--season", type=int, default=datetime.now(KST).year)
+    starters.add_argument("--limit", type=int, default=400)
     bullpen = sub.add_parser("seed-bullpen", help="create or refresh derived bullpen leverage profiles")
     bullpen.add_argument("--league", choices=("ALL", "KBO", "MLB"), default="ALL")
     sub.add_parser("backup", help="create a consistent SQLite backup")
@@ -52,6 +56,11 @@ def main() -> None:
             print(json.dumps(run_historical_replay(
                 session, args.league, args.start_date, args.end_date, args.limit,
             ), ensure_ascii=False, indent=2))
+    elif args.command == "backfill-starters":
+        init_db()
+        with session_scope() as session:
+            print(json.dumps(backfill_archived_starters(session, args.season, args.limit),
+                             ensure_ascii=False, indent=2))
     elif args.command == "seed-bullpen":
         init_db()
         leagues = ("KBO", "MLB") if args.league == "ALL" else (args.league,)

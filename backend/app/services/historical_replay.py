@@ -9,11 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from backend.app.config import KST
-from backend.app.models import (Game, GameResult, LineupEntry, MarketSnapshot, PitcherStat, Prediction,
+from backend.app.models import (Game, GameResult, GameStarter, LineupEntry, MarketSnapshot, PitcherStat, Prediction,
                                 PredictionEvaluation, Team)
 from backend.app.repositories.repository import save_prediction
 from backend.app.services.prediction import SIMULATION_SUMMARY_SCHEMA_VERSION, predict_game
 from backend.app.services.prediction_evaluation import evaluate_game_predictions
+from backend.app.services.archived_starters import starter_view
 from backend.app.services.team_residuals import TeamResidualHistory
 from backend.app.services.probability_calibration import LeagueProbabilityCalibrationHistory
 
@@ -40,6 +41,10 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
         Game.league == league,
     )).all()
     residual_history = TeamResidualHistory.from_session(session, league)
+    archived: dict[int, list[GameStarter]] = defaultdict(list)
+    for record in session.scalars(select(GameStarter).join(Game, Game.id == GameStarter.game_id)
+                                  .where(Game.league == league)).all():
+        archived[record.game_id].append(record)
     probability_history = LeagueProbabilityCalibrationHistory.from_session(session, league)
     by_game: dict[int, list[Prediction]] = defaultdict(list)
     for prediction in predictions:
@@ -103,6 +108,11 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
         ).order_by(LineupEntry.side, LineupEntry.batting_order)).all()
         by_side = {pitcher.side: pitcher for pitcher in pitchers}
         league_average_runs = _league_average(prior, league)
+        # Seasons the service did not run through have no pre-game PitcherStat rows at all. The
+        # archive keeps the announced starter with strictly-prior totals, which is the same
+        # information a forecaster had at first pitch.
+        for record in archived.get(game.id, []):
+            by_side.setdefault(record.side, starter_view(record, league_average_runs))
         market = session.scalar(select(MarketSnapshot).where(
             MarketSnapshot.game_id == game.id,
             MarketSnapshot.collected_at <= cutoff,

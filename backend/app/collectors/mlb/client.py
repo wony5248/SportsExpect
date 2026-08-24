@@ -388,6 +388,69 @@ class MlbClient:
                     output[f"MLB-{game_pk}"] = innings
         return SourcePayload(output, ", ".join(urls), collected)
 
+    def archived_starters(self, season: int) -> SourcePayload:
+        """Return the starting pitcher of every regular-season game in one request.
+
+        A starter's identity is announced days before first pitch, so recording it for a finished
+        game is pre-game information, not hindsight.
+        """
+        payload = self._get_json("/api/v1/schedule", {
+            "sportId": 1, "startDate": date(season, 1, 1).isoformat(),
+            "endDate": date(season, 12, 31).isoformat(), "gameTypes": "R",
+            "hydrate": "probablePitcher",
+        })
+        rows: list[dict[str, Any]] = []
+        for date_group in payload.data.get("dates", []):
+            for item in date_group.get("games", []):
+                for side in ("away", "home"):
+                    pitcher = (item.get("teams", {}).get(side) or {}).get("probablePitcher") or {}
+                    if not pitcher.get("id"):
+                        continue
+                    rows.append({
+                        # Matches _schedule_game's identifier so the archive joins on it.
+                        "external_id": f"MLB-{item['gamePk']}", "side": side,
+                        "player_id": str(pitcher["id"]), "name": pitcher.get("fullName"),
+                    })
+        return SourcePayload(rows, payload.source_url, payload.collected_at)
+
+    def pitcher_game_logs(self, player_ids: list[str], season: int) -> SourcePayload:
+        """Per-appearance pitching lines, so season-to-date rates can be rebuilt for any date."""
+        output: dict[str, list[dict[str, Any]]] = {}
+        urls: list[str] = []
+
+        def fetch(player_id: str) -> tuple[str, list[dict[str, Any]], str]:
+            payload = self._get_json(f"/api/v1/people/{player_id}/stats", {
+                "stats": "gameLog", "group": "pitching", "season": str(season),
+            })
+            appearances = []
+            for group in payload.data.get("stats", []):
+                for split in group.get("splits", []):
+                    stat = split.get("stat", {})
+                    if not split.get("date"):
+                        continue
+                    appearances.append({
+                        "date": split["date"],
+                        "innings": _innings(stat.get("inningsPitched")),
+                        "earned_runs": _as_int(stat.get("earnedRuns"), 0) or 0,
+                        "hits": _as_int(stat.get("hits"), 0) or 0,
+                        "walks": _as_int(stat.get("baseOnBalls"), 0) or 0,
+                        "strikeouts": _as_int(stat.get("strikeOuts"), 0) or 0,
+                        "home_runs": _as_int(stat.get("homeRuns"), 0) or 0,
+                        "started": bool(_as_int(stat.get("gamesStarted"), 0)),
+                    })
+            appearances.sort(key=lambda row: row["date"])
+            return player_id, appearances, payload.source_url
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            for future in as_completed([pool.submit(fetch, str(row)) for row in player_ids]):
+                player_id, appearances, url = future.result()
+                urls.append(url)
+                if appearances:
+                    output[player_id] = appearances
+        return SourcePayload(output, ", ".join(dict.fromkeys(urls))
+                             or f"{self.base_url}/api/v1/people/{{id}}/stats?stats=gameLog",
+                             datetime.now(KST))
+
     def batter_splits(self, player_ids: list[str], season: int) -> SourcePayload:
         """Fetch each hitter's official base-state splits for the season.
 

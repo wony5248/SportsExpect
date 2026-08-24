@@ -164,6 +164,38 @@ class BatterSplit(Base):
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class GameStarter(Base):
+    """Who actually started an archived game, and their record as of that first pitch.
+
+    The replay needs pre-game starter information for seasons the service did not run through.
+    A starter's identity is announced days ahead and the box score confirms it, so recording it
+    for a finished game leaks nothing; the accompanying rates are accumulated strictly from that
+    pitcher's appearances BEFORE this game, which is what a forecaster would have had.
+    """
+
+    __tablename__ = "game_starters"
+    __table_args__ = (UniqueConstraint("game_id", "side"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    game_id: Mapped[int] = mapped_column(ForeignKey("games.id"), index=True)
+    side: Mapped[str] = mapped_column(String(4))
+    player_id: Mapped[str] = mapped_column(String(24), index=True)
+    name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Season-to-date totals from appearances strictly before this game.
+    prior_games: Mapped[int] = mapped_column(Integer, default=0)
+    prior_starts: Mapped[int] = mapped_column(Integer, default=0)
+    prior_innings: Mapped[float] = mapped_column(Float, default=0.0)
+    prior_earned_runs: Mapped[int] = mapped_column(Integer, default=0)
+    prior_hits: Mapped[int] = mapped_column(Integer, default=0)
+    prior_walks: Mapped[int] = mapped_column(Integer, default=0)
+    prior_strikeouts: Mapped[int] = mapped_column(Integer, default=0)
+    prior_home_runs: Mapped[int] = mapped_column(Integer, default=0)
+    prior_quality_starts: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(80))
+    source_url: Mapped[str] = mapped_column(Text)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class PitcherStat(Base):
     __tablename__ = "pitcher_stats"
     __table_args__ = (UniqueConstraint("game_id", "side"),)

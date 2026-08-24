@@ -16,6 +16,7 @@ from backend.app.database.base import Base
 from backend.app.models import (Game, GameResult, LineupEntry, ModelVersion, PitcherStat, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
                                 ModelLifecycleEvent, TeamBullpenEvent, UserClaudeSetting)
 from backend.app.repositories.repository import _prediction_changes, game_cards, game_dates, upsert_game
+from backend.app.services.archived_starters import _totals_before, starter_view
 from backend.app.services.backtest import _walk_forward_probability, walk_forward_backtest
 from backend.app.services.bullpen import apply_profile_update, derive_profile, load_profiles, seed_league
 from backend.app.services import claude_advisor, personal_claude, runtime_secrets, user_auth
@@ -936,6 +937,43 @@ def test_batting_factor_does_not_reach_across_to_the_opponent():
                                       1.0, 0.0, environment)
         assert home > base_home + .02, f"better {field} must raise that club's own runs"
         assert abs(away - base_away) < .005, f"better home {field} must not move the opponent"
+
+
+def test_archived_starter_totals_stop_at_the_game_being_replayed():
+    """The whole point of the archive is pre-game information. A pitcher's line must accumulate
+    only appearances strictly before the target game, or the replay is training on hindsight."""
+    appearances = [
+        {"date": "2026-04-01", "innings": 6.0, "earned_runs": 2, "hits": 5, "walks": 1,
+         "strikeouts": 7, "home_runs": 1, "started": True},
+        {"date": "2026-04-08", "innings": 5.0, "earned_runs": 4, "hits": 8, "walks": 3,
+         "strikeouts": 4, "home_runs": 2, "started": True},
+        # The game being replayed, plus a later one. Neither may be counted.
+        {"date": "2026-04-15", "innings": 7.0, "earned_runs": 0, "hits": 2, "walks": 0,
+         "strikeouts": 11, "home_runs": 0, "started": True},
+        {"date": "2026-04-22", "innings": 6.0, "earned_runs": 3, "hits": 6, "walks": 2,
+         "strikeouts": 5, "home_runs": 1, "started": True},
+    ]
+    totals = _totals_before(appearances, "2026-04-15")
+    assert totals["prior_starts"] == 2
+    assert totals["prior_innings"] == 11.0
+    assert totals["prior_earned_runs"] == 6
+    # One of the two prior starts was six innings with two earned runs.
+    assert totals["prior_quality_starts"] == 1
+
+    record = SimpleNamespace(player_id="1", name="Test", prior_innings=11.0, prior_earned_runs=6,
+                             prior_hits=13, prior_walks=4, prior_strikeouts=11, prior_home_runs=3,
+                             prior_starts=2, prior_games=2, prior_quality_starts=1)
+    view = starter_view(record, 4.10)
+    assert abs(view.era - 6 * 9 / 11) < 1e-9
+    assert abs(view.whip - (13 + 4) / 11) < 1e-9
+    assert view.confirmed is True
+
+    # A pitcher with no prior work carries no rate at all rather than a fabricated one.
+    empty = starter_view(SimpleNamespace(
+        player_id="2", name="Debut", prior_innings=0.0, prior_earned_runs=0, prior_hits=0,
+        prior_walks=0, prior_strikeouts=0, prior_home_runs=0, prior_starts=0, prior_games=0,
+        prior_quality_starts=0), 4.10)
+    assert empty.era is None and empty.whip is None and empty.fip is None
 
 
 def test_home_field_edge_is_not_counted_twice():

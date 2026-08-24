@@ -18,6 +18,7 @@ from backend.app.models import Team
 from backend.app.repositories.repository import (cancelled_game_pregame_integrity, game_cards, game_dates,
                                                  game_detail, performance_metrics)
 from backend.app.services.operations import LockUnavailable, backup_database, operational_status
+from backend.app.services.archived_starters import backfill_archived_starters
 from backend.app.services.backtest import walk_forward_backtest
 from backend.app.services.bullpen import TIERS, apply_profile_update, load_profiles
 from backend.app.services.jobs import run_cron_refresh, run_full_refresh, run_replay_refresh
@@ -190,6 +191,16 @@ def cron_refresh(
     except LockUnavailable as exc:
         # A concurrent full/nearby run is expected occasionally; Cron can safely retry later.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/admin/backfill-starters", dependencies=[Depends(require_admin)])
+def backfill_starters(season: int = Query(default_factory=lambda: datetime.now(KST).year),
+                      limit: int = Query(default=400, ge=1, le=1000),
+                      session: Session = Depends(get_session)):
+    """Record archived game starters so the replay stops being blind to the starting pitcher."""
+    result = backfill_archived_starters(session, season, limit)
+    session.commit()
+    return result
 
 
 @app.post("/api/v1/admin/model/dry-run", dependencies=[Depends(require_admin)])

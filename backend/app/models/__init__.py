@@ -2,6 +2,7 @@ from backend.app.models.entities import (
     BatterSplit,
     CrawlLog,
     Game,
+    GameStarter,
     GameResult,
     LineupEntry,
     MarketConsensus,
@@ -24,7 +25,7 @@ from backend.app.models.entities import (
 )
 
 __all__ = [
-    "BatterSplit", "CrawlLog", "Game", "GameResult", "LineupEntry", "MarketConsensus", "MarketSnapshot", "ModelArtifact",
+    "BatterSplit", "CrawlLog", "Game", "GameStarter", "GameResult", "LineupEntry", "MarketConsensus", "MarketSnapshot", "ModelArtifact",
     "ModelLifecycleEvent", "ModelRegistry", "ModelVersion", "PitcherStat",
     "Prediction", "PredictionEvaluation", "PredictionHistory", "PredictionSnapshot", "RuntimeSecret", "Team", "TeamBullpen", "TeamBullpenEvent", "TeamStat",
     "UserClaudeSetting",
