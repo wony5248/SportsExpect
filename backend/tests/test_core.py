@@ -27,8 +27,8 @@ from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batt
 from backend.app.collectors.kbo.client import SourcePayload
 from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient, _linescore, _weather_context
 from backend.app.collectors.odds import _consensus_event
-from backend.app.services.feature_engineering import (_effective_lineup_ops, _lineup_matchup_summary,
-                                                       _platoon_feature)
+from backend.app.services.feature_engineering import (HOME_FIELD_MULTIPLIERS, _effective_lineup_ops,
+                                                      _lineup_matchup_summary, _platoon_feature)
 from backend.app.services.refresh import (SPLIT_FETCH_BUDGET, _collect_batter_splits, _market_event_date,
                                           _market_refresh_due, _months_for_recent, _optional,
                                           _prediction_stage, _recent_by_team, _split_budget)
@@ -894,6 +894,24 @@ def test_mlb_never_reports_a_tied_score_and_branches_beat_the_raw_mode():
     kbo = simulate_scores(4.6, 4.2, 20_000, 42, league="KBO")
     assert kbo["tie_probability"] > 0
     assert all(score["home"] == score["away"] for score in kbo["outcome_scores"]["TIE"])
+
+
+def test_home_field_edge_is_not_counted_twice():
+    """The simulation gives the home club the batting-last advantage on its own: it skips the
+    ninth while ahead and walk-offs cap the inning. Layering a large run multiplier on top of
+    that pushed the model to a 55% home win rate against a real 52.8%."""
+    league_average = 4.47
+    home_multiplier, away_multiplier = HOME_FIELD_MULTIPLIERS["MLB"]
+    fitted = simulate_scores(league_average * home_multiplier, league_average * away_multiplier,
+                             40_000, 11, league="MLB")
+    # Real MLB home clubs win 52.8% of decided games and score about 1.4% more runs.
+    assert .515 < fitted["home_two_way_probability"] < .545
+    means = fitted["mean_runs"]
+    assert .99 < means["home"] / means["away"] < 1.05
+    # The old 1.035/0.985 edge is what over-counted; it must stay clearly worse than the fit.
+    legacy = simulate_scores(league_average * 1.035, league_average * .985, 40_000, 11, league="MLB")
+    assert legacy["home_two_way_probability"] > fitted["home_two_way_probability"]
+    assert abs(legacy["home_two_way_probability"] - .528) > abs(fitted["home_two_way_probability"] - .528)
 
 
 def test_simulated_run_distribution_tracks_real_results():

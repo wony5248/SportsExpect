@@ -5,6 +5,14 @@ from datetime import date
 from typing import Any
 
 
+# Home-field run multipliers, fitted against real results rather than assumed. The simulation
+# already gives the home club the batting-last advantage (it skips the ninth while ahead and
+# walk-offs truncate the inning), which by itself produces a 52.6% home win rate. Applying the
+# old 1.035/0.985 run edge on top double-counted home field and pushed the model to 55.2% when
+# MLB actually runs 52.8%. These values reproduce both the observed home win rate and the
+# observed home/away run ratio (MLB 1,938 games, KBO 555 games).
+HOME_FIELD_MULTIPLIERS = {"MLB": (1.005, 0.995), "KBO": (0.985, 1.015)}
+
 KBO_PARK_FACTORS = {
     "잠실": 0.96, "고척": 0.98, "대전": 1.02, "문학": 1.03, "창원": 1.01,
     "대구": 1.04, "사직": 1.01, "수원": 1.02, "광주": 1.01,
@@ -303,8 +311,9 @@ def expected_runs(home: Any, away: Any, home_pitcher: Any | None, away_pitcher: 
         - .025 * float(advanced.get("baserunning_edge", 0))
         - .018 * float(advanced.get("fielding_edge", 0))
         - .012 * float(advanced.get("catcher_control_edge", 0)), -.12, .12))
-    home_expected = home_base * home_batting * away_pitching * park_factor * 1.035 * lineup_home * recent_home * bullpen_home * matchup_home * home_context
-    away_expected = away_base * away_batting * home_pitching * park_factor * 0.985 * lineup_away * recent_away * bullpen_away * matchup_away * away_context
+    home_field, away_field = HOME_FIELD_MULTIPLIERS.get(league or "MLB", HOME_FIELD_MULTIPLIERS["MLB"])
+    home_expected = home_base * home_batting * away_pitching * park_factor * home_field * lineup_home * recent_home * bullpen_home * matchup_home * home_context
+    away_expected = away_base * away_batting * home_pitching * park_factor * away_field * lineup_away * recent_away * bullpen_away * matchup_away * away_context
     return _clip(home_expected, .6, 10.0), _clip(away_expected, .6, 10.0), league_avg
 
 

@@ -68,6 +68,10 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   )
   const isFinal = game.status === 'FINAL'
   const homeFavored = !p || p.home_win_probability >= p.away_win_probability
+  // The home club bats last: it skips the ninth while ahead, so it can win more often while
+  // averaging slightly fewer runs. Real, but it reads as a contradiction unless it is named.
+  const battingLastGap = Boolean(meanScore && p && coherent
+    && (meanScore.home > meanScore.away) !== (p.home_win_probability >= p.away_win_probability))
   const ranking = p && coherent ? rankedOutcomes(p, game, isFinal) : null
   const marginShape = p && coherent ? marginBuckets(p) : null
   const topOutcome = ranking?.outcomes[0]
@@ -168,9 +172,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>}
 
         <Box className="score-row">
-          <Box className="primary"><span>예상 점수 · 평균</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>평균 총점 {stat(statisticalExpectedTotal, 1)}점</small></Box>
+          <Box className="primary"><span>평균 점수 · 2만 회 전체</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>평균 총점 {stat(statisticalExpectedTotal, 1)}점{battingLastGap ? ` · ${game.home.name}는 앞서면 9회말을 치지 않아 평균이 낮게 나옵니다` : ''}</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>가장 그럴듯한 점수</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{representativeSummary(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
+          <Box><span>실제로 이렇게 끝날 점수</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{representativeSummary(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
         </Box>
 
         <Button fullWidth onClick={() => setOpen(!open)} endIcon={<ExpandMoreRounded className={open ? 'rotated' : ''} />} className="detail-button">{open ? '분석 접기' : '상세 분석 보기'}</Button>
@@ -178,10 +182,10 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           <Box className="details">
             <Typography variant="subtitle2">예측 상세</Typography>
         {displayedScoreCandidates.length ? <Box className="score-candidates">
-          <span>이 예측과 앞뒤가 맞는 점수 3가지</span>
+          <span>위 예측과 같은 방향의 점수 후보</span>
           <Stack direction="row" flexWrap="wrap" gap={.8}>
             {displayedScoreCandidates.map((score, index) => <b key={`${score.away}-${score.home}`} className={index === 0 ? 'top' : ''}>
-              <small className="rank">{index === 0 ? '선정' : `${index + 1}위`}</small>{score.away} : {score.home}<small>{score.probability == null ? '—' : pctFine(score.probability)}</small>
+              <small className="rank">{index === 0 ? '선정' : '대안'}</small>{score.away} : {score.home}<small>{score.probability == null ? '—' : pctFine(score.probability)}</small>
             </b>)}
             {modeTotal ? <b className="mode-total">총점은 {modeTotal.value}점이 최다<small>{pctFine(modeTotal.probability)}</small></b> : null}
           </Stack>
@@ -200,22 +204,6 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             {marginShape.buckets.map((bucket) => <span key={bucket.key} className={bucket.key}>
               {bucket.label} {pct(bucket.share)}
             </span>)}
-          </Box>
-        </Box>}
-
-        {p.outcome_scores && <Box className="branch-scores">
-          <span>이기는 쪽이 갈릴 때 예상되는 점수</span>
-          <Box className="branch-grid">
-            {([['HOME_WIN', game.home.name], ['AWAY_WIN', game.away.name],
-               ['TIE', '무승부']] as const).map(([branch, name]) => {
-              const best = p.outcome_scores?.[branch]?.[0]
-              if (!best) return null
-              return <Box key={branch} className={`branch${branch === (homeFavored ? 'HOME_WIN' : 'AWAY_WIN') ? ' likely' : ''}`}>
-                <span>{branch === 'TIE' ? '무승부로 끝나면' : `${name} 승리 시`}</span>
-                <strong>{best.away} <i>:</i> {best.home}</strong>
-                <small>이 경우의 {pct(best.probability_given_outcome)}</small>
-              </Box>
-            })}
           </Box>
         </Box>}
 
@@ -835,21 +823,12 @@ function modeFrequency(mode: { count?: number; probability?: number | null } | n
 function representativeSummary(score: NonNullable<Game['prediction']>['primary_score'] | undefined) {
   if (!score) return '대표 점수 없음'
   if (score.selection_method !== 'COHERENT_BAYES_MEDIAN_V3') return modeFrequency(score)
-  const parts = []
-  if (score.headline_total_line != null && score.headline_total_pick) {
-    parts.push(`${score.headline_total_pick === 'OVER' ? '오버' : '언더'} ${score.headline_total_line} 방향`)
-  }
-  if (score.favorite_cover_probability_given_win != null) {
-    const runLine = score.favorite_run_line ?? 1.5
-    const minimumMargin = score.minimum_favorite_margin ?? Math.floor(runLine) + 1
-    parts.push(score.run_line_conditioning === 'UNCONDITIONAL_COVER_MAJORITY'
-      ? `-${runLine} 마핸 우세 표본만 · ${minimumMargin}점차+ ${pct(score.favorite_cover_probability_given_win)}`
-      : score.projects_favorite_cover
-      ? `-${runLine} 강한 조건부 다점차 · ${minimumMargin}점차+ ${pct(score.favorite_cover_probability_given_win)}`
-      : `-${runLine} 비마핸 중앙 표본 · ${minimumMargin}점차+ ${pct(score.favorite_cover_probability_given_win)}`)
-  }
-  if (score.scenario_probability != null) parts.push(`전체 분포 중 조건 일치 ${pct(score.scenario_probability)}`)
-  return parts.join(' · ') || modeFrequency(score)
+  // The selection diagnostics (conditioning mode, cover probability, matched share) belong in
+  // the model notes, not on the face of the card. A reader only needs to know that this score
+  // was picked from the simulations that agree with the picks shown above it.
+  const parts: string[] = ['위 예측과 같은 방향의 시뮬레이션에서 고른 점수']
+  if (score.scenario_probability != null) parts.push(`해당 시뮬레이션 ${pct(score.scenario_probability)}`)
+  return parts.join(' · ')
 }
 
 function outcomeLabel(outcome: 'HOME_WIN' | 'AWAY_WIN' | 'TIE', game: Game) {
