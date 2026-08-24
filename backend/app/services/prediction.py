@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from statistics import NormalDist
 from typing import Any
 
@@ -19,6 +20,7 @@ MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-lo
                    "+ inning-by-inning pitcher plan (starter workload, then leverage-tiered relief) "
                    "+ official pregame weather, bullpen workload, platoon, starter form, fielding/running and schedule context "
                    "+ leakage-safe team offense/defense residual EWMA calibration "
+                   "+ conservative pregame bookmaker-consensus total/win anchor when available "
                    "+ league walk-forward Platt win calibration with outcome-branch reweighting "
                    "+ decision-theoretic Bayes-median headline scenario coherent with winner, run line and total "
                    "+ league-accurate extra innings "
@@ -29,7 +31,7 @@ MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-lo
 # 25: adds leakage-safe opponent strength, official player Statcast snapshots, actual reliever
 # workload by tier, and handed/event-specific park effects inside the PA engine. Older replays
 # must be regenerated under those semantics.
-SIMULATION_SUMMARY_SCHEMA_VERSION = 25
+SIMULATION_SUMMARY_SCHEMA_VERSION = 27
 
 
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,
@@ -68,6 +70,10 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     probability_calibration = (game_context or {}).get("probability_calibration") or {}
     headline_market = (game_context or {}).get("market") or {}
     home_runs, away_runs = apply_residual_adjustment(home_runs, away_runs, residual_context)
+    model_only_home_runs, model_only_away_runs = home_runs, away_runs
+    home_runs, away_runs, market_calibration = apply_market_consensus_anchor(
+        home_runs, away_runs, headline_market, game.league,
+    )
     home_staff = staff_payload((bullpens or {}).get("home"), float(features["home_starter_multiplier"]),
                                float(features["home_starter_innings"]))
     away_staff = staff_payload((bullpens or {}).get("away"), float(features["away_starter_multiplier"]),
@@ -114,14 +120,16 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         # Market lines never change the score distribution. They are persisted only so the
         # integer headline scenario agrees with the exact total and run line shown beside it.
         "headline_market": {
-            "total_line": headline_market.get("total_line"),
-            "home_spread": headline_market.get("home_spread"),
+            key: headline_market.get(key) for key in (
+                "total_line", "home_spread", "home_implied_probability",
+                "away_implied_probability", "bookmaker_count", "provider", "collected_at",
+            )
         },
         "pregame_context": (game_context or {}).get("pregame") or {},
     }
     input_hash = hashlib.sha256(json.dumps(input_data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-    # A market-line move must regenerate the stored headline scenario, but it must not alter the
-    # underlying Monte Carlo draws. Keep the simulation seed tied only to baseball inputs.
+    # Common random numbers make before/after market-anchor comparisons stable: market changes
+    # the run means, but not the random stream used to quantify that change.
     simulation_seed_data = {
         key: value for key, value in input_data.items()
         if key not in {"headline_market", "probability_calibration"}
@@ -257,14 +265,15 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "simulation_team_variance": round(team_variance, 4),
             "simulation_home_team_variance": round(home_team_variance, 4),
             "simulation_away_team_variance": round(away_team_variance, 4),
+            "market_calibration": market_calibration,
             "residual_calibration": {
                 "enabled": bool(residual_context.get("enabled")),
                 "policy_version": residual_context.get("policy_version"),
                 "effective_from": residual_context.get("effective_from"),
                 "baseline_home_expected_runs": round(baseline_home_runs, 6),
                 "baseline_away_expected_runs": round(baseline_away_runs, 6),
-                "home_run_adjustment": round(home_runs - baseline_home_runs, 6),
-                "away_run_adjustment": round(away_runs - baseline_away_runs, 6),
+                "home_run_adjustment": round(model_only_home_runs - baseline_home_runs, 6),
+                "away_run_adjustment": round(model_only_away_runs - baseline_away_runs, 6),
                 "home_variance_multiplier": residual_context.get("home_variance_multiplier", 1.0),
                 "away_variance_multiplier": residual_context.get("away_variance_multiplier", 1.0),
                 "mean_reversion_weight": residual_context.get("mean_reversion_weight"),
@@ -272,8 +281,10 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
                 "structure_persistence_weight": residual_context.get("structure_persistence_weight"),
                 "source_game_count": residual_context.get("source_game_count", 0),
                 "latest_source_game_id": residual_context.get("latest_source_game_id"),
+                "league_residual_sd": residual_context.get("league_residual_sd"),
                 "home": residual_context.get("home") or {},
                 "away": residual_context.get("away") or {},
+                "outlier_analysis": residual_context.get("outlier_analysis") or {},
                 "method": residual_context.get("method"),
             },
             "headline_market": headline_market,
@@ -316,6 +327,107 @@ CLASSIFIER_BLEND_WEIGHT = .35
 # Total-runs variance inflation of the correlated gamma-Poisson process, used to convert
 # win-probability tilts into run-margin tilts via a normal approximation.
 MARGIN_VARIANCE_INFLATION = 1.6
+
+
+def apply_market_consensus_anchor(home_runs: float, away_runs: float,
+                                  market: dict[str, Any] | None,
+                                  league: str) -> tuple[float, float, dict[str, Any]]:
+    """Conservatively anchor model means to a real pregame multi-book consensus.
+
+    A total or moneyline is valuable external information, but it is neither an observed result
+    nor permission to copy the book. The model retains the majority weight, while the consensus
+    corrects implausible total and win-probability divergence. A bare number without provider,
+    collection time, or bookmaker count is never treated as real market evidence.
+    """
+    market = market or {}
+    provenance = bool(market.get("provider") or market.get("collected_at") or
+                      int(market.get("bookmaker_count") or 0) > 0)
+    before_total = home_runs + away_runs
+    before_margin = home_runs - away_runs
+    disabled = {
+        "enabled": False,
+        "method": "PREGAME_MULTI_BOOK_CONSENSUS_SHRINKAGE_V1",
+        "reason": "NO_VERIFIED_PREGAME_MARKET",
+        "model_home_before": round(home_runs, 6),
+        "model_away_before": round(away_runs, 6),
+        "model_total_before": round(before_total, 6),
+    }
+    if not provenance:
+        return home_runs, away_runs, disabled
+
+    def number(key: str) -> float | None:
+        value = market.get(key)
+        if value is None:
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    total_line = number("total_line")
+    total_line = total_line if total_line is not None and 4 <= total_line <= 20 else None
+    home_probability, away_probability = number("home_implied_probability"), number("away_implied_probability")
+    if (home_probability is not None and away_probability is not None and
+            home_probability > 0 and away_probability > 0):
+        probability_sum = home_probability + away_probability
+        market_home_probability = home_probability / probability_sum
+    else:
+        market_home_probability = None
+    home_spread = number("home_spread")
+    books = max(1, int(market.get("bookmaker_count") or 1))
+    total_weight = min(.40, .20 + .025 * min(books, 8)) if total_line is not None else 0.0
+    probability_weight = min(.35, .16 + .0225 * min(books, 8)) if market_home_probability is not None else 0.0
+
+    anchored_total = before_total
+    if total_line is not None:
+        # Keep a single stale or erroneous feed from shifting a projection by several runs.
+        target_total = max(before_total - 3.0, min(before_total + 3.0, total_line))
+        anchored_total = (1 - total_weight) * before_total + total_weight * target_total
+
+    margin_sd = max(1.0, (MARGIN_VARIANCE_INFLATION * anchored_total) ** .5)
+    model_home_probability = NormalDist().cdf(before_margin / margin_sd)
+    market_probability_source = "H2H_NO_VIG"
+    if market_home_probability is None and home_spread is not None and home_spread != 0:
+        # A run line reliably identifies the favourite, but without its price it does not imply
+        # a 50% cover rate. Use direction only and at a much weaker weight.
+        market_home_probability = .54 if home_spread < 0 else .46
+        probability_weight = .10
+        market_probability_source = "SPREAD_DIRECTION_ONLY"
+    anchored_probability = model_home_probability
+    anchored_margin = before_margin
+    if market_home_probability is not None:
+        anchored_probability = ((1 - probability_weight) * model_home_probability
+                                + probability_weight * max(.05, min(.95, market_home_probability)))
+        target_margin = NormalDist().inv_cdf(max(.03, min(.97, anchored_probability))) * margin_sd
+        anchored_margin = max(before_margin - 2.0, min(before_margin + 2.0, target_margin))
+
+    anchored_total = max(1.2, min(20.0, anchored_total))
+    anchored_margin = max(-(anchored_total - 1.2), min(anchored_total - 1.2, anchored_margin))
+    anchored_home = max(.6, min(10.0, (anchored_total + anchored_margin) / 2))
+    anchored_away = max(.6, min(10.0, (anchored_total - anchored_margin) / 2))
+    return anchored_home, anchored_away, {
+        "enabled": bool(total_weight or probability_weight),
+        "method": "PREGAME_MULTI_BOOK_CONSENSUS_SHRINKAGE_V1",
+        "provider": market.get("provider"),
+        "collected_at": market.get("collected_at"),
+        "bookmaker_count": books,
+        "total_line": total_line,
+        "home_spread": home_spread,
+        "market_home_probability": (round(market_home_probability, 6)
+                                    if market_home_probability is not None else None),
+        "market_probability_source": market_probability_source if market_home_probability is not None else None,
+        "total_weight": round(total_weight, 6),
+        "probability_weight": round(probability_weight, 6),
+        "model_home_before": round(home_runs, 6),
+        "model_away_before": round(away_runs, 6),
+        "model_total_before": round(before_total, 6),
+        "model_home_probability_before": round(model_home_probability, 6),
+        "anchored_home_probability": round(anchored_probability, 6),
+        "anchored_home": round(anchored_home, 6),
+        "anchored_away": round(anchored_away, 6),
+        "anchored_total": round(anchored_home + anchored_away, 6),
+    }
 
 
 def blend_classifier_into_means(logistic: float, home_runs: float, away_runs: float) -> tuple[float, float]:

@@ -354,6 +354,10 @@ class ModelArtifact(Base):
     home_run_coefficients: Mapped[list[float]] = mapped_column(JSON)
     away_run_intercept: Mapped[float] = mapped_column(Float)
     away_run_coefficients: Mapped[list[float]] = mapped_column(JSON)
+    # A signed run-margin target is trained independently from the two team-score targets.
+    # Nullable keeps artifacts created before feature-schema v8 readable during rolling deploys.
+    margin_intercept: Mapped[float | None] = mapped_column(Float, nullable=True)
+    margin_coefficients: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
     training_cutoff: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     training_sample_size: Mapped[int] = mapped_column(Integer)
     validation_metrics: Mapped[dict[str, Any]] = mapped_column(JSON)

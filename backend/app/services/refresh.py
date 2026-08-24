@@ -131,13 +131,14 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                             replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
 
         inning_backfill = backfill_kbo_innings(10, target_date=target_date, client=client)
-        _refresh_market("KBO", errors)
+        market_status = _refresh_market("KBO", errors)
         predicted = _predict_games("KBO", target_date, game_ids, errors, trigger, checkpoint_stage)
         with session_scope() as session:
             evaluations = evaluate_pending_predictions(session, "KBO", target_date)
         return {"date": target_date.isoformat(), "games": len(fetched_games) or predicted, "predictions": predicted,
                 "evaluations": evaluations, "inning_results": inning_backfill,
-                "errors": errors, "used_cached_team_stats": fresh and not force}
+                "market": market_status, "errors": errors,
+                "used_cached_team_stats": fresh and not force}
     finally:
         if own_client:
             client.close()
@@ -221,12 +222,13 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
                         game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
                         if game:
                             replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
-        _refresh_market("MLB", errors)
+        market_status = _refresh_market("MLB", errors)
         predicted = _predict_games("MLB", target_date, game_ids, errors, trigger, checkpoint_stage)
         with session_scope() as session:
             evaluations = evaluate_pending_predictions(session, "MLB", target_date)
         return {"date": target_date.isoformat(), "league": "MLB", "games": len(fetched_games) or predicted,
-                "predictions": predicted, "evaluations": evaluations, "errors": errors,
+                "predictions": predicted, "evaluations": evaluations,
+                "market": market_status, "errors": errors,
                 "used_cached_team_stats": fresh and not force}
     finally:
         if own_client:
@@ -305,6 +307,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 "home_spread": market.home_spread,
                 "home_implied_probability": market.home_implied_probability,
                 "away_implied_probability": market.away_implied_probability,
+                "bookmaker_count": market.bookmaker_count,
                 "provider": market.provider,
                 "collected_at": market.collected_at.isoformat(),
             } if market and (game.start_at is None or

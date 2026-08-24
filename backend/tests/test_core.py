@@ -13,7 +13,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from backend.app.config import KST, database_url_from_environment, settings
 from backend.app.database.base import Base
-from backend.app.models import (Game, GameResult, LineupEntry, ModelVersion, PitcherStat, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
+from backend.app.models import (Game, GameResult, GameStarter, LineupEntry, ModelVersion, PitcherStat, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
                                 ModelLifecycleEvent, TeamBullpenEvent, UserClaudeSetting)
 from backend.app.repositories.repository import _prediction_changes, game_cards, game_dates, upsert_game
 from backend.app.services.archived_starters import _totals_before, starter_view
@@ -44,6 +44,7 @@ from backend.app.services.simulation import simulate_scores
 from backend.app.services.simulation import evaluate_simulation_recipe
 from backend.app.services.prediction import (SIMULATION_SUMMARY_SCHEMA_VERSION,
                                              _apply_daily_bullpen_workload,
+                                             apply_market_consensus_anchor,
                                              blend_classifier_into_means, build_score_estimates,
                                              predict_game)
 from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
@@ -479,13 +480,20 @@ def test_exact_checkpoint_windows_do_not_use_broad_stage_buckets():
 
 
 def test_candidate_promotion_requires_improvement_and_non_regression_guards():
-    comparator = {"brier": .240, "log_loss": .690, "run_mae": 2.40}
+    comparator = {"brier": .240, "log_loss": .690, "run_mae": 2.40, "margin_mae": 3.20}
     assert _promotion_decision(
-        {"brier": .230, "log_loss": .680, "run_mae": 2.39}, comparator,
+        {"brier": .230, "log_loss": .680, "run_mae": 2.39, "margin_mae": 3.18}, comparator,
     )[0]
     assert not _promotion_decision(
-        {"brier": .230, "log_loss": .680, "run_mae": 2.60}, comparator,
+        {"brier": .230, "log_loss": .680, "run_mae": 2.60, "margin_mae": 3.40}, comparator,
     )[0]
+    promoted, reason = _promotion_decision(
+        {"brier": .230, "log_loss": .680, "run_mae": 2.39, "margin_mae": 3.18,
+         "predicted_margin_sd": .75},
+        {**comparator, "predicted_margin_sd": 1.0},
+    )
+    assert promoted is False
+    assert "마진 분산" in reason
 
 
 def test_trained_runtime_produces_bounded_probability_and_runs():
@@ -499,6 +507,60 @@ def test_trained_runtime_produces_bounded_probability_and_runs():
     assert .59 < probability < .61
     assert .6 <= away_runs < home_runs <= 10.0
     assert round(home_runs + away_runs, 6) == 10.6
+
+
+def test_trained_runtime_uses_independent_margin_target_without_changing_total():
+    runtime = {
+        "feature_names": [], "feature_means": [], "feature_scales": [],
+        "win_intercept": 0.0, "win_coefficients": [],
+        "home_run_intercept": 5.0, "home_run_coefficients": [],
+        "away_run_intercept": 5.0, "away_run_coefficients": [],
+        "margin_intercept": 3.0, "margin_coefficients": [],
+        "residual_stack": False,
+    }
+    _probability, home_runs, away_runs = predict_with_runtime(runtime, {}, 5.0, 5.0)
+    assert home_runs > away_runs
+    assert round(home_runs + away_runs, 6) == 10.0
+    # Legacy artifacts without the new target remain readable and use their team-score gap.
+    legacy = {key: value for key, value in runtime.items() if not key.startswith("margin_")}
+    _probability, legacy_home, legacy_away = predict_with_runtime(legacy, {}, 5.0, 5.0)
+    assert round(legacy_home - legacy_away, 6) == 0.0
+
+
+def test_residual_runtime_corrects_baseline_instead_of_replacing_it():
+    runtime = {
+        "feature_names": [], "feature_means": [], "feature_scales": [],
+        "win_intercept": 0.0, "win_coefficients": [],
+        "home_run_intercept": .2, "home_run_coefficients": [],
+        "away_run_intercept": -.1, "away_run_coefficients": [],
+        "margin_intercept": .3, "margin_coefficients": [],
+        "residual_stack": True,
+    }
+    probability, home_runs, away_runs = predict_with_runtime(runtime, {}, 5.0, 4.0)
+    assert probability > .5
+    assert home_runs > away_runs
+    assert home_runs + away_runs > 9.0
+
+
+def test_zero_residual_runtime_reproduces_the_baseline_means():
+    from collections import defaultdict
+    from backend.app.services.feature_engineering import logistic_probability
+    from backend.app.services.prediction import blend_classifier_into_means
+
+    runtime = {
+        "feature_names": [], "feature_means": [], "feature_scales": [],
+        "win_intercept": 0.0, "win_coefficients": [],
+        "home_run_intercept": 0.0, "home_run_coefficients": [],
+        "away_run_intercept": 0.0, "away_run_coefficients": [],
+        "margin_intercept": 0.0, "margin_coefficients": [],
+        "residual_stack": True,
+    }
+    features = defaultdict(float)
+    baseline_probability = logistic_probability(features)
+    baseline_home, baseline_away = blend_classifier_into_means(baseline_probability, 5.0, 4.0)
+    _probability, home_runs, away_runs = predict_with_runtime(runtime, features, 5.0, 4.0)
+    assert abs(home_runs - baseline_home) < 1e-9
+    assert abs(away_runs - baseline_away) < 1e-9
 
 
 def test_supabase_database_url_selects_psycopg_driver(monkeypatch):
@@ -546,7 +608,40 @@ def test_game_cards_use_bounded_batch_queries():
         rows = game_cards(session, target, "KBO")
         event.remove(engine, "before_cursor_execute", count_query)
         assert len(rows) == 6
-        assert queries <= 8
+        # One more than before: the archived-starter fallback adds exactly one bulk query,
+        # not one per game, so the bound grows by 1 regardless of how many cards render.
+        assert queries <= 9
+
+
+def test_card_falls_back_to_the_archived_starter_when_no_live_one_was_ever_collected():
+    """A finished game from before the service ran has no live PitcherStat at all. Without a
+    fallback its card shows no starter even after the replay archive has the pre-game identity,
+    which is exactly the 미정 gap the archived-starter backfill was supposed to close."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        away = Team(league="MLB", code="AW", name="Away")
+        home = Team(league="MLB", code="HM", name="Home")
+        session.add_all([away, home]); session.flush()
+        game = Game(external_id="ARCHIVE-1", league="MLB", game_date=date(2026, 4, 1),
+                    away_team_id=away.id, home_team_id=home.id, status="FINAL",
+                    source="test", source_url="test", collected_at=datetime(2026, 4, 1, 12))
+        session.add(game); session.flush()
+        # Only the home side has a live PitcherStat; away has only the archived record.
+        session.add(PitcherStat(game_id=game.id, side="home", player_id="10", name="Live Starter",
+                                era=3.10, whip=1.10, source="test", source_url="test",
+                                collected_at=datetime(2026, 4, 1, 11)))
+        session.add(GameStarter(game_id=game.id, side="away", player_id="20", name="Archived Starter",
+                                prior_games=15, prior_starts=15, prior_innings=90.0,
+                                prior_earned_runs=30, prior_hits=80, prior_walks=25,
+                                prior_strikeouts=70, prior_home_runs=8, prior_quality_starts=6,
+                                source="test", source_url="test",
+                                collected_at=datetime(2026, 4, 1, 11)))
+        session.commit()
+        card = game_cards(session, date(2026, 4, 1), "MLB")[0]
+        assert card["home"]["starter"]["name"] == "Live Starter"
+        assert card["away"]["starter"]["name"] == "Archived Starter"
+        assert abs(card["away"]["starter"]["era"] - 30 * 9 / 90.0) < 1e-9
 
 
 def test_final_game_card_uses_last_prediction_saved_before_game_start():
@@ -939,6 +1034,17 @@ def test_lifecycle_scores_candidates_through_the_operating_simulation_recipe():
     assert home_runs > away_runs
 
 
+def test_lifecycle_evaluates_legacy_feature_snapshots_with_neutral_missing_values():
+    row = {
+        "features": {}, "base_home_runs": 4.5, "base_away_runs": 4.4,
+        "residual_context": {}, "league": "MLB", "simulation_recipe": None,
+    }
+    probability, home_runs, away_runs, method = _operating_prediction(None, row)
+    assert method == "POISSON_FALLBACK"
+    assert 0 < probability < 1
+    assert home_runs > 0 and away_runs > 0
+
+
 def test_mlb_never_reports_a_tied_score_and_branches_beat_the_raw_mode():
     result = simulate_scores(4.6, 4.2, 20_000, 42, league="MLB")
     # No MLB game can end level, so nothing in the payload may describe one.
@@ -1239,7 +1345,9 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     before = predict_game(game, home, away, pitcher("home-p"), pitcher("away-p"), base)
     after = predict_game(game, home, away, pitcher("home-p"), pitcher("away-p"), changed)
     assert before["input_hash"] != after["input_hash"]
-    assert before["home_expected_runs"] != after["home_expected_runs"]
+    assert before["input_payload"]["features"]["home_lineup_index"] != (
+        after["input_payload"]["features"]["home_lineup_index"]
+    )
     assert after["confidence"] >= 80
     score = after["payload"]["display_expected_score"]
     assert after["expected_total"] == round(score["away"] + score["home"], 1)
@@ -1371,7 +1479,7 @@ def test_coherent_headline_score_matches_same_population_total_direction(
     assert primary["scenario_probability"] > 0
 
 
-def test_market_line_changes_headline_without_changing_simulation_population():
+def test_verified_market_consensus_conservatively_changes_simulation_population():
     home_team, away_team = SimpleNamespace(name="Home"), SimpleNamespace(name="Away")
     recent = {"10": {"games": 10, "win_rate": .5}}
     home = SimpleNamespace(team=home_team, recent=recent, win_rate=.55, home_win_rate=.58, runs_per_game=4.8,
@@ -1383,23 +1491,59 @@ def test_market_line_changes_headline_without_changing_simulation_population():
     game = SimpleNamespace(external_id="MLB-market-line", league="MLB", stadium="Yankee Stadium")
     lower = predict_game(
         game, home, away, pitcher("home-p"), pitcher("away-p"),
-        game_context={"market": {"total_line": 7.5}},
+        game_context={"market": {"provider": "TEST_BOOKS", "bookmaker_count": 4,
+                                         "collected_at": "2026-08-24T10:00:00+09:00",
+                                         "total_line": 7.5, "home_implied_probability": .60,
+                                         "away_implied_probability": .40}},
     )
     upper = predict_game(
         game, home, away, pitcher("home-p"), pitcher("away-p"),
-        game_context={"market": {"total_line": 10.5}},
+        game_context={"market": {"provider": "TEST_BOOKS", "bookmaker_count": 4,
+                                         "collected_at": "2026-08-24T10:00:00+09:00",
+                                         "total_line": 10.5, "home_implied_probability": .60,
+                                         "away_implied_probability": .40}},
     )
     spread = predict_game(
         game, home, away, pitcher("home-p"), pitcher("away-p"),
-        game_context={"market": {"total_line": 7.5, "home_spread": -2.5}},
+        game_context={"market": {"provider": "TEST_BOOKS", "bookmaker_count": 4,
+                                         "collected_at": "2026-08-24T10:00:00+09:00",
+                                         "total_line": 7.5, "home_spread": -2.5,
+                                         "home_implied_probability": .60,
+                                         "away_implied_probability": .40}},
     )
     assert lower["input_hash"] != upper["input_hash"]
-    assert lower["payload"]["frequency_tables"] == upper["payload"]["frequency_tables"]
+    assert lower["payload"]["frequency_tables"] != upper["payload"]["frequency_tables"]
+    assert lower["home_expected_runs"] + lower["away_expected_runs"] < (
+        upper["home_expected_runs"] + upper["away_expected_runs"]
+    )
+    assert lower["payload"]["market_calibration"]["enabled"] is True
+    assert 0 < lower["payload"]["market_calibration"]["total_weight"] <= .4
     assert lower["payload"]["primary_score"]["headline_total_line"] == 7.5
     assert upper["payload"]["primary_score"]["headline_total_line"] == 10.5
     assert lower["input_hash"] != spread["input_hash"]
-    assert lower["payload"]["frequency_tables"] == spread["payload"]["frequency_tables"]
     assert spread["payload"]["market_handicap"]["run_line"] == 2.5
+
+
+def test_unverified_bare_market_number_cannot_move_model_means():
+    home, away, audit = apply_market_consensus_anchor(
+        5.2, 4.3, {"total_line": 14.5, "home_spread": -2.5}, "MLB",
+    )
+    assert (home, away) == (5.2, 4.3)
+    assert audit["enabled"] is False
+    assert audit["reason"] == "NO_VERIFIED_PREGAME_MARKET"
+
+
+def test_market_anchor_preserves_model_majority_and_caps_consensus_influence():
+    home, away, audit = apply_market_consensus_anchor(7.0, 3.0, {
+        "provider": "TEST_BOOKS", "bookmaker_count": 8, "total_line": 8.0,
+        "home_implied_probability": .45, "away_implied_probability": .55,
+    }, "MLB")
+    assert audit["enabled"] is True
+    assert audit["total_weight"] == .4
+    assert home + away < 10.0
+    # A contradictory market tempers a large model edge but cannot blindly reverse it.
+    assert home > away
+    assert audit["anchored_home_probability"] < audit["model_home_probability_before"]
 
 
 def test_ui_registered_secret_is_encrypted_and_requires_same_master_key():
@@ -1628,6 +1772,46 @@ def test_mlb_opponent_residual_persists_after_strong_sample_shrinkage():
         versus_repeat["matchup_persistence_weight"] * versus_repeat["home"]["matchup"]
     )
     assert with_matchup > general_only
+
+
+def test_residual_calibration_flags_large_team_errors_and_widens_variance():
+    start = datetime(2026, 4, 1, 18, 30)
+    observations = [ResidualObservation(
+        game_id=index + 1, started_at=start + timedelta(days=index),
+        finalized_at=start + timedelta(days=index, hours=3),
+        home_team_id=1, away_team_id=2, home_expected=4.5, away_expected=4.5,
+        home_actual=10 if index % 2 == 0 else 0, away_actual=4,
+    ) for index in range(16)]
+    context = residual_context(
+        observations, 1, 3, date(2026, 8, 23), force_enabled=True, league="MLB",
+    )
+    assert context["home"]["offense_large_residual_team"] is True
+    assert context["home"]["offense_large_residual_games"] >= 8
+    assert context["home"]["offense_outlier_index"] > 1
+    assert context["outlier_analysis"]["home_scoring"]["large_residual_flag"] is True
+    assert context["home_variance_multiplier"] >= 1
+
+
+def test_matchup_residual_requires_sample_and_direction_consistency():
+    start = datetime(2026, 4, 1, 18, 30)
+    observations = [ResidualObservation(
+        game_id=index + 1, started_at=start + timedelta(days=index),
+        finalized_at=start + timedelta(days=index, hours=3),
+        home_team_id=1, away_team_id=2, home_expected=4.5, away_expected=4.5,
+        home_actual=7, away_actual=4,
+    ) for index in range(8)]
+    repeated = residual_context(
+        observations, 1, 2, date(2026, 8, 23), force_enabled=True, league="MLB",
+    )
+    assert repeated["home"]["matchup_residual_flag"] is True
+    assert repeated["home"]["matchup_residual_direction"] == "OVER_EXPECTED"
+    assert repeated["home"]["matchup_direction_consistency"] == 1
+
+    unseen = residual_context(
+        observations, 1, 3, date(2026, 8, 23), force_enabled=True, league="MLB",
+    )
+    assert unseen["home"]["matchup_residual_flag"] is False
+    assert unseen["home"]["matchup_residual_direction"] == "NO_SAMPLE"
 
 
 def test_league_probability_calibration_uses_only_results_final_before_first_pitch():

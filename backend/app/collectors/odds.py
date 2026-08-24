@@ -11,7 +11,7 @@ from backend.app.config import KST, settings
 
 
 class OddsClient:
-    """Optional structured market feed. It is comparison data and never used as a prediction feature."""
+    """Optional structured feed used for both comparison and conservative consensus anchoring."""
 
     def __init__(self, timeout: float = 20.0, transport: httpx.BaseTransport | None = None):
         self.base_url = "https://api.the-odds-api.com"

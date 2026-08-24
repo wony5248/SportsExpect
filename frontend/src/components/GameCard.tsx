@@ -62,7 +62,10 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const fullDistributionScore = p?.full_distribution_score
     ?? p?.score_estimates?.full_distribution
     ?? p?.score_estimates?.mode
-  const mostLikelyScore = fullDistributionScore ?? predictedScore
+  // The unconditional exact-score mode systematically collapses MLB games into adjacent
+  // one-run finals after ties are resolved. Use the distribution-aware representative for the
+  // headline and keep the honest exact-score mode in the detailed comparison below.
+  const headlineScore = meanScore ?? predictedScore ?? fullDistributionScore
   const closeGame = Boolean(p && Math.max(p.home_win_probability, p.away_win_probability) < .55)
   const scenarioBranches = p?.close_game_scenarios ?? p?.outcome_scores
   const awayWinScenario = scenarioBranches?.AWAY_WIN?.[0]
@@ -88,6 +91,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   // ties and close losses. Without a posted run line it cannot be compared fairly with the
   // other markets, so only a genuinely collected handicap enters the recommendation race.
   const recommendation = strongestRecommendation(picks, Boolean(handicap?.fromMarket))
+  const residual = p?.residual_calibration
   const requestPersonalAnalysis = async () => {
     if (!signedIn) { onRequireLogin(); return }
     setPersonalBusy(true); setPersonalError(null)
@@ -99,7 +103,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
       setPersonalBusy(false)
     }
   }
-  const resultComparison = isFinal ? completedGameComparison(game, p, expectedScore) : null
+  const resultComparison = isFinal ? completedGameComparison(game, p, meanScore ?? expectedScore) : null
   const isReplay = p?.origin === 'HISTORICAL_REPLAY'
   const evaluation = p?.evaluation
   const verdicts = isFinal && game.result && p && ranking ? marketVerdicts(p, game, ranking) : null
@@ -131,10 +135,12 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           </Box>}
         </Box>
         <TeamName team={game.home} side="HOME" />
-        {!isFinal && mostLikelyScore && <Box className="matchup-score">
-          <span>예측 점수</span>
-          <strong>{mostLikelyScore.away} <i>:</i> {mostLikelyScore.home}</strong>
-          <small>2만 회에서 가장 자주 나온 점수{mostLikelyScore.probability != null ? ` · ${pctFine(mostLikelyScore.probability)}` : ''}</small>
+        {!isFinal && headlineScore && <Box className="matchup-score">
+          <span>평균 예측 점수</span>
+          <strong>{stat(headlineScore.away, 1)} <i>:</i> {stat(headlineScore.home, 1)}</strong>
+          <small>{p?.market_calibration?.enabled
+            ? `Odds API ${p.market_calibration.bookmaker_count ?? 1}곳 합의값을 최대 ${stat(Math.max(p.market_calibration.total_weight ?? 0, p.market_calibration.probability_weight ?? 0) * 100, 0)}% 반영`
+            : '팀·선발·상대전적·구장·잔차를 반영한 전체 시뮬레이션 평균'}</small>
         </Box>}
       </Box>
       {game.status === 'LIVE' && <Box className="live-game-notice" role="status">
@@ -153,7 +159,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <Box className="result-comparison-grid">
           <Box className="result-score actual"><span>실제 최종</span><strong>{game.result.away_score} <i>:</i> {game.result.home_score}</strong><small>{game.away.name} : {game.home.name}</small></Box>
           {resultComparison ? <>
-            <Box className="result-score predicted"><span>가장 확률 높은 점수</span><strong>{stat(resultComparison.awayExpected, 0)} <i>:</i> {stat(resultComparison.homeExpected, 0)}</strong><small>{game.away.name} : {game.home.name}{p?.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
+            <Box className="result-score predicted"><span>경기 전 평균 예측</span><strong>{stat(resultComparison.awayExpected, 1)} <i>:</i> {stat(resultComparison.homeExpected, 1)}</strong><small>{game.away.name} : {game.home.name}{p?.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
             <Box className={`result-verdict ${resultComparison.verdictClass}`}><b>{resultComparison.verdict}</b><span>{resultComparison.favorite}</span><small>이 점수 기준 팀당 {stat(resultComparison.runsMae, 1)}점 차이</small></Box>
           </> : <Box className="result-verdict unavailable"><b>비교할 예측 없음</b><span>경기 시작 전에 저장해 둔 예측이 없습니다.</span></Box>}
         </Box>
@@ -194,10 +200,15 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           </Box>)}
         </Box>}
 
+        {!game.market && !isFinal && <Box className="market-data-status">
+          <b>실제 배당사 기준점 미수집</b>
+          <span>현재 핸디캡·언더오버 기준은 Odds API 값이 아니라 모델 분포가 계산한 공정선입니다.</span>
+        </Box>}
+
         <Box className="score-row">
           <Box className="primary"><span>평균 점수 · 2만 회 전체</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>평균 총점 {stat(statisticalExpectedTotal, 1)}점{battingLastGap ? ` · ${game.home.name}는 앞서면 9회말을 치지 않아 평균이 낮게 나옵니다` : ''}</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>전체 분포에서 가장 잦은 결말</span><strong>{stat(fullDistributionScore?.away, 0)} <i>:</i> {stat(fullDistributionScore?.home, 0)}</strong><small>승패 조건 없이 2만 회 전체에서 최다{fullDistributionScore?.probability != null ? ` · ${pctFine(fullDistributionScore.probability)}` : ''}</small></Box>
+          <Box><span>가장 잦은 정확 스코어 · 참고용</span><strong>{stat(fullDistributionScore?.away, 0)} <i>:</i> {stat(fullDistributionScore?.home, 0)}</strong><small>저득점 정수 조합으로 구조적으로 몰릴 수 있음{fullDistributionScore?.probability != null ? ` · 실제 비중 ${pctFine(fullDistributionScore.probability)}` : ''}</small></Box>
         </Box>
 
         {closeGame && awayWinScenario && homeWinScenario ? <Box className="branch-scores">
@@ -280,6 +291,29 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             <strong>{pct(outcome.probability)}</strong>
           </Box>)}
         </Box>}
+            {residual?.enabled && <>
+              <Typography variant="subtitle2">구단·상대전적 잔차 위험</Typography>
+              <Box className="market-comparison">
+                {(['away', 'home'] as const).map((side) => {
+                  const teamResidual = residual[side]
+                  const scoringRisk = residual.outlier_analysis?.[`${side}_scoring`]
+                  const matchupGames = teamResidual?.matchup_games ?? 0
+                  const matchupMean = teamResidual?.matchup_residual_mean_raw
+                  const matchupDirection = matchupMean == null || matchupGames === 0
+                    ? '표본 없음'
+                    : `${matchupMean >= 0 ? '+' : ''}${matchupMean.toFixed(1)}점`
+                  return <Box key={side}>
+                    <span>{game[side].name}</span>
+                    <strong>{scoringRisk?.large_residual_flag ? '대잔차 반복 감지' : '일반 변동 범위'}</strong>
+                    <small>득점 오차지수 {stat(teamResidual?.offense_outlier_index, 2)}배 · 수비 오차지수 {stat(teamResidual?.defense_outlier_index, 2)}배</small>
+                    <small>큰 득점 잔차 {teamResidual?.offense_large_residual_games ?? 0}/{teamResidual?.games ?? 0}경기</small>
+                    <small>이 상대 잔차 {matchupGames}경기 · 평균 {matchupDirection}{matchupGames > 0
+                      ? ` · 방향 일치 ${pct(teamResidual?.matchup_direction_consistency ?? 0)}` : ''}{teamResidual?.matchup_residual_flag ? ' · 반복 패턴' : ''}</small>
+                  </Box>
+                })}
+              </Box>
+              <Typography className="source-note">잔차는 경기 전 예측 대비 실제 득점 오차입니다. 양수는 예상보다 더 득점, 음수는 덜 득점했다는 뜻이며 상대 표본은 강하게 축소해 반영합니다. 대잔차 반복은 평균 점수를 곧바로 올리지 않고 우선 점수 분포를 넓힙니다.</Typography>
+            </>}
             <Typography variant="subtitle2">선발 매치업</Typography>
             <Box className="starter-grid">
               <Starter team={game.away} /><Starter team={game.home} />

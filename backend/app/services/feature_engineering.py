@@ -58,6 +58,7 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
     residual_home = residual.get("home") or {}
     residual_away = residual.get("away") or {}
     strength = context.get("team_strength") or {}
+    market = context.get("market") or {}
     pregame = context.get("pregame") or {}
     bullpen = pregame.get("bullpen") or {}
     schedule = pregame.get("schedule") or {}
@@ -131,6 +132,12 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         "head_to_head_diff": matchup[0],
         "head_to_head_run_diff": matchup[1],
         "head_to_head_games": matchup[2],
+        "market_available": bool(market.get("provider") or market.get("collected_at") or
+                                 int(market.get("bookmaker_count") or 0) > 0),
+        "market_total_line": _v(market.get("total_line"), 0.0),
+        "market_home_probability": _v(market.get("home_implied_probability"), .5),
+        "market_home_spread": _v(market.get("home_spread"), 0.0),
+        "market_bookmaker_count": int(market.get("bookmaker_count") or 0),
         "home_starter_opponent_era": home_matchup_era,
         "away_starter_opponent_era": away_matchup_era,
         "home_starter_opponent_weight": home_matchup_weight,
@@ -231,6 +238,14 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         "away_structure_residual_games": int(residual_away.get("structure_games") or 0),
         "home_structure_residual": float(residual_home.get("structure") or 0.0),
         "away_structure_residual": float(residual_away.get("structure") or 0.0),
+        "home_offense_residual_outlier_index": float(residual_home.get("offense_outlier_index") or 1.0),
+        "away_offense_residual_outlier_index": float(residual_away.get("offense_outlier_index") or 1.0),
+        "home_defense_residual_outlier_index": float(residual_home.get("defense_outlier_index") or 1.0),
+        "away_defense_residual_outlier_index": float(residual_away.get("defense_outlier_index") or 1.0),
+        "home_matchup_residual_consistency": float(residual_home.get("matchup_direction_consistency") or 0.0),
+        "away_matchup_residual_consistency": float(residual_away.get("matchup_direction_consistency") or 0.0),
+        "home_large_residual_flag": bool((residual.get("outlier_analysis") or {}).get("home_scoring", {}).get("large_residual_flag")),
+        "away_large_residual_flag": bool((residual.get("outlier_analysis") or {}).get("away_scoring", {}).get("large_residual_flag")),
     }
 
 

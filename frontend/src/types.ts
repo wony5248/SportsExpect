@@ -83,6 +83,49 @@ export type Prediction = {
     schedule?: Record<'home' | 'away', { games_last_3d?: number; consecutive_days?: number; travel_km?: number | null; fatigue_index?: number }>
     availability?: { weather?: boolean; bullpen?: boolean; schedule?: boolean }
   }
+  residual_calibration?: {
+    enabled: boolean
+    policy_version?: number
+    league_residual_sd?: number
+    home_variance_multiplier?: number
+    away_variance_multiplier?: number
+    source_game_count?: number
+    method?: string
+    home?: ResidualTeamProjection
+    away?: ResidualTeamProjection
+    outlier_analysis?: Partial<Record<'home_scoring' | 'away_scoring', {
+      combined_outlier_index?: number
+      large_residual_flag?: boolean
+      offense_large_residual_team?: boolean
+      opponent_defense_large_residual_team?: boolean
+      matchup_residual_flag?: boolean
+      matchup_games?: number
+      matchup_direction?: string
+      matchup_direction_consistency?: number
+    }>>
+  }
+  market_calibration?: {
+    enabled: boolean
+    method?: string
+    reason?: string
+    provider?: string | null
+    collected_at?: string | null
+    bookmaker_count?: number
+    total_line?: number | null
+    home_spread?: number | null
+    market_home_probability?: number | null
+    market_probability_source?: string | null
+    total_weight?: number
+    probability_weight?: number
+    model_home_before?: number
+    model_away_before?: number
+    model_total_before?: number
+    model_home_probability_before?: number
+    anchored_home_probability?: number
+    anchored_home?: number
+    anchored_away?: number
+    anchored_total?: number
+  }
   bullpen_usage?: Record<'home' | 'away', {
     starter_innings: number
     starter_share: number
@@ -199,6 +242,31 @@ export type Prediction = {
   }
   created_at: string
   disclaimer: string
+}
+
+export type ResidualTeamProjection = {
+  games?: number
+  offense?: number
+  defense?: number
+  offense_residual_mae?: number
+  defense_residual_mae?: number
+  offense_large_residual_games?: number
+  defense_large_residual_games?: number
+  offense_large_residual_share?: number
+  defense_large_residual_share?: number
+  offense_outlier_index?: number
+  defense_outlier_index?: number
+  offense_large_residual_team?: boolean
+  defense_large_residual_team?: boolean
+  matchup?: number
+  matchup_games?: number
+  matchup_residual_mean_raw?: number
+  matchup_residual_mae?: number
+  matchup_large_residual_games?: number
+  matchup_large_residual_share?: number
+  matchup_direction_consistency?: number
+  matchup_residual_direction?: string
+  matchup_residual_flag?: boolean
 }
 
 export type SimulatedScore = {

@@ -60,6 +60,9 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .matchup-score strong i { padding: 0 3px; color: #55766a; font-style: normal; }
 .matchup-score small { color: #68847a; font-size: .53rem; line-height: 1.35; }
 .probability-block { padding: 18px; background: rgba(3,16,12,.32); border-radius: 14px; }
+.market-data-status { margin: 10px 0 14px; padding: 10px 12px; display: grid; gap: 3px; border: 1px solid rgba(246,200,107,.2); border-radius: 10px; background: rgba(246,200,107,.055); }
+.market-data-status b { color: #e4bd70; font-size: .68rem; }
+.market-data-status span { color: #8fa098; font-size: .62rem; line-height: 1.45; }
 .live-game-notice { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 11px 13px; border: 1px solid rgba(242,91,91,.22); border-radius: 11px; background: rgba(242,91,91,.075); }
 .live-game-notice b { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; color: #ffaaa2; font-size: .76rem; }
 .live-game-notice b i { width: 7px; height: 7px; border-radius: 50%; background: #f25b5b; box-shadow: 0 0 0 4px rgba(242,91,91,.12); animation: live-pulse 1.6s ease-in-out infinite; }

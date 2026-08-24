@@ -15,7 +15,7 @@ from backend.app.models import Game, GameResult, Prediction
 # The residual layer is active for forecasts dated August 23, 2026 and later. Earlier
 # predictions remain immutable, but their leakage-safe pregame baselines may seed the EWMA.
 RESIDUAL_FEATURE_START_DATE = date(2026, 8, 23)
-RESIDUAL_POLICY_VERSION = 3
+RESIDUAL_POLICY_VERSION = 4
 RESIDUAL_ENABLED_LEAGUES = {"KBO", "MLB"}
 EWMA_HALF_LIFE_GAMES = 12.0
 RESIDUAL_WINSOR_LIMIT = 6.0
@@ -31,6 +31,9 @@ RESIDUAL_MEAN_REVERSION_WEIGHT = -.50
 MLB_GENERAL_MEAN_REVERSION_WEIGHT = -.35
 MLB_MATCHUP_PERSISTENCE_WEIGHT = .15
 MLB_STRUCTURE_PERSISTENCE_WEIGHT = .08
+LARGE_RESIDUAL_MIN_GAMES = 8
+MATCHUP_DIAGNOSTIC_MIN_GAMES = 4
+LARGE_RESIDUAL_SD_MULTIPLIER = 1.25
 
 
 @dataclass(frozen=True)
@@ -160,6 +163,14 @@ def residual_context(observations: list[ResidualObservation], home_team_id: int,
     away_adjustment = _clip(away_adjustment, -MAX_RUN_ADJUSTMENT, MAX_RUN_ADJUSTMENT)
     home_volatility = _clip(math.sqrt(home["offense_volatility"] * away["defense_volatility"]), .82, 1.35)
     away_volatility = _clip(math.sqrt(away["offense_volatility"] * home["defense_volatility"]), .82, 1.35)
+    home_outlier = _scoring_outlier_context(home, away)
+    away_outlier = _scoring_outlier_context(away, home)
+    # A club that repeatedly produces unusually large misses should widen the score
+    # distribution, not automatically receive a large directional run correction. This avoids
+    # turning a handful of blowouts into a false mean edge while still allowing more multi-run
+    # outcomes when either the offense or opposing prevention has been hard to predict.
+    home_volatility = _apply_outlier_variance_floor(home_volatility, home_outlier)
+    away_volatility = _apply_outlier_variance_floor(away_volatility, away_outlier)
     return {
         "enabled": True,
         "policy_version": RESIDUAL_POLICY_VERSION,
@@ -173,13 +184,18 @@ def residual_context(observations: list[ResidualObservation], home_team_id: int,
         "away_variance_multiplier": round(away_volatility ** 2, 6),
         "home": _public_projection(home),
         "away": _public_projection(away),
+        "outlier_analysis": {
+            "home_scoring": _public_projection(home_outlier),
+            "away_scoring": _public_projection(away_outlier),
+        },
         "league": league,
         "mean_reversion_weight": mean_reversion_weight,
         "matchup_persistence_weight": matchup_weight,
         "structure_persistence_weight": structure_weight,
         "regime": active_regime,
         "method": ("league-specific team offense/defense residual EWMA + venue split + "
-                   "strongly shrunk opponent-specific and game-structure residual"),
+                   "large-residual frequency/MAE diagnostics + strongly shrunk, direction-"
+                   "checked opponent-specific and game-structure residual"),
     }
 
 
@@ -218,7 +234,7 @@ def baseline_expected_runs(prediction: Prediction) -> tuple[float, float]:
 
 def _team_projection(observations: list[ResidualObservation], team_id: int, opponent_id: int,
                      target_is_home: bool, league_sd: float,
-                     regime: dict[str, str] | None = None) -> dict[str, float | int]:
+                     regime: dict[str, str] | None = None) -> dict[str, float | int | bool | str]:
     offense_all: list[float] = []
     defense_all: list[float] = []
     offense_venue: list[float] = []
@@ -268,6 +284,9 @@ def _team_projection(observations: list[ResidualObservation], team_id: int, oppo
     # samples this makes the multiplier exactly neutral instead of treating one blowout as a trait.
     off_ratio = _variance_ratio(off_sd, len(offense_all), league_sd)
     def_ratio = _variance_ratio(def_sd, len(defense_all), league_sd)
+    offense_outliers = _residual_outlier_diagnostics(offense_all, league_sd)
+    defense_outliers = _residual_outlier_diagnostics(defense_all, league_sd)
+    matchup_outliers = _matchup_residual_diagnostics(matchup, matchup_mean, league_sd)
     return {
         "offense": offense_signal,
         "defense": defense_signal,
@@ -281,6 +300,18 @@ def _team_projection(observations: list[ResidualObservation], team_id: int, oppo
         "venue_games": len(offense_venue),
         "matchup_games": len(matchup),
         "structure_games": len(structure),
+        "large_residual_threshold": offense_outliers["threshold"],
+        "offense_residual_mae": offense_outliers["mae"],
+        "defense_residual_mae": defense_outliers["mae"],
+        "offense_large_residual_games": offense_outliers["large_games"],
+        "defense_large_residual_games": defense_outliers["large_games"],
+        "offense_large_residual_share": offense_outliers["large_share"],
+        "defense_large_residual_share": defense_outliers["large_share"],
+        "offense_outlier_index": offense_outliers["index"],
+        "defense_outlier_index": defense_outliers["index"],
+        "offense_large_residual_team": offense_outliers["flag"],
+        "defense_large_residual_team": defense_outliers["flag"],
+        **matchup_outliers,
     }
 
 
@@ -320,7 +351,84 @@ def _variance_ratio(sd: float, games: int, league_sd: float) -> float:
     return _clip((1 - weight) + weight * raw, .67, 1.82)
 
 
-def _public_projection(value: dict[str, float | int]) -> dict[str, float | int]:
+def _residual_outlier_diagnostics(values: list[float], league_sd: float) -> dict[str, float | int | bool]:
+    threshold = max(2.5, LARGE_RESIDUAL_SD_MULTIPLIER * league_sd)
+    if not values:
+        return {"threshold": threshold, "mae": 0.0, "large_games": 0,
+                "large_share": 0.0, "index": 1.0, "flag": False}
+    recency_mae, _ = _ewma([abs(value) for value in values])
+    expected_mae = max(1e-6, league_sd * math.sqrt(2 / math.pi))
+    raw_index = recency_mae / expected_mae
+    weight = len(values) / (len(values) + 16)
+    index = _clip((1 - weight) + weight * raw_index, .67, 1.82)
+    large_games = sum(abs(value) >= threshold for value in values)
+    large_share = large_games / len(values)
+    # The league-normal tail above 1.25 SD is already about one game in five. Requiring both a
+    # raised shrunk MAE and at least a quarter of games (or a very high tail share) avoids
+    # labelling ordinary baseball noise as a persistent club characteristic.
+    flag = len(values) >= LARGE_RESIDUAL_MIN_GAMES and (
+        (index >= 1.15 and large_share >= .25) or large_share >= .40
+    )
+    return {"threshold": threshold, "mae": recency_mae, "large_games": large_games,
+            "large_share": large_share, "index": index, "flag": flag}
+
+
+def _matchup_residual_diagnostics(values: list[float], signed_mean: float,
+                                  league_sd: float) -> dict[str, float | int | bool | str]:
+    base = _residual_outlier_diagnostics(values, league_sd)
+    games = len(values)
+    positive = sum(value > 0 for value in values)
+    negative = sum(value < 0 for value in values)
+    consistency = max(positive, negative) / games if games else 0.0
+    direction = "NO_SAMPLE"
+    if games and (consistency < .70 or abs(signed_mean) < .50):
+        direction = "MIXED"
+    elif signed_mean > 0:
+        direction = "OVER_EXPECTED"
+    elif signed_mean < 0:
+        direction = "UNDER_EXPECTED"
+    flag = games >= MATCHUP_DIAGNOSTIC_MIN_GAMES and consistency >= .70 and (
+        abs(signed_mean) >= .75 or float(base["large_share"]) >= .35
+    )
+    return {
+        "matchup_residual_mean_raw": signed_mean,
+        "matchup_residual_mae": base["mae"],
+        "matchup_large_residual_games": base["large_games"],
+        "matchup_large_residual_share": base["large_share"],
+        "matchup_direction_consistency": consistency,
+        "matchup_residual_direction": direction,
+        "matchup_residual_flag": flag,
+    }
+
+
+def _scoring_outlier_context(offense: dict[str, Any], opponent: dict[str, Any]) -> dict[str, Any]:
+    combined_index = .70 * float(offense["offense_outlier_index"]) + .30 * float(
+        opponent["defense_outlier_index"]
+    )
+    flag = bool(offense["offense_large_residual_team"] or
+                opponent["defense_large_residual_team"] or
+                offense["matchup_residual_flag"])
+    return {
+        "combined_outlier_index": combined_index,
+        "large_residual_flag": flag,
+        "offense_large_residual_team": bool(offense["offense_large_residual_team"]),
+        "opponent_defense_large_residual_team": bool(opponent["defense_large_residual_team"]),
+        "matchup_residual_flag": bool(offense["matchup_residual_flag"]),
+        "matchup_games": int(offense["matchup_games"]),
+        "matchup_direction": offense["matchup_residual_direction"],
+        "matchup_direction_consistency": float(offense["matchup_direction_consistency"]),
+    }
+
+
+def _apply_outlier_variance_floor(volatility: float, analysis: dict[str, Any]) -> float:
+    if not analysis["large_residual_flag"]:
+        return volatility
+    excess = max(0.0, float(analysis["combined_outlier_index"]) - 1.0)
+    floor = _clip(1.0 + .45 * excess, 1.0, 1.20)
+    return _clip(max(volatility, floor), .82, 1.35)
+
+
+def _public_projection(value: dict[str, Any]) -> dict[str, Any]:
     return {key: (round(item, 6) if isinstance(item, float) else item) for key, item in value.items()}
 
 
