@@ -38,6 +38,15 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             joinedload(Game.home_team), joinedload(Game.away_team),
         ).where(Game.league == league, Game.status == "FINAL").order_by(Game.start_at, Game.id)
     ).all()
+    # Reconstructing one team's season currently means scanning every team's games for that
+    # year and filtering by team id. Splitting the shared history by (team, year) once turns that
+    # league-wide scan into a scan of just that team's own games — for MLB, roughly 30x less work
+    # per candidate game, since `history` holds every team's games but a season is ~162 per team.
+    team_history: dict[tuple[int, int], list[tuple[Game, GameResult]]] = defaultdict(list)
+    for prior_game, prior_result in history:
+        year = prior_game.game_date.year
+        team_history[(prior_game.home_team_id, year)].append((prior_game, prior_result))
+        team_history[(prior_game.away_team_id, year)].append((prior_game, prior_result))
     residual_history = TeamResidualHistory.from_session(session, league)
     strength_history = TeamStrengthHistory.from_session(session, league)
     archived: dict[int, list[GameStarter]] = defaultdict(list)
@@ -93,10 +102,13 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             skipped_existing += 1
             continue
         outdated_replays_refreshed += int(bool(existing_replays))
-        prior = [(prior_game, prior_result) for prior_game, prior_result in history
-                 if prior_game.game_date.year == game.game_date.year and _game_before(prior_game, game)]
-        home = _reconstructed_team_stat(game.home_team, game, prior)
-        away = _reconstructed_team_stat(game.away_team, game, prior)
+        year = game.game_date.year
+        home_prior = [row for row in team_history.get((game.home_team_id, year), [])
+                     if _game_before(row[0], game)]
+        away_prior = [row for row in team_history.get((game.away_team_id, year), [])
+                     if _game_before(row[0], game)]
+        home = _reconstructed_team_stat(game.home_team, game, home_prior)
+        away = _reconstructed_team_stat(game.away_team, game, away_prior)
         cold_start = home.games < 5 or away.games < 5
         cutoff = game.start_at
         pitchers = session.scalars(select(PitcherStat).where(
@@ -106,12 +118,13 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             LineupEntry.game_id == game.id, LineupEntry.collected_at <= cutoff,
         ).order_by(LineupEntry.side, LineupEntry.batting_order)).all()
         by_side = {pitcher.side: pitcher for pitcher in pitchers}
-        league_average_runs = _league_average(prior, league)
         # Seasons the service did not run through have no pre-game PitcherStat rows at all. The
         # archive keeps the announced starter with strictly-prior totals, which is the same
-        # information a forecaster had at first pitch.
+        # information a forecaster had at first pitch. starter_view's second argument is unused
+        # (kept only for call-site compatibility), so there is nothing worth scanning the whole
+        # league's scores for here.
         for record in archived.get(game.id, []):
-            by_side.setdefault(record.side, starter_view(record, league_average_runs))
+            by_side.setdefault(record.side, starter_view(record, 0.0))
         market = session.scalar(select(MarketSnapshot).where(
             MarketSnapshot.game_id == game.id,
             MarketSnapshot.collected_at <= cutoff,
@@ -140,12 +153,16 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             "official_metric": False,
             "note": "현재 코드의 회고 재현이며 당시 실시간 저장 예측은 아닙니다.",
         }
+        # TeamStrengthHistory already scans this league's prior results (leakage-safe, cutoff at
+        # this game's start) to build its ratings, and computes the same league-wide run average
+        # along the way. Reusing it here avoids paying for that full-league scan a second time.
+        team_strength_context = strength_history.context_for(game)
         prediction_result = predict_game(
             game, home, away, by_side.get("home"), by_side.get("away"), lineups,
             {"home_games_today": 1, "away_games_today": 1,
-             "league_average_runs": league_average_runs,
+             "league_average_runs": team_strength_context["league_average_runs"],
              "team_residuals": residual_history.context_for(game),
-             "team_strength": strength_history.context_for(game),
+             "team_strength": team_strength_context,
              "probability_calibration": probability_history.context_for(game),
              "market": market_context},
             model_runtime=None, bullpens={}, lineup_tables={},
@@ -240,11 +257,6 @@ def _reconstructed_team_stat(team: Team, target: Game,
         avg=None, obp=None, slg=None, ops=None, home_runs=None, walks=None,
         strikeouts=None, era=None, whip=None, recent=recent,
     )
-
-
-def _league_average(history: list[tuple[Game, GameResult]], league: str) -> float:
-    scores = [score for _, result in history for score in (result.away_score, result.home_score)]
-    return sum(scores) / len(scores) if scores else (5.15 if league == "KBO" else 4.45)
 
 
 def _game_before(candidate: Game, target: Game) -> bool:
