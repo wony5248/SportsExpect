@@ -331,6 +331,7 @@ def build_score_estimates(top_scores: list[dict[str, Any]], primary_score: dict[
             "selection_score": primary_score.get("selection_score"),
             "population_coverage": primary_score.get("population_coverage"),
             "projects_favorite_cover": primary_score.get("projects_favorite_cover"),
+            "run_line_conditioning": primary_score.get("run_line_conditioning"),
             "favorite_cover_probability_given_win": primary_score.get("favorite_cover_probability_given_win"),
             "headline_total_line": primary_score.get("headline_total_line"),
             "headline_total_pick": primary_score.get("headline_total_pick"),

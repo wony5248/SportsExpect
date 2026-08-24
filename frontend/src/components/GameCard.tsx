@@ -746,8 +746,10 @@ function representativeSummary(score: NonNullable<Game['prediction']>['primary_s
     parts.push(`${score.headline_total_pick === 'OVER' ? '오버' : '언더'} ${score.headline_total_line} 방향`)
   }
   if (score.favorite_cover_probability_given_win != null) {
-    parts.push(score.projects_favorite_cover
-      ? `강한 다점차 신호 · 승리 시 2점차+ ${pct(score.favorite_cover_probability_given_win)}`
+    parts.push(score.run_line_conditioning === 'UNCONDITIONAL_COVER_MAJORITY'
+      ? `마핸 우세 표본만 · 승리 시 2점차+ ${pct(score.favorite_cover_probability_given_win)}`
+      : score.projects_favorite_cover
+      ? `강한 조건부 다점차 · 승리 시 2점차+ ${pct(score.favorite_cover_probability_given_win)}`
       : `보수적 1점차 · 승리 시 2점차+ ${pct(score.favorite_cover_probability_given_win)}`)
   }
   if (score.scenario_probability != null) parts.push(`전체 분포 중 조건 일치 ${pct(score.scenario_probability)}`)

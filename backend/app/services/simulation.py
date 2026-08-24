@@ -401,7 +401,16 @@ def _coherent_scenario_score_projection(
         handicap["home_minus_1_5"] if home_favored else handicap["away_minus_1_5"]
     )
     favorite_cover_given_win = min(1.0, favorite_cover_probability / max(favorite_win_probability, 1e-9))
-    project_cover = favorite_cover_given_win >= HEADLINE_CONDITIONAL_COVER_THRESHOLD
+    unconditional_cover_majority = favorite_cover_probability >= .50
+    project_cover = (
+        unconditional_cover_majority
+        or favorite_cover_given_win >= HEADLINE_CONDITIONAL_COVER_THRESHOLD
+    )
+    run_line_conditioning = (
+        "UNCONDITIONAL_COVER_MAJORITY" if unconditional_cover_majority else
+        "WINNER_CONDITIONAL_COVER_SIGNAL" if project_cover else
+        "ONE_RUN_CONSERVATIVE"
+    )
     line = float(headline_total_line) if headline_total_line is not None and math.isfinite(
         float(headline_total_line)
     ) else _fair_total_line(total_counts, simulations)
@@ -498,6 +507,7 @@ def _coherent_scenario_score_projection(
         "favorite_cover_probability": round(favorite_cover_probability, 4),
         "favorite_cover_probability_given_win": round(favorite_cover_given_win, 4),
         "projects_favorite_cover": project_cover,
+        "run_line_conditioning": run_line_conditioning,
         "headline_total_line": line,
         "headline_total_pick": total_pick,
         "headline_over_probability": round(total_probabilities["over"], 4),

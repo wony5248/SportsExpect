@@ -1051,6 +1051,8 @@ def test_integer_projection_uses_full_distribution_and_respects_run_line_majorit
     primary = strong["projected_score"]
     assert primary["population_coverage"] == 1.0
     assert primary["projects_favorite_cover"] is True
+    assert primary["favorite_cover_probability"] >= 0.5
+    assert primary["run_line_conditioning"] == "UNCONDITIONAL_COVER_MAJORITY"
     assert primary["home"] - primary["away"] >= 2
     assert len(strong["projected_score_candidates"]) >= 3
     assert all(score["selection_method"] == "COHERENT_BAYES_MEDIAN_V3"
@@ -1063,6 +1065,8 @@ def test_integer_projection_uses_full_distribution_and_respects_run_line_majorit
                        else close_primary["away"] - close_primary["home"])
     expected_minimum = 2 if close_primary["projects_favorite_cover"] else 1
     assert favorite_margin >= expected_minimum
+    if close_primary["favorite_cover_probability"] < 0.5:
+        assert close_primary["run_line_conditioning"] != "UNCONDITIONAL_COVER_MAJORITY"
 
 
 @pytest.mark.parametrize("home_expected,away_expected,total_line", [

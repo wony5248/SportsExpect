@@ -173,6 +173,7 @@ export type SimulatedScore = {
   selection_score?: number | null
   population_coverage?: number
   projects_favorite_cover?: boolean
+  run_line_conditioning?: 'UNCONDITIONAL_COVER_MAJORITY' | 'WINNER_CONDITIONAL_COVER_SIGNAL' | 'ONE_RUN_CONSERVATIVE'
   favorite_cover_probability?: number
   favorite_cover_probability_given_win?: number
   headline_total_line?: number
