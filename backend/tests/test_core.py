@@ -53,6 +53,7 @@ from pathlib import Path
 from backend.app.services import prediction as prediction_module
 from backend.app.services.model_lifecycle import (_coherent_run_means, _promotion_decision,
                                                   _operating_prediction, _validation_partition,
+                                                  _restore_versioned_baseline,
                                                   predict_with_runtime)
 from backend.app.services.historical_replay import run_historical_replay
 from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
@@ -1011,6 +1012,13 @@ def test_model_training_uses_audited_historical_holdout_until_live_sample_is_lar
     assert len(validation) == 40
     assert all(row["origin"] == "LIVE_PREGAME" for row in validation)
     assert source == "LIVE_PREGAME_CHRONOLOGICAL_HOLDOUT"
+
+
+def test_distribution_collapse_rollback_disables_all_learned_champions():
+    registry = SimpleNamespace(champion_model_version_id=22, previous_model_version_id=11)
+    _restore_versioned_baseline(registry, failed_id=22)
+    assert registry.champion_model_version_id is None
+    assert registry.previous_model_version_id == 22
 
 
 def test_lifecycle_scores_candidates_through_the_operating_simulation_recipe():

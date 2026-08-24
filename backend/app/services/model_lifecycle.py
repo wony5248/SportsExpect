@@ -514,8 +514,7 @@ def _maybe_rollback_compressed_replay_champion(session: Session, registry: Model
     ):
         return None
     failed_id = registry.champion_model_version_id
-    registry.champion_model_version_id = registry.previous_model_version_id
-    registry.previous_model_version_id = failed_id
+    _restore_versioned_baseline(registry, failed_id)
     registry.promoted_at = now
     session.add(ModelLifecycleEvent(
         league=registry.league, event_type="ROLLED_BACK", candidate_model_version_id=failed_id,
@@ -525,6 +524,18 @@ def _maybe_rollback_compressed_replay_champion(session: Session, registry: Model
     ))
     session.flush()
     return "ROLLED_BACK_DISTRIBUTION_COLLAPSE"
+
+
+def _restore_versioned_baseline(registry: ModelRegistry, failed_id: int) -> None:
+    """Disable a collapsed replay champion instead of swapping between learned models.
+
+    The audit compares the champion against the versioned baseline, so the safe rollback target
+    is that baseline (represented by a null champion).  Restoring ``previous_model_version_id``
+    could reactivate another replay-trained champion and make successive lifecycle runs oscillate
+    forever between two models that both fail the same distribution guard.
+    """
+    registry.champion_model_version_id = None
+    registry.previous_model_version_id = failed_id
 
 
 def _maybe_rollback(session: Session, registry: ModelRegistry, samples: list[dict[str, Any]], now: datetime) -> str | None:
