@@ -115,6 +115,25 @@ def evaluate_candidate(session: Session, league: str) -> dict[str, Any]:
         "would_promote": promoted, "reason": reason,
         "policy": POLICY["promotion"],
         "starter_feature_weights": starter_weights,
+        "constant_training_features": _constant_features(train),
+    }
+
+
+def _constant_features(train: list[dict[str, Any]]) -> dict[str, Any]:
+    """Inputs with no variance across the training rows.
+
+    A standardized fit cannot learn from a column that never moves: its scale is forced to 1 and
+    every standardized value is 0, so the coefficient stays exactly 0. Reporting these separates
+    "the data says this does not matter" from "this never reached the trainer".
+    """
+    matrix = np.vstack([_feature_values(row["features"], row["base_home_runs"], row["base_away_runs"])
+                        for row in train])
+    spread = matrix.std(axis=0)
+    constant = [name for name, value in zip(TRAINABLE_FEATURES, spread, strict=True) if value < 1e-9]
+    return {
+        "count": len(constant),
+        "of_total": len(TRAINABLE_FEATURES),
+        "names": constant,
     }
 
 
