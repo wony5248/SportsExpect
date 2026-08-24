@@ -62,6 +62,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const fullDistributionScore = p?.full_distribution_score
     ?? p?.score_estimates?.full_distribution
     ?? p?.score_estimates?.mode
+  const mostLikelyScore = fullDistributionScore ?? predictedScore
   const closeGame = Boolean(p && Math.max(p.home_win_probability, p.away_win_probability) < .55)
   const scenarioBranches = p?.close_game_scenarios ?? p?.outcome_scores
   const awayWinScenario = scenarioBranches?.AWAY_WIN?.[0]
@@ -81,10 +82,12 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
     && (meanScore.home > meanScore.away) !== (p.home_win_probability >= p.away_win_probability))
   const ranking = p && coherent ? rankedOutcomes(p, game, isFinal) : null
   const marginShape = p && coherent ? marginBuckets(p) : null
-  const topOutcome = ranking?.outcomes[0]
   const handicap = p && coherent ? handicapSides(p, game) : null
   const picks = p && coherent && ranking && handicap ? marketPicks(p, game, ranking, handicap) : null
-  const recommendation = strongestPick(picks)
+  // A fallback +1.5 is an easier event than a straight win because it includes outright wins,
+  // ties and close losses. Without a posted run line it cannot be compared fairly with the
+  // other markets, so only a genuinely collected handicap enters the recommendation race.
+  const recommendation = strongestRecommendation(picks, Boolean(handicap?.fromMarket))
   const requestPersonalAnalysis = async () => {
     if (!signedIn) { onRequireLogin(); return }
     setPersonalBusy(true); setPersonalError(null)
@@ -122,12 +125,17 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <Box className="versus">
           <span>VS</span><small>{game.league}</small>
           {!isFinal && recommendation && recommendation.probability != null && <Box className="matchup-recommendation">
-            <em>추천 · {recommendation.market}</em>
+            <em>{handicap?.fromMarket ? '전체 픽 최고 확률' : '추천 · 승패/총점'}</em>
             <b>{recommendation.pick}</b>
             <i>{recommendation.line ? `${recommendation.line} · ` : ''}{pct(recommendation.probability)}</i>
           </Box>}
         </Box>
         <TeamName team={game.home} side="HOME" />
+        {!isFinal && mostLikelyScore && <Box className="matchup-score">
+          <span>예측 점수</span>
+          <strong>{mostLikelyScore.away} <i>:</i> {mostLikelyScore.home}</strong>
+          <small>2만 회에서 가장 자주 나온 점수{mostLikelyScore.probability != null ? ` · ${pctFine(mostLikelyScore.probability)}` : ''}</small>
+        </Box>}
       </Box>
       {game.status === 'LIVE' && <Box className="live-game-notice" role="status">
         <b><i aria-hidden="true" />경기 중</b>
@@ -596,6 +604,8 @@ function marketPicks(p: NonNullable<Game['prediction']>, game: Game,
     const takeMinus = handicap.minusProbability >= handicap.plusProbability
     const marketFavoriteMargin = margin == null ? null : handicap.homeMinus ? margin : -margin
     const pushed = marketFavoriteMargin === handicap.runLine
+    const plusTeamWinProbability = handicap.homeMinus ? p.away_win_probability : p.home_win_probability
+    const closeLossOrTieProbability = Math.max(0, handicap.plusProbability - plusTeamWinProbability)
     picks.push({
       key: 'handicap',
       market: '핸디캡',
@@ -604,7 +614,9 @@ function marketPicks(p: NonNullable<Game['prediction']>, game: Game,
       probability: takeMinus ? handicap.minusProbability : handicap.plusProbability,
       hit: marketFavoriteMargin == null || pushed ? undefined
         : takeMinus ? marketFavoriteMargin > handicap.runLine : marketFavoriteMargin < handicap.runLine,
-      note: handicap.fromMarket ? '실제 배당 기준점 · 전체 2만 회 기준' : '핸디 배당 없어 모델 1.5 기준 · 전체 2만 회 기준',
+      note: takeMinus
+        ? `${handicap.minimumMargin}점차 이상 승리 확률 · ${handicap.fromMarket ? '실제 배당' : '모델 1.5'} 기준`
+        : `팀 승리 ${pct(plusTeamWinProbability)} + 접전 보호 ${pct(closeLossOrTieProbability)} · ${handicap.fromMarket ? '실제 배당' : '모델 1.5'} 기준`,
     })
   }
 
@@ -625,9 +637,9 @@ function marketPicks(p: NonNullable<Game['prediction']>, game: Game,
   return picks
 }
 
-function strongestPick(picks: MarketPick[] | null): MarketPick | null {
+function strongestRecommendation(picks: MarketPick[] | null, includeHandicap: boolean): MarketPick | null {
   return (picks ?? []).reduce<MarketPick | null>((best, pick) => {
-    if (pick.probability == null) return best
+    if (pick.probability == null || (!includeHandicap && pick.key === 'handicap')) return best
     return !best || best.probability == null || pick.probability > best.probability ? pick : best
   }, null)
 }

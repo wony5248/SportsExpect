@@ -52,6 +52,11 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .matchup-recommendation em { color: #7ee7b8; font-size: .52rem; font-style: normal; font-weight: 800; letter-spacing: 0; }
 .matchup-recommendation b { color: #dcebe4; font-size: .62rem; line-height: 1.25; word-break: keep-all; overflow-wrap: break-word; }
 .matchup-recommendation i { color: #8fb0a2; font-size: .55rem; font-style: normal; font-weight: 700; font-variant-numeric: tabular-nums; }
+.matchup-score { grid-column: 1 / -1; justify-self: center; min-width: 190px; margin-top: 16px; padding: 8px 18px; display: grid; grid-template-columns: auto auto; align-items: center; gap: 1px 12px; border: 1px solid rgba(126,231,184,.28); border-radius: 11px; background: rgba(3,16,12,.36); box-shadow: 0 8px 22px rgba(0,0,0,.12); }
+.matchup-score span { color: #7ee7b8; font-size: .64rem; font-weight: 850; }
+.matchup-score strong { grid-row: 1 / 3; grid-column: 2; color: #edf7f2; font-family: Georgia, serif; font-size: 1.48rem; line-height: 1; font-variant-numeric: tabular-nums; }
+.matchup-score strong i { padding: 0 3px; color: #55766a; font-style: normal; }
+.matchup-score small { color: #68847a; font-size: .53rem; }
 .probability-block { padding: 18px; background: rgba(3,16,12,.32); border-radius: 14px; }
 .live-game-notice { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 11px 13px; border: 1px solid rgba(242,91,91,.22); border-radius: 11px; background: rgba(242,91,91,.075); }
 .live-game-notice b { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; color: #ffaaa2; font-size: .76rem; }
@@ -313,6 +318,8 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .matchup .team h5 { font-size: 1.12rem; line-height: 1.2; }
   .matchup-recommendation { width: 82px; padding: 5px 4px; }
   .matchup-recommendation b { font-size: .56rem; }
+  .matchup-score { min-width: 174px; margin-top: 13px; padding: 7px 13px; gap: 1px 9px; }
+  .matchup-score strong { font-size: 1.28rem; }
   .team span, .team-starter b { word-break: keep-all; overflow-wrap: break-word; }
   .probability + small { word-break: keep-all; overflow-wrap: break-word; line-height: 1.3; }
   .probability-block { padding: 15px 13px; }
