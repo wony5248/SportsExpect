@@ -1490,7 +1490,7 @@ def test_league_probability_calibration_uses_only_results_final_before_first_pit
     assert context["sample_count"] == 35
     assert context["future_results_used"] == 0
     # Repeated 64% forecasts that actually won only about half the time must be pulled inward.
-    assert calibrated_probability(.64, context) < .64
+    assert calibrated_probability(.64, context) < .55
 
 
 def test_calibrated_winner_branch_reweighting_recomputes_one_coherent_population():

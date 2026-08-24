@@ -13,7 +13,8 @@ from backend.app.models import Game, GameResult, Prediction
 
 MIN_CALIBRATION_SAMPLES = 30
 MAX_CALIBRATION_SAMPLES = 1000
-CALIBRATION_METHOD = "LEAGUE_WALK_FORWARD_PLATT_V1"
+CALIBRATION_METHOD = "LEAGUE_WALK_FORWARD_PLATT_V2_IRLS"
+PLATT_L2_REGULARIZATION = 4.0
 
 
 @dataclass(frozen=True)
@@ -113,18 +114,45 @@ def identity_calibration(reason: str, sample_count: int = 0) -> dict[str, Any]:
 
 
 def fit_platt(history: list[tuple[float, float]]) -> tuple[float, float]:
-    """Fit the same expanding-window Platt map previously available only in backtests."""
+    """Fit a regularized two-parameter Platt map with Newton/IRLS updates.
+
+    The former report implementation divided its learning rate by sqrt(n) and its gradient by
+    n a second time. At production sample sizes it barely left the identity map, even when 64%
+    forecasts won only half the time. This two-variable Hessian is cheap, converges fully, and
+    the prior around slope=1/intercept=0 keeps small samples conservative.
+    """
+    if not history:
+        return 1.0, 0.0
     slope, intercept = 1.0, 0.0
-    learning_rate = .04 / math.sqrt(len(history))
-    for _ in range(160):
-        gradient_slope = gradient_intercept = 0.0
+    regularization = PLATT_L2_REGULARIZATION
+    for _ in range(40):
+        gradient_slope = regularization * (slope - 1.0)
+        gradient_intercept = regularization * intercept
+        hessian_slope = regularization
+        hessian_cross = 0.0
+        hessian_intercept = regularization
         for probability, outcome in history:
             log_odds = _logit(probability)
             estimate = _sigmoid(slope * log_odds + intercept)
             gradient_slope += (estimate - outcome) * log_odds
             gradient_intercept += estimate - outcome
-        slope -= learning_rate * gradient_slope / len(history)
-        intercept -= learning_rate * gradient_intercept / len(history)
+            weight = max(1e-6, estimate * (1 - estimate))
+            hessian_slope += weight * log_odds * log_odds
+            hessian_cross += weight * log_odds
+            hessian_intercept += weight
+        determinant = hessian_slope * hessian_intercept - hessian_cross * hessian_cross
+        if determinant <= 1e-12:
+            break
+        slope_step = (
+            hessian_intercept * gradient_slope - hessian_cross * gradient_intercept
+        ) / determinant
+        intercept_step = (
+            hessian_slope * gradient_intercept - hessian_cross * gradient_slope
+        ) / determinant
+        slope = _clip(slope - slope_step, .25, 2.5)
+        intercept = _clip(intercept - intercept_step, -1.5, 1.5)
+        if max(abs(slope_step), abs(intercept_step)) < 1e-8:
+            break
     return float(_clip(slope, .25, 2.5)), float(_clip(intercept, -1.5, 1.5))
 
 
