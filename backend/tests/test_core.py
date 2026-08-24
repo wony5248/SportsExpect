@@ -1029,7 +1029,7 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
         and score["home"] == after["payload"]["primary_score"]["home"]
         for score in after["payload"]["projected_score_candidates"]
     )
-    assert after["payload"]["primary_score"]["selection_method"] == "FULL_DISTRIBUTION_PROJECTION_V2"
+    assert after["payload"]["primary_score"]["selection_method"] == "COHERENT_BAYES_MEDIAN_V3"
     assert after["payload"]["primary_score"]["population_coverage"] == 1.0
     estimates = after["payload"]["score_estimates"]
     # Hybrid headline: the displayed score is the distribution mean, while the exact-score
@@ -1053,7 +1053,7 @@ def test_integer_projection_uses_full_distribution_and_respects_run_line_majorit
     assert primary["projects_favorite_cover"] is True
     assert primary["home"] - primary["away"] >= 2
     assert len(strong["projected_score_candidates"]) >= 3
-    assert all(score["selection_method"] == "FULL_DISTRIBUTION_PROJECTION_V2"
+    assert all(score["selection_method"] == "COHERENT_BAYES_MEDIAN_V3"
                for score in strong["projected_score_candidates"])
 
     close = simulate_scores(4.5, 4.4, 20_000, 20260824, league="MLB")
@@ -1063,6 +1063,55 @@ def test_integer_projection_uses_full_distribution_and_respects_run_line_majorit
                        else close_primary["away"] - close_primary["home"])
     expected_minimum = 2 if close_primary["projects_favorite_cover"] else 1
     assert favorite_margin >= expected_minimum
+
+
+@pytest.mark.parametrize("home_expected,away_expected,total_line", [
+    (4.8, 4.1, 8.5),
+    (6.8, 3.1, 9.5),
+    (3.5, 5.5, 8.5),
+])
+def test_coherent_headline_score_matches_same_population_total_direction(
+    home_expected, away_expected, total_line,
+):
+    result = simulate_scores(
+        home_expected, away_expected, 20_000, 20260824,
+        league="MLB", headline_total_line=total_line,
+    )
+    primary = result["projected_score"]
+    total = primary["home"] + primary["away"]
+    probabilities = result["totals"][str(total_line)]
+    if probabilities["over"] >= probabilities["under"]:
+        assert primary["headline_total_pick"] == "OVER"
+        assert total > total_line
+    else:
+        assert primary["headline_total_pick"] == "UNDER"
+        assert total < total_line
+    assert primary["headline_total_line"] == total_line
+    assert primary["scenario_probability"] > 0
+
+
+def test_market_line_changes_headline_without_changing_simulation_population():
+    home_team, away_team = SimpleNamespace(name="Home"), SimpleNamespace(name="Away")
+    recent = {"10": {"games": 10, "win_rate": .5}}
+    home = SimpleNamespace(team=home_team, recent=recent, win_rate=.55, home_win_rate=.58, runs_per_game=4.8,
+                           runs_allowed_per_game=4.2, ops=.750, era=4.10)
+    away = SimpleNamespace(team=away_team, recent=recent, win_rate=.50, away_win_rate=.48, runs_per_game=4.4,
+                           runs_allowed_per_game=4.5, ops=.720, era=4.40)
+    pitcher = lambda player_id: SimpleNamespace(player_id=player_id, name=player_id, confirmed=True,
+                                                era=4.0, whip=1.3, war=1.0)
+    game = SimpleNamespace(external_id="MLB-market-line", league="MLB", stadium="Yankee Stadium")
+    lower = predict_game(
+        game, home, away, pitcher("home-p"), pitcher("away-p"),
+        game_context={"market": {"total_line": 7.5}},
+    )
+    upper = predict_game(
+        game, home, away, pitcher("home-p"), pitcher("away-p"),
+        game_context={"market": {"total_line": 10.5}},
+    )
+    assert lower["input_hash"] != upper["input_hash"]
+    assert lower["payload"]["frequency_tables"] == upper["payload"]["frequency_tables"]
+    assert lower["payload"]["primary_score"]["headline_total_line"] == 7.5
+    assert upper["payload"]["primary_score"]["headline_total_line"] == 10.5
 
 
 def test_ui_registered_secret_is_encrypted_and_requires_same_master_key():

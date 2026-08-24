@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Any
 
@@ -14,6 +14,7 @@ from backend.app.services.team_residuals import (ResidualObservation, apply_resi
                                                  baseline_expected_runs, probability_from_run_means,
                                                  residual_context, RESIDUAL_ENABLED_LEAGUES,
                                                  _prediction_regime)
+from backend.app.services.simulation import _coherent_scenario_score_projection
 
 
 EXACT_CHECKPOINT_STAGES = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_15M"}
@@ -182,6 +183,12 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
             "metrics": _metrics(replay_evaluated, "probability") if replay_evaluated else {"sample_size": 0},
             "official_live_metric": False,
             "disclosure": "경기 전 데이터만 사용해 현재 코드로 다시 계산한 회고 성능입니다.",
+        },
+        "headline_score_backtest": {
+            "official_live": _headline_score_backtest(rows, markets),
+            "historical_replay": _headline_score_backtest(replay_rows, markets),
+            "method": ("Compare the stored headline with the current coherent Bayes-median selector "
+                       "on the identical saved simulation population; market totals are pregame-only."),
         },
         "team_residual_walk_forward": {
             "official_live": _residual_walk_forward(rows),
@@ -396,6 +403,91 @@ def _run_distribution_fields(prediction: Prediction, result: GameResult) -> dict
             output[f"{side}_interval_hit"] = float(low <= actual <= high)
             output[f"{side}_interval_width"] = float(high - low)
     return output
+
+
+def _headline_score_backtest(
+    rows: list[tuple[Prediction, Game, GameResult, PredictionSnapshot | None]],
+    markets: dict[int, list[MarketSnapshot]],
+) -> dict[str, Any]:
+    stored_rows: list[dict[str, Any]] = []
+    current_rows: list[dict[str, Any]] = []
+    for prediction, game, result, _ in rows:
+        payload = prediction.payload or {}
+        stored = payload.get("primary_score") or {}
+        frequencies = payload.get("frequency_tables") or {}
+        raw_scores = frequencies.get("scores") or {}
+        if stored.get("home") is None or stored.get("away") is None or not raw_scores:
+            continue
+        score_counts: Counter[tuple[int, int]] = Counter()
+        for key, count in raw_scores.items():
+            away_runs, home_runs = (int(value) for value in str(key).split(":"))
+            score_counts[(home_runs, away_runs)] = int(count)
+        total_counts = Counter({int(key): int(value) for key, value in (frequencies.get("totals") or {}).items()})
+        margin_counts = Counter({int(key): int(value) for key, value in (frequencies.get("margins") or {}).items()})
+        simulations = sum(score_counts.values())
+        handicap = payload.get("handicap") or {}
+        required_handicap = {"home_minus_1_5", "away_minus_1_5", "home_plus_1_5", "away_plus_1_5"}
+        if not simulations or not total_counts or not margin_counts or not required_handicap.issubset(handicap):
+            continue
+        pregame_markets = [row for row in markets.get(game.id, []) if game.start_at is None or
+                           _naive(row.collected_at) <= _naive(game.start_at)]
+        total_line = pregame_markets[-1].total_line if pregame_markets else None
+        current, _ = _coherent_scenario_score_projection(
+            score_counts, total_counts, margin_counts, simulations, game.league,
+            prediction.home_expected_runs, prediction.away_expected_runs,
+            prediction.home_win_probability, prediction.away_win_probability,
+            {key: float(handicap[key]) for key in required_handicap}, total_line,
+        )
+        stored_rows.append(_headline_score_row(stored, result, total_counts, simulations, total_line))
+        current_rows.append(_headline_score_row(current, result, total_counts, simulations, total_line))
+    return {
+        "sample_size": len(current_rows),
+        "stored_selector": _headline_score_metrics(stored_rows),
+        "current_selector": _headline_score_metrics(current_rows),
+    }
+
+
+def _headline_score_row(score: dict[str, Any], result: GameResult,
+                        total_counts: Counter[int], simulations: int, total_line: float | None) -> dict[str, Any]:
+    home, away = int(score["home"]), int(score["away"])
+    actual_home, actual_away = int(result.home_score), int(result.away_score)
+    total_coherent = None
+    if total_line is not None:
+        over = sum(count for total, count in total_counts.items() if total > total_line) / simulations
+        under = sum(count for total, count in total_counts.items() if total < total_line) / simulations
+        total_coherent = (home + away > total_line) if over >= under else (home + away < total_line)
+    return {
+        "home_error": home - actual_home, "away_error": away - actual_away,
+        "total_error": home + away - actual_home - actual_away,
+        "margin_error": home - away - actual_home + actual_away,
+        "winner_correct": (home > away) == (actual_home > actual_away) if actual_home != actual_away else None,
+        "exact": home == actual_home and away == actual_away,
+        "one_run": abs(home - away) == 1,
+        "total_coherent": total_coherent,
+    }
+
+
+def _headline_score_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {"sample_size": 0}
+    team_errors = [float(row[key]) for row in rows for key in ("home_error", "away_error")]
+    winner_rows = [row for row in rows if row["winner_correct"] is not None]
+    total_rows = [row for row in rows if row["total_coherent"] is not None]
+    return {
+        "sample_size": len(rows),
+        "team_score_mae": round(sum(abs(value) for value in team_errors) / len(team_errors), 4),
+        "team_score_rmse": round(math.sqrt(sum(value * value for value in team_errors) / len(team_errors)), 4),
+        "total_mae": round(sum(abs(float(row["total_error"])) for row in rows) / len(rows), 4),
+        "margin_mae": round(sum(abs(float(row["margin_error"])) for row in rows) / len(rows), 4),
+        "winner_accuracy": round(sum(bool(row["winner_correct"]) for row in winner_rows) / len(winner_rows), 4)
+        if winner_rows else None,
+        "exact_score_rate": round(sum(bool(row["exact"]) for row in rows) / len(rows), 4),
+        "one_run_score_share": round(sum(bool(row["one_run"]) for row in rows) / len(rows), 4),
+        "market_total_direction_coherence": round(
+            sum(bool(row["total_coherent"]) for row in total_rows) / len(total_rows), 4,
+        ) if total_rows else None,
+        "market_total_sample_size": len(total_rows),
+    }
 
 
 def _population_sd(values: list[float]) -> float:

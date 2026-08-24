@@ -14,7 +14,7 @@ from backend.app.collectors.mlb import MlbClient
 from backend.app.collectors.odds import OddsClient
 from backend.app.config import KST, settings
 from backend.app.database import SessionLocal, database_now, init_db, session_scope
-from backend.app.models import CrawlLog, Game, GameResult, LineupEntry, PitcherStat, Team
+from backend.app.models import CrawlLog, Game, GameResult, LineupEntry, MarketConsensus, PitcherStat, Team
 from backend.app.repositories.repository import (
     fresh_batter_split_ids,
     latest_team_stat,
@@ -279,12 +279,25 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 "scoring_band": "LOW" if scoring_seed < 8.5 else ("HIGH" if scoring_seed > 10.5 else "MID"),
                 "season_phase": "EARLY" if target_date.month <= 5 else ("LATE" if target_date.month >= 8 else "MID"),
             }
+            market = session.scalar(select(MarketConsensus).where(
+                MarketConsensus.game_id == game.id,
+            ).order_by(MarketConsensus.collected_at.desc()).limit(1))
+            market_context = ({
+                "total_line": market.total_line,
+                "home_spread": market.home_spread,
+                "home_implied_probability": market.home_implied_probability,
+                "away_implied_probability": market.away_implied_probability,
+                "provider": market.provider,
+                "collected_at": market.collected_at.isoformat(),
+            } if market and (game.start_at is None or
+                             market.collected_at.replace(tzinfo=None) <= game.start_at.replace(tzinfo=None)) else {})
             context = {
                 "home_games_today": appearances[game.home_team_id],
                 "away_games_today": appearances[game.away_team_id],
                 "league_average_runs": league_average_runs,
                 "team_residuals": residual_history.context_for(game, regime),
                 "pregame": prediction_context(session, game),
+                "market": market_context,
             }
             captured_at = datetime.now(KST)
             result = predict_game(

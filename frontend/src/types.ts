@@ -96,7 +96,7 @@ export type Prediction = {
     headline: 'MEAN'
     mean: { away: number; home: number }
     mode: { away: number; home: number; count?: number | null; probability?: number | null }
-    representative?: { away: number; home: number; count?: number | null; probability?: number | null; selection_method?: string; selection_score?: number | null; population_coverage?: number; projects_favorite_cover?: boolean }
+    representative?: SimulatedScore
   }
   confidence: number
   confidence_label: 'HIGH' | 'MEDIUM' | 'LOW'
@@ -171,6 +171,17 @@ export type SimulatedScore = {
   probability: number | null
   selection_method?: string
   selection_score?: number | null
+  population_coverage?: number
+  projects_favorite_cover?: boolean
+  favorite_cover_probability?: number
+  favorite_cover_probability_given_win?: number
+  headline_total_line?: number
+  headline_total_pick?: 'OVER' | 'UNDER'
+  headline_over_probability?: number
+  headline_under_probability?: number
+  headline_push_probability?: number
+  scenario_probability?: number
+  scenario_conditioning?: string
   trajectory_count?: number
   trajectory_probability_given_score?: number
   inning_line?: {

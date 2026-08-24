@@ -9,7 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from backend.app.config import KST
-from backend.app.models import (Game, GameResult, LineupEntry, PitcherStat, Prediction,
+from backend.app.models import (Game, GameResult, LineupEntry, MarketSnapshot, PitcherStat, Prediction,
                                 PredictionEvaluation, Team)
 from backend.app.repositories.repository import save_prediction
 from backend.app.services.prediction import SIMULATION_SUMMARY_SCHEMA_VERSION, predict_game
@@ -101,6 +101,17 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
         ).order_by(LineupEntry.side, LineupEntry.batting_order)).all()
         by_side = {pitcher.side: pitcher for pitcher in pitchers}
         league_average_runs = _league_average(prior, league)
+        market = session.scalar(select(MarketSnapshot).where(
+            MarketSnapshot.game_id == game.id,
+            MarketSnapshot.collected_at <= cutoff,
+        ).order_by(MarketSnapshot.collected_at.desc()).limit(1))
+        market_context = ({
+            "total_line": market.total_line,
+            "home_implied_probability": market.home_implied_probability,
+            "away_implied_probability": market.away_implied_probability,
+            "provider": market.provider,
+            "collected_at": market.collected_at.isoformat(),
+        } if market else {})
         audit = {
             "passed": True,
             "method": "PRIOR_FINAL_RESULTS_ONLY",
@@ -120,7 +131,8 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             game, home, away, by_side.get("home"), by_side.get("away"), lineups,
             {"home_games_today": 1, "away_games_today": 1,
              "league_average_runs": league_average_runs,
-             "team_residuals": residual_history.context_for(game)},
+             "team_residuals": residual_history.context_for(game),
+             "market": market_context},
             model_runtime=None, bullpens={}, lineup_tables={},
             prediction_context={
                 "origin": "HISTORICAL_REPLAY", "data_cutoff": cutoff.isoformat(),

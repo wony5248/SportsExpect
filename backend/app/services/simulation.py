@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import math
 from typing import Any
 
 import numpy as np
@@ -86,6 +87,13 @@ MLB_MAX_EXTRA_INNINGS = 30
 # Headline forecast band: the shortest run interval holding this much probability mass.
 # Far tighter than the central 80% band on these right-skewed scoring distributions.
 DENSE_INTERVAL_MASS = .60
+# Cover every plausible baseball total posted by a book. Integer values are retained as ints so
+# JSON keys match JavaScript's String(8) rather than becoming "8.0".
+TOTAL_MARKET_LINES = tuple(value // 2 if value % 2 == 0 else value / 2 for value in range(8, 41))
+# A representative score is already conditional on the predicted winner winning. Requiring only
+# 50% cover probability inside that branch overstates weak favorites, so promotion to a 2+ run
+# headline needs a materially stronger conditional majority. This value is walk-forward tuned.
+HEADLINE_CONDITIONAL_COVER_THRESHOLD = .72
 
 
 def highest_density_interval(values: np.ndarray, mass: float = DENSE_INTERVAL_MASS) -> dict[str, Any]:
@@ -111,7 +119,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                     away_lineup: np.ndarray | None = None,
                     observed_result: dict[str, Any] | None = None,
                     home_team_variance: float | None = None,
-                    away_team_variance: float | None = None) -> dict[str, Any]:
+                    away_team_variance: float | None = None,
+                    headline_total_line: float | None = None) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
     if home_lineup is not None and away_lineup is not None:
         # Both lineups have collected splits, so play the game out plate appearance by plate
@@ -119,7 +128,7 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
         return _summarize(*_plate_appearance_game(
             rng, home_expected, away_expected, simulations, league, home_staff, away_staff,
             home_lineup, away_lineup, home_team_variance, away_team_variance),
-            observed_result=observed_result)
+            observed_result=observed_result, headline_total_line=headline_total_line)
     # A shared gamma run environment creates realistic over-dispersion and correlation
     # (weather/umpire/park conditions affect both clubs) while preserving expected means.
     variance = min(.18, max(.02, environment_variance))
@@ -239,7 +248,7 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     usage = {"home": _bullpen_usage(home_staff_profile, home_tier_counts),
              "away": _bullpen_usage(away_staff_profile, away_tier_counts)}
     return _summarize(home_innings, away_innings, home, away, simulations, league, usage, "INNING_RATE",
-                      observed_result=observed_result)
+                      observed_result=observed_result, headline_total_line=headline_total_line)
 
 
 def evaluate_simulation_recipe(recipe: dict[str, Any], observed_result: dict[str, Any]) -> dict[str, Any]:
@@ -253,6 +262,7 @@ def evaluate_simulation_recipe(recipe: dict[str, Any], observed_result: dict[str
         away_lineup=_recipe_array(recipe.get("away_lineup")), observed_result=observed_result,
         home_team_variance=recipe.get("home_team_variance"),
         away_team_variance=recipe.get("away_team_variance"),
+        headline_total_line=recipe.get("headline_total_line"),
     )
     return result["observed_evaluation"]
 
@@ -354,56 +364,106 @@ def _counter_quantile(counts: Counter[int], probability: float) -> int:
     return int(max(counts))
 
 
-def _full_distribution_score_projection(
+def _total_probabilities(total_counts: Counter[int], simulations: int, line: float) -> dict[str, float]:
+    over = sum(count for total, count in total_counts.items() if total > line) / simulations
+    under = sum(count for total, count in total_counts.items() if total < line) / simulations
+    push = sum(count for total, count in total_counts.items() if total == line) / simulations
+    return {"over": over, "under": under, "push": push}
+
+
+def _fair_total_line(total_counts: Counter[int], simulations: int) -> float:
+    """Return the supported half-run line closest to an even two-way total market."""
+    lines = tuple(float(line) for line in TOTAL_MARKET_LINES if not float(line).is_integer())
+    return min(lines, key=lambda line: abs(
+        _total_probabilities(total_counts, simulations, line)["over"] -
+        _total_probabilities(total_counts, simulations, line)["under"]
+    ))
+
+
+def _coherent_scenario_score_projection(
     score_counts: Counter[tuple[int, int]], total_counts: Counter[int], margin_counts: Counter[int],
     simulations: int, league: str, home_mean: float, away_mean: float,
     home_two_way: float, away_two_way: float, handicap: dict[str, float],
+    headline_total_line: float | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Choose stable integer score candidates from the complete simulation population.
+    """Select one decision-theoretic scenario that agrees with the same full distribution.
 
-    An exact-score mode systematically gravitates to a one-run result because every MLB game is
-    forced to have a winner and central tied scores are unavailable.  This projection instead
-    scores every final score observed across all simulations against the distribution's median
-    total, median margin, team means, exact-score frequency and -1.5 cover shape.  It therefore
-    keeps a close-game forecast close, while allowing a genuine multi-run favorite to display a
-    multi-run score whenever the same population makes its run line more likely than not.
+    The unconditional joint mode is biased toward low, one-run scores.  A headline score already
+    commits to one winner, so its relevant population is the simulations in which the forecast
+    winner actually wins. Component medians from the complete population are the Bayes action for
+    absolute error; winner, strong conditional-cover evidence and the full population's displayed
+    over/under majority act only as coherence constraints. The market line never changes a
+    simulation; it only chooses a representative from outcomes the model already generated.
     """
-    target_total = _counter_quantile(total_counts, .50)
-    target_margin = _counter_quantile(margin_counts, .50)
     home_favored = home_two_way >= away_two_way
+    favorite_win_probability = home_two_way if home_favored else away_two_way
     favorite_cover_probability = (
         handicap["home_minus_1_5"] if home_favored else handicap["away_minus_1_5"]
     )
-    project_cover = favorite_cover_probability >= .50
-    maximum_count = max(score_counts.values()) or 1
+    favorite_cover_given_win = min(1.0, favorite_cover_probability / max(favorite_win_probability, 1e-9))
+    project_cover = favorite_cover_given_win >= HEADLINE_CONDITIONAL_COVER_THRESHOLD
+    line = float(headline_total_line) if headline_total_line is not None and math.isfinite(
+        float(headline_total_line)
+    ) else _fair_total_line(total_counts, simulations)
+    total_probabilities = _total_probabilities(total_counts, simulations, line)
+    decidable_total_probability = total_probabilities["over"] + total_probabilities["under"]
+    over_given_decision = total_probabilities["over"] / max(decidable_total_probability, 1e-9)
+    total_pick = "OVER" if over_given_decision >= .50 else "UNDER"
 
     def favorite_margin(home_runs: int, away_runs: int) -> int:
         return home_runs - away_runs if home_favored else away_runs - home_runs
 
-    # The representative score follows the simulated favorite. Within that outcome, the
-    # simulation's own run-line majority determines whether the point estimate is a one-run or
-    # multi-run win. This is a constraint from all 20,000 outcomes, not a hand-picked margin.
-    eligible = [
+    winner_rows = [
         (home_runs, away_runs, count)
         for (home_runs, away_runs), count in score_counts.items()
-        if favorite_margin(home_runs, away_runs) >= (2 if project_cover else 1)
+        if favorite_margin(home_runs, away_runs) >= 1
         and not (league == "MLB" and home_runs == away_runs)
     ]
+    cover_rows = [row for row in winner_rows if (
+        favorite_margin(row[0], row[1]) >= 2 if project_cover else favorite_margin(row[0], row[1]) == 1
+    )]
+    if not cover_rows:
+        cover_rows = winner_rows
+    total_rows = [row for row in cover_rows if (
+        row[0] + row[1] > line if total_pick == "OVER" else row[0] + row[1] < line
+    )]
+    eligible = total_rows or cover_rows or winner_rows
     if not eligible:
-        eligible = [(home_runs, away_runs, count)
-                    for (home_runs, away_runs), count in score_counts.items()
+        eligible = [(home_runs, away_runs, count) for (home_runs, away_runs), count in score_counts.items()
                     if not (league == "MLB" and home_runs == away_runs)]
+
+    # Keep the target functional on the complete predictive population. Re-centering after an
+    # over/under or cover filter exaggerates a mild lean into a tail score. The scenario filters
+    # are constraints only; complete-population medians continue to minimize absolute error.
+    branch_count = sum(row[2] for row in eligible)
+    home_branch: Counter[int] = Counter()
+    away_branch: Counter[int] = Counter()
+    for (home_runs, away_runs), count in score_counts.items():
+        home_branch[home_runs] += count
+        away_branch[away_runs] += count
+    favorite_margin_branch = Counter({
+        (margin if home_favored else -margin): count for margin, count in margin_counts.items()
+    })
+    target_home = _counter_quantile(home_branch, .50)
+    target_away = _counter_quantile(away_branch, .50)
+    target_total = _counter_quantile(total_counts, .50)
+    target_favorite_margin = _counter_quantile(favorite_margin_branch, .50)
+    maximum_count = max(row[2] for row in eligible) or 1
 
     def fit(row: tuple[int, int, int]) -> tuple[float, int, float]:
         home_runs, away_runs, count = row
         total = home_runs + away_runs
-        margin = home_runs - away_runs
+        margin = favorite_margin(home_runs, away_runs)
         frequency_fit = count / maximum_count
-        team_fit = 1 / (1 + (abs(home_runs - home_mean) + abs(away_runs - away_mean)) / 2)
+        team_fit = 1 / (1 + (abs(home_runs - target_home) + abs(away_runs - target_away)) / 2)
+        mean_fit = 1 / (1 + (
+            abs(home_runs - home_mean) + abs(away_runs - away_mean)
+        ) / 2)
         total_fit = 1 / (1 + abs(total - target_total))
-        margin_fit = 1 / (1 + abs(margin - target_margin))
+        margin_fit = 1 / (1 + abs(margin - target_favorite_margin))
         selection_score = (
-            .30 * frequency_fit + .30 * team_fit + .20 * total_fit + .20 * margin_fit
+            .10 * frequency_fit + .30 * team_fit + .20 * mean_fit +
+            .20 * total_fit + .20 * margin_fit
         )
         return selection_score, count, -abs(total - target_total)
 
@@ -423,7 +483,7 @@ def _full_distribution_score_projection(
             "away": away_runs,
             "count": count,
             "probability": round(count / simulations, 4),
-            "selection_method": "FULL_DISTRIBUTION_PROJECTION_V2",
+            "selection_method": "COHERENT_BAYES_MEDIAN_V3",
             "selection_score": round(fit(row)[0], 6),
         })
         used_shapes.add(shape)
@@ -431,10 +491,20 @@ def _full_distribution_score_projection(
             break
     primary = dict(candidates[0])
     primary.update({
+        "target_home_median": target_home,
+        "target_away_median": target_away,
         "target_total_median": target_total,
-        "target_margin_median": target_margin,
+        "target_favorite_margin_median": target_favorite_margin,
         "favorite_cover_probability": round(favorite_cover_probability, 4),
+        "favorite_cover_probability_given_win": round(favorite_cover_given_win, 4),
         "projects_favorite_cover": project_cover,
+        "headline_total_line": line,
+        "headline_total_pick": total_pick,
+        "headline_over_probability": round(total_probabilities["over"], 4),
+        "headline_under_probability": round(total_probabilities["under"], 4),
+        "headline_push_probability": round(total_probabilities["push"], 4),
+        "scenario_probability": round(branch_count / simulations, 4),
+        "scenario_conditioning": "FAVORITE_WIN+CONDITIONAL_RUN_LINE+HEADLINE_TOTAL",
         "population_coverage": 1.0,
     })
     return primary, candidates
@@ -442,7 +512,8 @@ def _full_distribution_score_projection(
 
 def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndarray, away: np.ndarray,
                simulations: int, league: str, bullpen_usage: dict[str, Any], engine: str,
-               observed_result: dict[str, Any] | None = None) -> dict[str, Any]:
+               observed_result: dict[str, Any] | None = None,
+               headline_total_line: float | None = None) -> dict[str, Any]:
     total = home + away
     home_win_probability = float(np.mean(home > away))
     away_win_probability = float(np.mean(away > home))
@@ -512,9 +583,10 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         "home_plus_1_5": float(np.mean(home - away >= -1)),
         "away_plus_1_5": float(np.mean(away - home >= -1)),
     }
-    projected_score, projected_score_candidates = _full_distribution_score_projection(
+    projected_score, projected_score_candidates = _coherent_scenario_score_projection(
         score_counts, total_counts, margin_counts, simulations, league,
         float(home.mean()), float(away.mean()), home_two_way, away_two_way, handicap,
+        headline_total_line,
     )
     projected_score = with_trajectory(projected_score)
     projected_score_candidates = [
@@ -527,7 +599,7 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
             "under": float(np.mean(total < line)),
             "push": float(np.mean(total == line)),
         }
-        for line in (6, 6.5, 7, 7.5, 8, 8.5, 9, 9.5, 10, 10.5, 11, 11.5, 12, 12.5, 13)
+        for line in TOTAL_MARKET_LINES
     }
     regulation = slice(0, 9)
     extras_played = (away_innings[:, 9:] >= 0).any(axis=1) if away_innings.shape[1] > 9 else np.zeros(1, dtype=bool)

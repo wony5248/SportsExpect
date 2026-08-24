@@ -155,7 +155,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <Box className="score-row">
           <Box className="primary"><span>예상 점수 · 2만 회 평균</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>같은 2만 회의 평균 총점 {stat(statisticalExpectedTotal, 1)}점</small></Box>
           <Divider orientation="vertical" flexItem />
-          <Box><span>2만 회 분포 대표 점수</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{modeFrequency(predictedScore)}{p.extra_innings ? ' · 승패·핸디캡 방향 반영' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
+          <Box><span>2만 회 정합 대표 점수</span><strong>{stat(expectedScore?.away, 0)} <i>:</i> {stat(expectedScore?.home, 0)}</strong><small>{representativeSummary(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box>
           <Divider orientation="vertical" flexItem />
           <Box className={`headline-outcome${topOutcome?.hit == null ? '' : topOutcome.hit ? ' hit' : ' miss'}`}>
             <Box className="headline-outcome-heading">
@@ -172,7 +172,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>
 
         {displayedScoreCandidates.length ? <Box className="score-candidates">
-          <span>전체 시뮬레이션 분포에서 뽑은 대표 점수 3가지</span>
+          <span>예측 승리·조건부 점수차·총점 방향이 같은 중앙 시나리오 3가지</span>
           <Stack direction="row" flexWrap="wrap" gap={.8}>
             {displayedScoreCandidates.map((score, index) => <b key={`${score.away}-${score.home}`} className={index === 0 ? 'top' : ''}>
               <small className="rank">{index === 0 ? '선정' : `${index + 1}위`}</small>{score.away} : {score.home}<small>{score.probability == null ? '—' : pctFine(score.probability)}</small>
@@ -244,7 +244,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             ? ranking.lineSource === '시장'
               ? `${ranking.line} 기준 (실제 배당 사이트 기준점)`
               : `${ranking.line} 기준 (배당 기준점 없어 모델이 대신 계산)`
-            : '기준점 없음'}</small>
+            : '기준점 없음'} · 대표 점수는 예측팀 승리를 전제로 한 조건부 시나리오</small>
           {ranking.outcomes.map((outcome, index) => <Box key={outcome.label} className={`outcome-row${index === 0 ? ' top' : ''}`}>
             <i>{index + 1}</i>
             <Box className="outcome-label"><span>{outcome.label}</span>{outcome.note && <small>{outcome.note}</small>}</Box>
@@ -736,6 +736,22 @@ function modeFrequency(mode: { count?: number; probability?: number | null } | n
   if (!mode) return '횟수 정보 없음'
   if (mode.count == null) return mode.probability == null ? '횟수 정보 없음' : pct(mode.probability)
   return `${mode.count.toLocaleString()}번 나옴${mode.probability == null ? '' : ` · ${pct(mode.probability)}`}`
+}
+
+function representativeSummary(score: NonNullable<Game['prediction']>['primary_score'] | undefined) {
+  if (!score) return '대표 시나리오 없음'
+  if (score.selection_method !== 'COHERENT_BAYES_MEDIAN_V3') return modeFrequency(score)
+  const parts = []
+  if (score.headline_total_line != null && score.headline_total_pick) {
+    parts.push(`${score.headline_total_pick === 'OVER' ? '오버' : '언더'} ${score.headline_total_line} 방향`)
+  }
+  if (score.favorite_cover_probability_given_win != null) {
+    parts.push(score.projects_favorite_cover
+      ? `강한 다점차 신호 · 승리 시 2점차+ ${pct(score.favorite_cover_probability_given_win)}`
+      : `보수적 1점차 · 승리 시 2점차+ ${pct(score.favorite_cover_probability_given_win)}`)
+  }
+  if (score.scenario_probability != null) parts.push(`전체 분포 중 조건 일치 ${pct(score.scenario_probability)}`)
+  return parts.join(' · ') || modeFrequency(score)
 }
 
 function outcomeLabel(outcome: 'HOME_WIN' | 'AWAY_WIN' | 'TIE', game: Game) {
