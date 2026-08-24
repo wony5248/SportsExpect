@@ -393,6 +393,13 @@ def test_legacy_live_forecast_keeps_original_and_adds_separate_exact_replay():
         ))
         session.flush()
 
+        missing_only = run_historical_replay(session, "MLB", limit=1, only_missing=True)
+        assert missing_only["created"] == 1
+        assert missing_only["skipped_existing_replay"] >= 1
+        assert missing_only["outdated_replays_refreshed"] == 0
+        target_rows = session.scalars(select(Prediction).where(Prediction.game_id == target.id)).all()
+        assert len(target_rows) == 2
+
         report = run_historical_replay(session, "MLB", limit=1)
         assert report["created"] == 1
         assert report["legacy_live_replayed"] == 1

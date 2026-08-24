@@ -18,7 +18,8 @@ from backend.app.services.team_residuals import TeamResidualHistory
 
 
 def run_historical_replay(session: Session, league: str, start_date: date | None = None,
-                          end_date: date | None = None, limit: int = 20) -> dict[str, Any]:
+                          end_date: date | None = None, limit: int = 20,
+                          only_missing: bool = False) -> dict[str, Any]:
     """Recreate archive forecasts using only results and observations available before first pitch."""
     query = select(Game, GameResult).join(GameResult, GameResult.game_id == Game.id).options(
         joinedload(Game.home_team), joinedload(Game.away_team),
@@ -75,6 +76,9 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             # residual analysis after final without pretending the new model ran before first pitch.
             needs_legacy_replay = True
         existing_replays = [row for row in stored if row.origin == "HISTORICAL_REPLAY"]
+        if only_missing and existing_replays:
+            skipped_existing += 1
+            continue
         current_replays = [row for row in existing_replays if _is_current_replay(row)]
         if current_replays:
             if any(row.id not in evaluated_prediction_ids for row in current_replays):
@@ -143,6 +147,7 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
         "skipped_insufficient_history": 0, "cold_start_created": cold_start_created,
         "legacy_live_replayed": legacy_live_replayed, "limit": limit,
         "outdated_replays_refreshed": outdated_replays_refreshed,
+        "only_missing": only_missing,
         "games": processed,
         "disclosure": "과거 재현은 경기 전 데이터만 복원한 회고 시뮬레이션이며 당시 저장된 실전 예측과 분리됩니다.",
     }

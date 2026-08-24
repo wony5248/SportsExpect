@@ -193,10 +193,11 @@ def cron_refresh(
 
 
 @app.post("/api/v1/admin/replay", dependencies=[Depends(require_admin)])
-def historical_replay(league: str = Query(pattern="^(KBO|MLB)$"), limit: int = Query(default=20, ge=1, le=100)):
+def historical_replay(league: str = Query(pattern="^(KBO|MLB)$"), limit: int = Query(default=20, ge=1, le=100),
+                      only_missing: bool = Query(default=False)):
     """Backfill archive forecasts without presenting them as original live predictions."""
     try:
-        return run_replay_refresh(league, limit)
+        return run_replay_refresh(league, limit, only_missing=only_missing)
     except LockUnavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

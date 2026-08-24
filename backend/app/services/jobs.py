@@ -126,7 +126,7 @@ def run_lifecycle_refresh(league: str) -> dict[str, Any]:
             return run_model_lifecycle(session, league)
 
 
-def run_replay_refresh(league: str, limit: int = 10) -> dict[str, Any]:
+def run_replay_refresh(league: str, limit: int = 10, *, only_missing: bool = False) -> dict[str, Any]:
     with job_lock(f"historical-replay:{league}"):
         innings = backfill_kbo_innings(limit) if league == "KBO" else backfill_mlb_innings(limit)
         with session_scope() as session:
@@ -135,6 +135,7 @@ def run_replay_refresh(league: str, limit: int = 10) -> dict[str, Any]:
                 start_date=REPLAY_START_DATE,
                 end_date=REPLAY_END_DATE,
                 limit=limit,
+                only_missing=only_missing,
             )
             lifecycle = run_model_lifecycle(session, league)
             return {
