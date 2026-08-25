@@ -97,6 +97,7 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                         team = upsert_team(session, "KBO", raw["code"], name)
                         upsert_team_stat(session, team, target_date, raw, recent.get(name, {}), stats_source.source_url, stats_source.collected_at)
 
+        now = datetime.now(KST)
         if fetched_games:
             for raw in fetched_games:
                 if game_ids and raw["external_id"] not in game_ids:
@@ -116,19 +117,27 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                     if game:
                         for pitcher in starter_source.data:
                             upsert_pitcher(session, game, pitcher, starter_source.source_url, starter_source.collected_at)
-                lineup_source = _tracked(
-                    f"kbo_lineups_{raw['external_id']}", "/ws/Schedule.asmx/GetLineUpAnalysis",
-                    lambda item=raw: client.lineups(item), errors,
-                )
-                if lineup_source and lineup_source.data:
-                    _enrich_batter_matchups(client, raw, lineup_source.data, errors, "KBO")
-                    _resolve_kbo_player_ids(client, lineup_source.data, raw, errors)
-                    _enrich_kbo_platoon(client, raw, lineup_source.data, errors)
-                    _collect_batter_splits(client, lineup_source.data, target_date.year, "KBO", errors, split_budget)
-                    with session_scope() as session:
-                        game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
-                        if game:
-                            replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
+                minutes_to_start = (raw["start_at"].astimezone(KST) - now).total_seconds() / 60
+                # KBO does not publish an official batting order the day before the game. Calling
+                # every lineup and hitter-detail endpoint anyway is the slowest part of a manual
+                # refresh and can exhaust Vercel's full 300-second request limit. The dedicated
+                # T-40 dispatcher supplies game_ids, so it always enters this branch when lineups
+                # are expected; an ordinary page refresh enters only inside the live-data window.
+                should_fetch_lineup = bool(game_ids) or -30 <= minutes_to_start <= settings.live_update_window_minutes
+                if should_fetch_lineup:
+                    lineup_source = _tracked(
+                        f"kbo_lineups_{raw['external_id']}", "/ws/Schedule.asmx/GetLineUpAnalysis",
+                        lambda item=raw: client.lineups(item), errors,
+                    )
+                    if lineup_source and lineup_source.data:
+                        _enrich_batter_matchups(client, raw, lineup_source.data, errors, "KBO")
+                        _resolve_kbo_player_ids(client, lineup_source.data, raw, errors)
+                        _enrich_kbo_platoon(client, raw, lineup_source.data, errors)
+                        _collect_batter_splits(client, lineup_source.data, target_date.year, "KBO", errors, split_budget)
+                        with session_scope() as session:
+                            game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
+                            if game:
+                                replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
 
         # A pre-game refresh must not spend its request budget fetching completed-game innings.
         # That backfill can make a user-triggered latest-data request wait long enough to time
