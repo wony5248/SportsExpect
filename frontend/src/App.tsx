@@ -100,7 +100,7 @@ export default function App() {
     setManualRefreshBusy(true)
     setManualRefreshError(null)
     try {
-      await runManualRefresh(manualRefreshPassword)
+      await runManualRefresh(manualRefreshPassword, league)
       setManualRefreshOpen(false)
       setManualRefreshPassword('')
       await load()
@@ -218,7 +218,7 @@ export default function App() {
         <DialogTitle>최신 데이터로 새로고침</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ pt: 1 }}>
-            <Typography className="settings-copy">아직 시작하지 않은 오늘의 KBO·MLB 경기만 수집하고 예측을 다시 계산합니다. 양 팀 라인업이 확정된 경기는 타석 단위 시뮬레이션으로 계산됩니다.</Typography>
+            <Typography className="settings-copy">현재 선택한 {league === 'ALL' ? 'KBO·MLB' : league} 리그의 아직 시작하지 않은 오늘 경기만 수집하고 예측을 다시 계산합니다. 양 팀 라인업이 확정된 경기는 타석 단위 시뮬레이션으로 계산됩니다.</Typography>
             <TextField autoFocus label="새로고침 비밀번호" type="password" value={manualRefreshPassword}
               onChange={(event) => setManualRefreshPassword(event.target.value)}
               onKeyDown={(event) => { if (event.key === 'Enter') void submitManualRefresh() }}

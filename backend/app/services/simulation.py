@@ -917,19 +917,15 @@ def _coherent_scenario_score_projection(
     headline_home_spread: float | None = None,
     conditional: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Select one decision-theoretic scenario that agrees with the same full distribution.
+    """Select a representative score from the forecast winner's winning branch.
 
     The unconditional joint mode is biased toward low, one-run scores.  A headline score already
     commits to one winner, so its relevant population is the simulations in which the forecast
     winner actually wins, and component medians of that branch are the Bayes action for absolute
-    error inside it. The run line and the total act only as coherence constraints on top: they
-    filter which candidates are admissible, they never re-centre the target, because re-centring
-    after a cover or over/under filter exaggerates a mild lean into a tail score. The market line
-    never changes a simulation; it only chooses a representative from outcomes already generated.
-
-    Both the target and the constraints come from the second-stage conditional read, so the
-    headline score and the picks on the card are two views of one branch. A branch too small to
-    price falls back to the older full-population rules.
+    error inside it. The selected total direction may narrow that winning branch, but a run-line
+    never does: handicap output is not part of the product and must not reshape the score shown
+    to the reader. A market line never changes a simulation; it can only select a representative
+    from outcomes that were already generated.
     """
     home_favored = home_two_way >= away_two_way
     favorite_win_probability = home_two_way if home_favored else away_two_way
@@ -1002,16 +998,13 @@ def _coherent_scenario_score_projection(
         if favorite_margin(home_runs, away_runs) >= 1
         and not (league == "MLB" and home_runs == away_runs)
     ]
-    cover_rows = [row for row in winner_rows if (
-        favorite_margin(row[0], row[1]) >= minimum_favorite_margin
-        if project_cover else favorite_margin(row[0], row[1]) < minimum_favorite_margin
-    )]
-    if not cover_rows:
-        cover_rows = winner_rows
-    total_rows = [row for row in cover_rows if (
+    # Handicap used to filter this list before the total was applied. That made the representative
+    # score follow a market the UI no longer publishes. All downstream display predictions now
+    # begin with the same event: the straight-win favorite wins this simulated game.
+    total_rows = [row for row in winner_rows if (
         row[0] + row[1] > line if total_pick == "OVER" else row[0] + row[1] < line
     )]
-    eligible = total_rows or cover_rows or winner_rows
+    eligible = total_rows or winner_rows
     if not eligible:
         eligible = [(home_runs, away_runs, count) for (home_runs, away_runs), count in score_counts.items()
                     if not (league == "MLB" and home_runs == away_runs)]
@@ -1111,7 +1104,7 @@ def _coherent_scenario_score_projection(
         "scenario_over_probability": round(scenario_over, 4),
         "scenario_under_probability": round(scenario_under, 4),
         "scenario_probability": round(branch_count / simulations, 4),
-        "scenario_conditioning": "FAVORITE_WIN+CONDITIONAL_RUN_LINE+HEADLINE_TOTAL",
+        "scenario_conditioning": "FAVORITE_WIN+HEADLINE_TOTAL",
         "population_coverage": 1.0,
     })
     return primary, candidates

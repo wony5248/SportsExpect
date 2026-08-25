@@ -43,7 +43,7 @@ from backend.app.services.pregame_context import prediction_context
 
 def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None = None,
                 game_ids: set[str] | None = None, trigger: str = "manual",
-                checkpoint_stage: str | None = None) -> dict[str, Any]:
+                checkpoint_stage: str | None = None, include_inning_backfill: bool = True) -> dict[str, Any]:
     init_db()
     own_client = client is None
     client = client or KboClient()
@@ -130,7 +130,11 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                         if game:
                             replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
 
-        inning_backfill = backfill_kbo_innings(10, target_date=target_date, client=client)
+        # A pre-game refresh must not spend its request budget fetching completed-game innings.
+        # That backfill can make a user-triggered latest-data request wait long enough to time
+        # out even though none of its work changes an upcoming game's forecast.
+        inning_backfill = (backfill_kbo_innings(10, target_date=target_date, client=client)
+                           if include_inning_backfill else {"status": "skipped", "reason": "pregame refresh"})
         market_status = _refresh_market("KBO", errors)
         predicted = _predict_games("KBO", target_date, game_ids, errors, trigger, checkpoint_stage)
         with session_scope() as session:

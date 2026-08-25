@@ -72,11 +72,8 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const fullDistributionScore = p?.full_distribution_score
     ?? p?.score_estimates?.full_distribution
     ?? p?.score_estimates?.mode
-  // One integer score on the whole card, and it is the winner-scenario representative. The card
-  // used to show a per-outcome exact-score mode beside it, which is a different estimator over a
-  // different population and routinely disagreed - naming 1:0 for the same club the coherent
-  // selection had at 5:2. A close game is no reason to publish two contradictory scores either:
-  // the forecast still names one winner, so the representative follows that winner.
+  // The headline is the representative integer score among simulations where the team with the
+  // higher straight-win probability actually won. It is not used to derive another market.
   const headlineScore = predictedScore ?? meanScore ?? fullDistributionScore
   const headlineIsExactScore = Boolean(predictedScore)
   const modeTotal = p?.simulation_modes?.total_runs
@@ -98,8 +95,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   // Stage two: the run line and the total priced inside the branch where the club stage one
   // named actually wins. Null on forecasts saved before the two-stage model.
   const conditional = p && coherent ? conditionalMarket(p, game) : null
-  const picks = p && coherent && ranking && handicap ? marketPicks(p, game, ranking, handicap, conditional) : null
-  const scenarioMargins = conditional ? scenarioMarginBuckets(conditional) : null
+  const picks = p && coherent && ranking && handicap
+    ? marketPicks(p, game, ranking, handicap, conditional).filter((pick) => pick.key !== 'handicap')
+    : null
   const upsetWatch = p?.upset_watch
   const upset = upsetWatch
     ? { ...upsetWatch, underdogTeam: upsetWatch.underdog === 'HOME' ? game.home : game.away }
@@ -112,7 +110,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   // wins, ties and close losses, so without a posted run line it cannot be compared fairly with
   // the other markets. A stage 2 handicap has no such problem: it is compared on the chance it
   // actually lands, which already carries the cost of needing the winner to be right.
-  const recommendation = strongestRecommendation(picks, Boolean(conditional) || Boolean(handicap?.fromMarket))
+  const recommendation = strongestRecommendation(picks)
   const residual = p?.residual_calibration
   const requestPersonalAnalysis = async () => {
     if (!signedIn) { onRequireLogin(); return }
@@ -128,7 +126,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const resultComparison = isFinal ? completedGameComparison(game, p, meanScore ?? expectedScore) : null
   const isReplay = p?.origin === 'HISTORICAL_REPLAY'
   const evaluation = p?.evaluation
-  const verdicts = isFinal && game.result && p && ranking ? marketVerdicts(p, game, ranking, conditional) : null
+  const verdicts = isFinal && game.result && p && ranking
+    ? marketVerdicts(p, game, ranking, conditional).filter((verdict) => !verdict.market.includes('핸디캡'))
+    : null
   const judgedVerdicts = verdicts?.filter((verdict) => verdict.hit != null) ?? []
   const verdictHits = judgedVerdicts.filter((verdict) => verdict.hit).length
   return (
@@ -151,20 +151,20 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         <Box className="versus">
           <span>VS</span><small>{game.league}</small>
           {!isFinal && recommendation && (recommendation.jointProbability ?? recommendation.probability) != null && <Box className="matchup-recommendation">
-            <em>{conditional || handicap?.fromMarket ? '전체 픽 최고 확률' : '추천 · 승패/총점'}</em>
+            <em>추천 · 승패/총점</em>
             <b>{recommendation.pick}</b>
             <i>{recommendation.line ? `${recommendation.line} · ` : ''}{pct(recommendation.jointProbability ?? recommendation.probability!)}</i>
           </Box>}
         </Box>
         <TeamName team={game.home} side="HOME" />
         {!isFinal && headlineScore && <Box className="matchup-score">
-          <span>{headlineIsExactScore ? '예측 스코어' : '평균 예측 점수'}</span>
+          <span>{headlineIsExactScore ? '우세팀 승리 대표 점수' : '전체 평균 예상 득점'}</span>
           <strong>{stat(headlineScore.away, headlineIsExactScore ? 0 : 1)} <i>:</i> {stat(headlineScore.home, headlineIsExactScore ? 0 : 1)}</strong>
           <small>{headlineIsExactScore
-            ? `${(homeFavored ? game.home : game.away).name} 승리 시나리오 기준 · 전체 평균 ${stat(meanScore?.away, 1)} : ${stat(meanScore?.home, 1)}`
+            ? `${(homeFavored ? game.home : game.away).name} 승리 시행에서 선정 · 전체 평균 ${stat(meanScore?.away, 1)} : ${stat(meanScore?.home, 1)}`
             : p?.market_calibration?.enabled
-              ? `Odds API ${p.market_calibration.bookmaker_count ?? 1}곳 합의값을 최대 ${stat(Math.max(p.market_calibration.total_weight ?? 0, p.market_calibration.probability_weight ?? 0) * 100, 0)}% 반영`
-              : '팀·선발·상대전적·구장·잔차를 반영한 전체 시뮬레이션 평균'}</small>
+              ? `전체 ${p.model.simulations.toLocaleString()}회 평균 · Odds API ${p.market_calibration.bookmaker_count ?? 1}곳 합의값을 최대 ${stat(Math.max(p.market_calibration.total_weight ?? 0, p.market_calibration.probability_weight ?? 0) * 100, 0)}% 반영`
+              : `팀·선발·상대전적·구장·잔차를 반영한 전체 ${p?.model.simulations.toLocaleString() ?? ''}회 평균`}</small>
         </Box>}
       </Box>
       {game.status === 'LIVE' && <Box className="live-game-notice" role="status">
@@ -212,9 +212,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>
 
         {!isFinal && picks && picks.length > 0 && <Box className="pick-strip">
-          <span className="pick-strip-title">{conditional
-            ? `먼저 승리팀을 정하고, 그 팀이 이긴 ${conditional.sample_size.toLocaleString()}회 안에서만 핸디캡과 총점을 다시 계산합니다`
-            : '예측 결과 · 승패 / 실제 핸디캡 기준 / 총점'}</span>
+          <span className="pick-strip-title">예측 결과 · 일반 승패 / 총점 · 핸디캡 예측은 제공하지 않습니다</span>
           {picks.map((pick) => <Box key={pick.key}
             className={`pick${pick.stage === 2 ? ' conditional' : ''}${pick.hit == null ? '' : pick.hit ? ' hit' : ' miss'}`}>
             <span className="pick-market">{pick.market}{pick.line && <i>{pick.line}</i>}
@@ -263,12 +261,6 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             <Box><span>점수차 중앙값</span>
               <strong>{conditional.median_margin}점차</strong>
               <small>{conditional.winnerTeam.name} 기준 · 합계 중앙값 {conditional.median_total}점</small></Box>
-            <Box><span>{conditional.winnerTeam.name} {conditional.handicap.minimum_margin}점차 이상 승</span>
-              <strong>{pct(conditional.handicap.winner_cover_probability)}</strong>
-              <small>{conditional.handicap.minimum_margin - 1}점차 이내 승 {pct(conditional.handicap.winner_short_probability)}{
-                conditional.handicap.market_minus_probability != null
-                  ? ` · 전체 기준 ${pct(conditional.handicap.model_minus_probability)} vs 배당사 ${pct(conditional.handicap.market_minus_probability)}`
-                  : ''}</small></Box>
             <Box><span>총점 {conditional.headline_total.line} 오버</span>
               <strong>{pct(conditional.headline_total.over_probability)}</strong>
               <small>언더 {pct(conditional.headline_total.under_probability)}{
@@ -276,23 +268,12 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
                   ? ` · 전체 기준 ${pct(conditional.headline_total.model_over_probability)} vs 배당사 ${pct(conditional.headline_total.market_over_probability)}`
                   : fullPopulationTotal ? ` · 전체 분포에선 ${pct(fullPopulationTotal)}` : ''}</small></Box>
           </Box>
-          {scenarioMargins && <>
-            <Box className="margin-bar">
-              {scenarioMargins.map((bucket) => <i key={bucket.key} className={bucket.key}
-                style={{ width: pct(bucket.share) }} title={`${bucket.label} ${pct(bucket.share)}`} />)}
-            </Box>
-            <Box className="margin-legend">
-              {scenarioMargins.map((bucket) => <span key={bucket.key} className={bucket.key}>
-                {bucket.label} {pct(bucket.share)}
-              </span>)}
-            </Box>
-          </>}
           <small className="scenario-note">여기 있는 확률은 모두 {subject(conditional.winnerTeam.name)} 이겼다는 전제에서의 값입니다. 실제로 맞히려면 승패부터 맞아야 하므로, 실제 확률은 여기에 {pct(conditional.scenario_probability)}를 곱한 값입니다.</small>
         </Box>}
 
         {!game.market && !isFinal && <Box className="market-data-status">
-          <b>실제 배당사 기준점 미수집</b>
-          <span>현재 핸디캡·언더오버 기준은 Odds API 값이 아니라 모델 분포가 계산한 공정선입니다.</span>
+          <b>실제 배당사 총점 기준 미수집</b>
+          <span>현재 언더오버 기준은 Odds API 값이 아니라 모델 분포가 계산한 공정선입니다.</span>
         </Box>}
 
         <Box className="score-row single">
@@ -361,12 +342,12 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             <b>유력한 결과 순위</b>
             <Chip icon={<VerifiedRounded />} label={completenessLabel(p.confidence_label)} size="small" className={`confidence ${p.confidence_label.toLowerCase()}`} />
           </Stack>
-          <small className="ranking-note">상세 시장 확률은 전체 {p.model.simulations.toLocaleString()}회 기준 · 승패 / 핸디캡 -{handicap?.runLine ?? 1.5}/+{handicap?.runLine ?? 1.5} / 총점 {ranking.line != null
+          <small className="ranking-note">상세 확률은 전체 {p.model.simulations.toLocaleString()}회 기준 · 승패 / 총점 {ranking.line != null
             ? ranking.lineSource === '시장'
               ? `${ranking.line} 기준 (실제 배당사 기준점)`
               : `${ranking.line} 기준 (배당 없어 우리가 계산)`
             : '기준점 없음'} · 승리 조건을 걸지 않은 전체 분포 기준이라 위 2차 예측과 다를 수 있습니다</small>
-          {ranking.outcomes.map((outcome, index) => <Box key={outcome.label} className={`outcome-row${index === 0 ? ' top' : ''}`}>
+          {ranking.outcomes.filter((outcome) => !outcome.label.startsWith('마핸') && !outcome.label.startsWith('플핸')).map((outcome, index) => <Box key={outcome.label} className={`outcome-row${index === 0 ? ' top' : ''}`}>
             <i>{index + 1}</i>
             <Box className="outcome-label"><span>{outcome.label}</span>{outcome.note && <small>{outcome.note}</small>}</Box>
             <Box className="outcome-track"><b style={{ width: pct(outcome.probability) }} /></Box>
@@ -404,23 +385,11 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
               <Typography variant="subtitle2">배당사 기준점과 비교</Typography>
               <Box className="market-comparison">
                 <Box><span>배당사 총점 기준</span><strong>{game.market.total_line ?? '—'}</strong><small>배당사 {game.market.bookmaker_count}곳의 중간값</small></Box>
-                <Box><span>배당사 핸디캡 (마핸)</span><strong>{game.market.home_spread != null && game.market.home_spread !== 0
-                  ? `${game.market.home_spread < 0 ? game.home.name : game.away.name} ${-Math.abs(game.market.home_spread)}`
-                  : handicap?.fromMarket ? `${handicap.minusTeam} 우세`
-                  : game.market.home_spread === 0 ? '핸디 없음' : '—'}</strong><small>{!handicap?.fromMarket
-                  ? game.market.home_spread === 0 ? '배당사도 비슷하게 봄' : '아직 수집 전'
-                  : `${game.market.home_spread == null ? '핸디 배당이 없어 승패 배당 기준 · ' : ''}${handicap.modelAgrees
-                    ? '우리 예측과 같은 팀' : '우리 예측과 다른 팀'}`}</small></Box>
                 <Box><span>홈 승률</span><strong>{pct(p.home_win_probability)} <i>/</i> {game.market.home_implied_probability == null ? '—' : pct(game.market.home_implied_probability)}</strong><small>우리 예측 / 배당사 (수수료 뺀 값)</small></Box>
                 {conditional?.headline_total.market_over_probability != null && <Box><span>총점 오버 확률</span><strong>{
                   pct(conditional.headline_total.model_over_probability)} <i>/</i> {
                   pct(conditional.headline_total.market_over_probability)}</strong><small>{
                   conditional.headline_total.line}점 초과 · 우리 예측 / 배당사 (수수료 뺀 값)</small></Box>}
-                {conditional && <Box><span>핸디 커버 확률</span><strong>{pct(conditional.handicap.model_minus_probability)} <i>/</i> {
-                  conditional.handicap.market_minus_probability == null ? '—' : pct(conditional.handicap.market_minus_probability)}</strong><small>{
-                  conditional.handicap.market_minus_probability == null
-                    ? `${conditional.minusTeam.name} ${conditional.handicap.minimum_margin}점차 이상 · 배당사 가격 미수집이라 비교 불가`
-                    : `${conditional.minusTeam.name} ${conditional.handicap.minimum_margin}점차 이상 · 우리 예측 / 배당사 (수수료 뺀 값)`}</small></Box>}
                 <Box><span>총점 차이</span><strong>{game.market.model_total_difference == null ? '—' : `${game.market.model_total_difference > 0 ? '+' : ''}${game.market.model_total_difference}`}</strong><small>우리 평균 총점이 배당사 기준보다 {game.market.model_total_difference == null ? '—' : game.market.model_total_difference > 0 ? '높음' : game.market.model_total_difference < 0 ? '낮음' : '같음'}</small></Box>
               </Box>
               <Typography className="source-note">{game.market.provider} · {new Date(game.market.collected_at).toLocaleString('ko-KR')} · 배당사 정보는 비교용으로만 보여드리며 베팅 추천이 아닙니다.</Typography>
@@ -478,7 +447,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
                 <small>{personalAnalysis.model} · {personalAnalysis.disclaimer}</small>
               </Box>}
             </Box>
-            <Typography className="source-note">이 경기를 {p.model.simulations.toLocaleString()}번 가상으로 치러본 결과입니다. 팀 타격·수비, 선발과 불펜, 구장, 공개된 날씨·일정·라인업 요인은 모든 시행의 득점률에 반영됩니다. 타석 엔진은 타자별 득점권과 주자 상황 기록까지 매 타석에 적용합니다. 평균 점수, 대표 정수 점수, 승률, 마핸·플핸, 언더·오버는 모두 같은 {p.model.simulations.toLocaleString()}회 전체 분포에서 산출하며 미공개 자료만 중립값으로 둡니다. 평균 총점은 {stat(statisticalExpectedTotal, 2)}점입니다. {p.extra_innings
+            <Typography className="source-note">이 경기를 {p.model.simulations.toLocaleString()}번 가상으로 치러본 결과입니다. 팀 타격·수비, 선발과 불펜, 구장, 공개된 날씨·일정·라인업 요인은 모든 시행의 득점률에 반영됩니다. 타석 엔진은 타자별 득점권과 주자 상황 기록까지 매 타석에 적용합니다. 전체 결과로 일반 승패 확률을 정한 뒤, 우세팀이 실제로 이긴 시행들에서 대표 점수와 승리 조건부 총점 전망을 산출합니다. 핸디캡 예측은 제공하지 않으며 미공개 자료만 중립값으로 둡니다. 전체 평균 총점은 {stat(statisticalExpectedTotal, 2)}점입니다. {p.extra_innings
               ? game.league === 'MLB'
                 ? '연장은 실제 MLB 규정대로 승부치기(무사 2루 주자)를 적용해 승부가 날 때까지 치르기 때문에 무승부가 없습니다.'
                 : '연장은 실제 KBO 규정대로 승부치기 없이 11회까지만 치르고, 그래도 동점이면 무승부로 두고 승률 계산에서 뺍니다.'
@@ -872,11 +841,10 @@ function marketPicks(p: NonNullable<Game['prediction']>, game: Game,
 
 /** A stage 2 percentage describes its own branch, so the picks can only be compared on the
  *  chance each one actually lands. A pick with nothing to be judged against never competes. */
-function strongestRecommendation(picks: MarketPick[] | null, includeHandicap: boolean): MarketPick | null {
+function strongestRecommendation(picks: MarketPick[] | null): MarketPick | null {
   const landing = (pick: MarketPick) => pick.jointProbability ?? pick.probability
   return (picks ?? []).reduce<MarketPick | null>((best, pick) => {
     if (landing(pick) == null || pick.comparable === false) return best
-    if (!includeHandicap && pick.key === 'handicap') return best
     return !best || landing(best) == null || landing(pick)! > landing(best)! ? pick : best
   }, null)
 }
@@ -1061,22 +1029,6 @@ function fairTotalLine(p: NonNullable<Game['prediction']>) {
     const gap = (value: number) => Math.abs(p.totals[String(value)].over - p.totals[String(value)].under)
     return gap(line) < gap(best) ? line : best
   })
-}
-
-/** How the winner is likely to win, read inside its own branch. This is the evidence behind the
- *  stage 2 handicap pick: a favourite whose branch is mostly one-run wins does not cover, however
- *  strongly it is favoured to win outright. */
-function scenarioMarginBuckets(conditional: NonNullable<ReturnType<typeof conditionalMarket>>) {
-  const entries = Object.entries(conditional.margin_probabilities)
-  if (!entries.length) return null
-  const share = (test: (margin: number) => boolean) =>
-    entries.filter(([margin]) => test(Number(margin))).reduce((sum, [, value]) => sum + value, 0)
-  return [
-    { key: 'close', label: '1점차 승', share: share((margin) => margin === 1) },
-    { key: 'clear', label: '2점차 승', share: share((margin) => margin === 2) },
-    { key: 'wide', label: '3~4점차 승', share: share((margin) => margin >= 3 && margin <= 4) },
-    { key: 'blowout', label: '5점차 이상 승', share: share((margin) => margin >= 5) },
-  ].filter((bucket) => bucket.share > 0)
 }
 
 /** How the game is likely to feel, which separates matchups far better than an exact score.

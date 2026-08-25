@@ -44,10 +44,15 @@ def _missing_leagues_for_date(session, target_date: date) -> set[str]:
 
 
 def run_full_refresh(league: str, target_date: date | None = None, *, force: bool = False,
-                     trigger: str = "supabase_cron") -> dict[str, Any]:
+                     trigger: str = "supabase_cron", include_inning_backfill: bool = True) -> dict[str, Any]:
     target_date = target_date or datetime.now(KST).date()
     with job_lock(f"refresh:{league}:{target_date.isoformat()}"):
-        return _operation(league)(target_date, force=force, trigger=trigger)
+        if league == "KBO":
+            return refresh_kbo(
+                target_date, force=force, trigger=trigger,
+                include_inning_backfill=include_inning_backfill,
+            )
+        return refresh_mlb(target_date, force=force, trigger=trigger)
 
 
 def run_nearby_refresh(league: str) -> dict[str, Any]:

@@ -1558,9 +1558,16 @@ def test_run_line_pick_is_decided_against_the_market_price_not_a_flat_half():
     assert stingy_handicap["edge"] < 0
     assert stingy_handicap["pick_edge"] == pytest.approx(-stingy_handicap["edge"])
 
-    # The headline score follows the pick, so the card cannot show a cover beside a plus pick.
-    assert generous["projected_score"]["home"] - generous["projected_score"]["away"] >= 2
-    assert stingy["projected_score"]["home"] - stingy["projected_score"]["away"] == 1
+    # Handicap is no longer a published prediction and must not reshape the representative score.
+    # Changing only the handicap price therefore leaves the winner-scenario score unchanged.
+    assert (
+        generous["projected_score"]["home"],
+        generous["projected_score"]["away"],
+    ) == (
+        stingy["projected_score"]["home"],
+        stingy["projected_score"]["away"],
+    )
+    assert generous["projected_score"]["scenario_conditioning"] == "FAVORITE_WIN+HEADLINE_TOTAL"
 
     # The collected price always describes the home club, so an away run line inverts it.
     away_line = simulate_scores(4.0, 5.2, 20_000, 20260824, league="MLB",
