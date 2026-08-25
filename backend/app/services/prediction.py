@@ -10,7 +10,7 @@ from backend.app.config import settings
 from backend.app.services.bullpen import staff_payload
 from backend.app.services.feature_engineering import build_features, expected_runs, logistic_probability
 from backend.app.services.model_lifecycle import predict_with_runtime
-from backend.app.services.simulation import simulate_scores
+from backend.app.services.simulation import INNING_VARIANCE_RATIO, simulate_scores
 from backend.app.services.team_residuals import apply_residual_adjustment
 
 
@@ -23,6 +23,8 @@ MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-lo
                    "(in-inning run clumping, unobserved opposing matchup tilt, per-club shock) "
                    "+ upset volatility (bullpen fatigue, weather, travel, unannounced starter) "
                    "applied to the spread rather than the means "
+                   "+ MLB batted-ball flight over real outfield-wall geometry, so air density and "
+                   "wind reshape the park's home-run behaviour for the night "
                    "+ leakage-safe team offense/defense residual EWMA calibration "
                    "+ conservative pregame bookmaker-consensus total/win anchor when available "
                    "+ league walk-forward Platt win calibration with outcome-branch reweighting "
@@ -48,7 +50,11 @@ MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-lo
 # inning, an unobserved matchup tilt widens margins without widening totals, and a small smooth
 # per-club shock remains. Against 1,934 MLB finals this lands team SD, total SD and the
 # two clubs' correlation within .01 of the real values.
-SIMULATION_SUMMARY_SCHEMA_VERSION = 30
+# 31: extra innings are no longer added on top of a full-game run mean, and the ballpark now
+# reaches the inning engine as a change to the shape of an inning rather than being discarded.
+# MLB adds a batted-ball flight model (Nathan RK4 over real outfield-wall geometry) so tonight's
+# air density and wind adjust the park's home-run behaviour; KBO is unchanged.
+SIMULATION_SUMMARY_SCHEMA_VERSION = 31
 
 
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,
@@ -192,6 +198,14 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     home_table = (lineup_tables or {}).get("home")
     away_table = (lineup_tables or {}).get("away")
     park_events = features.get("park_event_factors") or {}
+    # Park and contact quality reshape an inning rather than rescale it: the run means already
+    # carry the park through `park_factor`, so applying it again to the rate would count the
+    # ballpark twice. This is the channel the inning engine used to discard entirely - the
+    # per-event park factors only ever reached the plate-appearance engine, which runs on the
+    # minority of games where both lineups have collected splits.
+    league_inning_ratio = INNING_VARIANCE_RATIO.get(game.league, 1.0)
+    home_inning_ratio = league_inning_ratio * (1 + float(features.get("home_batted_ball_clumping") or 0.0))
+    away_inning_ratio = league_inning_ratio * (1 + float(features.get("away_batted_ball_clumping") or 0.0))
     simulation = simulate_scores(
         home_runs, away_runs, settings.simulations, seed, environment_variance, team_variance,
         league=game.league, home_staff=home_staff, away_staff=away_staff,
@@ -202,6 +216,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         headline_home_spread=headline_market.get("home_spread"),
         headline_spread_probability=headline_market.get("home_spread_probability"),
         headline_total_over_probability=headline_market.get("total_over_probability"),
+        home_inning_variance_ratio=home_inning_ratio,
+        away_inning_variance_ratio=away_inning_ratio,
         probability_calibration=probability_calibration,
         home_event_factors=park_events.get("home"), away_event_factors=park_events.get("away"),
     )
@@ -217,6 +233,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "headline_home_spread": headline_market.get("home_spread"),
         "headline_spread_probability": headline_market.get("home_spread_probability"),
         "headline_total_over_probability": headline_market.get("total_over_probability"),
+        "home_inning_variance_ratio": home_inning_ratio,
+        "away_inning_variance_ratio": away_inning_ratio,
         "probability_calibration": probability_calibration,
         "home_event_factors": park_events.get("home"), "away_event_factors": park_events.get("away"),
     }
@@ -296,6 +314,22 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "display_expected_score": display_score,
             "score_estimates": score_estimates,
             "simulation_environment_variance": round(environment_variance, 4),
+            # What this park and these lineups do to the shape of an inning.
+            "batted_ball_park": {
+                "league_inning_variance_ratio": league_inning_ratio,
+                "home_inning_variance_ratio": round(home_inning_ratio, 4),
+                "away_inning_variance_ratio": round(away_inning_ratio, 4),
+                "home_clumping": round(float(features.get("home_batted_ball_clumping") or 0.0), 4),
+                "away_clumping": round(float(features.get("away_batted_ball_clumping") or 0.0), 4),
+                "home_lineup_hard_hit": round(float(features.get("home_lineup_hard_hit") or 0.0), 4),
+                "away_lineup_hard_hit": round(float(features.get("away_lineup_hard_hit") or 0.0), 4),
+                "hard_hit_available": bool(features.get("hard_hit_available")),
+                # Tonight's air against this park's own ordinary night, from the trajectory model.
+                "park_weather_home_run_multiplier": round(
+                    float(features.get("park_weather_home_run_multiplier") or 1.0), 4),
+                "park_weather_available": bool(features.get("park_weather_available")),
+                "park_event_factors": park_events,
+            },
             # Why this particular game is more or less predictable than the league baseline.
             "upset_volatility": volatility,
             "upset_watch": upset_watch(home_probability, headline_market, volatility,

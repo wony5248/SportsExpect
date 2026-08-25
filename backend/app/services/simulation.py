@@ -323,6 +323,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                     home_event_factors: dict[str, float] | None = None,
                     away_event_factors: dict[str, float] | None = None,
                     inning_variance_ratio: float | None = None,
+                    home_inning_variance_ratio: float | None = None,
+                    away_inning_variance_ratio: float | None = None,
                     matchup_variance: float | None = None) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
     if home_lineup is not None and away_lineup is not None:
@@ -349,6 +351,12 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                           else np.ones(simulations))
     inning_ratio = (float(inning_variance_ratio) if inning_variance_ratio is not None
                     else INNING_VARIANCE_RATIO.get(league, 1.0))
+    # A park's effect on run totals is already in the run means through the park factor. What it
+    # also does, and what a mean cannot express, is change the shape: a park where balls leave
+    # the yard turns quiet innings into three-run innings, so the same expected total arrives in
+    # lumps. Each club carries its own value because the park is shared but the contact is not.
+    home_ratio = max(1.0, float(home_inning_variance_ratio)) if home_inning_variance_ratio is not None else inning_ratio
+    away_ratio = max(1.0, float(away_inning_variance_ratio)) if away_inning_variance_ratio is not None else inning_ratio
     # Whatever separates two clubs on the day that the model could not see - a starter sharper
     # than his ERA, a lineup that is hot - lifts one side and suppresses the other, because runs
     # are a contest between an offense and the opposing pitching. That is one unobserved shock
@@ -398,7 +406,7 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                 home_staff_profile, inning, home_total - away_total, calibrating)
             home_tiers.update(home_used)
             away_runs = _draw_runs(rng, away_rate * away_scale * away_weights[inning] * home_multiplier,
-                                   inning_ratio)
+                                   away_ratio)
             away_line[:, inning] = away_runs
             away_total += away_runs
             # Bottom half, with the top half already on the board.
@@ -406,7 +414,7 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                 away_staff_profile, inning, away_total - home_total, calibrating)
             away_tiers.update(away_used)
             home_runs = _draw_runs(rng, home_rate * home_scale * home_weights[inning] * away_multiplier,
-                                   inning_ratio)
+                                   home_ratio)
             if inning == 8:
                 # The home club does not bat in the ninth while ahead, and a walk-off ends the
                 # inning the moment the winning run scores. Both cap home scoring in a way a
@@ -440,7 +448,7 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     calibration_extra_home, calibration_extra_away, _, _ = _play_extras(
         rng, calibration_home_line.sum(axis=1), calibration_away_line.sum(axis=1),
         home_extra_rate, away_extra_rate, ghost_bonus, max_extra_innings, league,
-        inning_ratio, simulations, collect_columns=False,
+        home_ratio, away_ratio, simulations, collect_columns=False,
     )
     home_scale = _rate_correction(home_expected - float(calibration_extra_home.mean()),
                                   calibration_home_line)
@@ -451,7 +459,7 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     away = away_innings.sum(axis=1)
     extra_home_added, extra_away_added, extra_home_columns, extra_away_columns = _play_extras(
         rng, home, away, home_extra_rate, away_extra_rate, ghost_bonus, max_extra_innings,
-        league, inning_ratio, simulations,
+        league, home_ratio, away_ratio, simulations,
     )
     if extra_away_columns:
         away_innings = np.concatenate([away_innings, np.stack(extra_away_columns, axis=1)], axis=1)
@@ -481,6 +489,8 @@ def evaluate_simulation_recipe(recipe: dict[str, Any], observed_result: dict[str
         headline_home_spread=recipe.get("headline_home_spread"),
         headline_spread_probability=recipe.get("headline_spread_probability"),
         headline_total_over_probability=recipe.get("headline_total_over_probability"),
+        home_inning_variance_ratio=recipe.get("home_inning_variance_ratio"),
+        away_inning_variance_ratio=recipe.get("away_inning_variance_ratio"),
         probability_calibration=recipe.get("probability_calibration"),
     )
     return result["observed_evaluation"]
@@ -1373,7 +1383,8 @@ def _staff_profile(staff: dict[str, Any] | None, rng: np.random.Generator, simul
 
 def _play_extras(rng: np.random.Generator, home: np.ndarray, away: np.ndarray,
                  home_extra_rate: np.ndarray, away_extra_rate: np.ndarray, ghost_bonus: float,
-                 max_extra_innings: int, league: str, inning_ratio: float, simulations: int,
+                 max_extra_innings: int, league: str, home_ratio: float, away_ratio: float,
+                 simulations: int,
                  collect_columns: bool = True) -> tuple[np.ndarray, np.ndarray,
                                                         list[np.ndarray], list[np.ndarray]]:
     """Play the tiebreaker on a regulation population, returning the runs each club added.
@@ -1391,8 +1402,8 @@ def _play_extras(rng: np.random.Generator, home: np.ndarray, away: np.ndarray,
         if not tied.any():
             break
         indices = np.flatnonzero(tied)
-        away_inning_runs = _draw_runs(rng, away_extra_rate[indices] + ghost_bonus, inning_ratio)
-        home_inning_runs = _draw_runs(rng, home_extra_rate[indices] + ghost_bonus, inning_ratio)
+        away_inning_runs = _draw_runs(rng, away_extra_rate[indices] + ghost_bonus, away_ratio)
+        home_inning_runs = _draw_runs(rng, home_extra_rate[indices] + ghost_bonus, home_ratio)
         # The home half ends the moment the winning run scores (walk-off), capping the margin.
         home_inning_runs = np.minimum(home_inning_runs, away_inning_runs + 1)
         if collect_columns:
