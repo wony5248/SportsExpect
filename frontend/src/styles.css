@@ -24,6 +24,13 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .operations-banner > div { display: grid; gap: 3px; }.operations-banner span { color: #7b958b; font-size: .68rem; }.operations-banner b { color: #cce1d8; }.operations-banner strong { color: #7ee7b8; text-align: right; }
 .section-heading h2 { margin-top: 6px; font-size: clamp(1.75rem, 4vw, 2.5rem); }
 .game-count { color: #718b81; font-size: .75rem !important; font-weight: 800 !important; letter-spacing: .13em !important; }
+/* What time the board is as of, which is the first thing a reader needs before trusting it. */
+.forecast-stamp { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 10px !important; }
+.forecast-stamp b { color: #cfe7dc; font-size: .8rem; font-weight: 750; font-variant-numeric: tabular-nums; }
+.forecast-stamp span { color: #718b81; font-size: .68rem; }
+.forecast-stamp b::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 7px;
+  border-radius: 50%; background: #65dbaa; vertical-align: middle; }
+.forecast-stamp .forecast-stamp-spread { color: #8a7f5f; }
 .game-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 18px; align-items: start; }
 /* Korean wraps mid-word by default, which produced breaks like "승부치 / 기" and
    "이닝 흐 / 름". keep-all moves the break to a space; break-word still saves a single
@@ -123,6 +130,21 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .pick-joint { color: #8ba299; font-size: .58rem; font-variant-numeric: tabular-nums; }
 .pick-joint::before { content: ''; display: inline-block; width: 5px; height: 5px; margin-right: 5px;
   border-radius: 2px; background: rgba(126,231,184,.5); vertical-align: middle; }
+/* Where the underdog stands against the posted price, and what makes the game unpredictable. */
+.upset-block { display: grid; gap: 8px; margin-top: 14px; padding: 13px 14px; border-radius: 13px;
+  border: 1px solid rgba(189,231,213,.13); background: rgba(3,16,12,.34); }
+.upset-block.flagged { border-color: rgba(215,185,107,.4); background: rgba(215,185,107,.07); }
+.upset-heading b { color: #cfe7dc; font-size: .74rem; font-weight: 750; }
+.upset-block.flagged .upset-heading b { color: #e8d49a; }
+.upset-heading small { color: #7d968c; font-size: .61rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.upset-track { position: relative; height: 7px; border-radius: 4px; background: rgba(119,155,140,.16); }
+.upset-track i { display: block; height: 100%; border-radius: 4px; background: #9db0a8; }
+.upset-block.flagged .upset-track i { background: #d7b96b; }
+.upset-track b { position: absolute; top: -3px; width: 2px; height: 13px; border-radius: 1px; background: #eaf4ef; }
+.upset-note { color: #8ba299; font-size: .6rem; line-height: 1.45; }
+.upset-reasons { margin: 0; padding-left: 16px; display: grid; gap: 3px; }
+.upset-reasons li { color: #a8bdb2; font-size: .62rem; line-height: 1.4; }
+.upset-disclaimer { color: #6b847b; font-size: .56rem; line-height: 1.4; }
 /* The branch every second-stage number is conditional on, stated once and in full. */
 .scenario-block { display: grid; gap: 9px; margin-top: 14px; padding: 13px 14px; border-radius: 13px;
   border: 1px solid rgba(126,231,184,.2); background: rgba(126,231,184,.05); }
@@ -136,6 +158,7 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .scenario-grid small { color: #667f75; font-size: .56rem; line-height: 1.35; }
 .scenario-note { color: #8ba299; font-size: .59rem; line-height: 1.45; }
 .score-row { display: grid; grid-template-columns: 1fr 1px 1fr; gap: 14px; padding: 18px 4px 20px; }
+.score-row.single { grid-template-columns: 1fr; }
 .score-row > div { display: grid; align-content: center; }
 .score-row span, .market-row span { color: #728b81; font-size: .67rem; }
 .score-row strong { margin-top: 4px; font-size: 1.12rem; }
@@ -438,6 +461,9 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .section-heading { align-items: flex-start !important; }
   .section-heading h2 { font-size: 1.55rem; }
   .game-count { padding-top: 23px; font-size: .66rem !important; }
+  .forecast-stamp { gap: 2px 8px; }
+  .forecast-stamp b { font-size: .74rem; }
+  .forecast-stamp span { font-size: .63rem; }
   .score-row span { font-size: .61rem; }
   .score-row strong { font-size: .86rem; }
   .score-row > div.primary strong { font-size: 1rem; }

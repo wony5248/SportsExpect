@@ -16,15 +16,19 @@ MAX_CALIBRATION_SAMPLES = 1000
 MIN_DISTRIBUTION_VALIDATION_SAMPLES = 200
 CALIBRATION_METHOD = "LEAGUE_WALK_FORWARD_PLATT_V2_IRLS"
 PLATT_L2_REGULARIZATION = 4.0
-# Historical win-only checks remain the provisional gate until schema-v24 replays have collected
-# enough pre/post score-distribution diagnostics. At that point the dynamic gate below requires
-# win, run, margin, run-line and total metrics to stay within their own guardrails.
+# Fallback only, for a league with too few finals to measure anything yet. It is deliberately
+# HOLD: with no evidence the safe action is to leave probabilities untouched. Every league with
+# data is gated by `walk_forward_win_validation` below, measured from that league's own results,
+# because a hardcoded verdict silently goes stale - this table once held MLB at HOLD on a
+# +.00023 Brier delta while the measured out-of-sample delta was -.0034, which kept every MLB
+# forecast uncalibrated and materially overconfident.
 CALIBRATION_VALIDATION = {
-    "KBO": {"status": "PASS", "sample_count": 555, "brier_delta": -.00014,
-            "log_loss_delta": -.00029, "validation_scope": "WIN_ONLY_PROVISIONAL"},
-    "MLB": {"status": "HOLD", "sample_count": 1963, "brier_delta": .00023,
-            "log_loss_delta": .00050, "validation_scope": "WIN_ONLY_PROVISIONAL"},
+    "KBO": {"status": "HOLD", "sample_count": 0, "validation_scope": "NO_MEASUREMENT_YET"},
+    "MLB": {"status": "HOLD", "sample_count": 0, "validation_scope": "NO_MEASUREMENT_YET"},
 }
+# Below this a walk-forward win-probability verdict is noise. The map has two parameters and
+# needs a fitting window before it can be scored at all.
+MIN_WIN_VALIDATION_SAMPLES = 150
 CALIBRATION_GUARDRAILS = {
     "brier": 0.0, "log_loss": 0.0, "run_mae": .02, "total_mae": .03,
     "margin_mae": .03, "handicap_brier": .002, "total_brier": .002,
@@ -113,7 +117,12 @@ class LeagueProbabilityCalibrationHistory:
                 probability=_clip(float(raw_probability), .001, .999),
                 outcome=1.0 if result.home_score > result.away_score else 0.0,
             ))
-        validation = distribution_calibration_validation(distribution_observations, league)
+        win_validation = walk_forward_win_validation(
+            sorted(observations, key=lambda row: (row.available_at, row.game_id)), league,
+        )
+        validation = distribution_calibration_validation(
+            distribution_observations, league, win_validation,
+        )
         return cls(observations, validation)
 
     def context_for(self, game: Game) -> dict[str, Any]:
@@ -149,12 +158,77 @@ class LeagueProbabilityCalibrationHistory:
         }
 
 
+def walk_forward_win_validation(observations: list[ProbabilityObservation],
+                                league: str) -> dict[str, Any]:
+    """Score the calibration map the way it is actually used: fit on the past, predict forward.
+
+    Every game is judged by a map fitted only on that league's games that were already final,
+    so the verdict contains no information the live forecast would not have had. Anything less
+    honest here is worse than no gate at all, because it would license a map onto every future
+    forecast on the strength of results it had already seen.
+    """
+    if len(observations) < MIN_WIN_VALIDATION_SAMPLES:
+        provisional = dict(CALIBRATION_VALIDATION.get(league, {"status": "HOLD"}))
+        provisional.update({
+            "validation_scope": "WIN_WALK_FORWARD",
+            "status": "HOLD", "reason": "INSUFFICIENT_FINALS",
+            "sample_count": len(observations),
+            "minimum_samples": MIN_WIN_VALIDATION_SAMPLES,
+        })
+        return provisional
+    raw_brier = raw_log = calibrated_brier = calibrated_log = 0.0
+    scored = 0
+    for index, row in enumerate(observations):
+        prior = [
+            candidate for candidate in observations[:index]
+            if candidate.season == row.season and candidate.available_at <= row.available_at
+        ][-MAX_CALIBRATION_SAMPLES:]
+        if len(prior) < MIN_CALIBRATION_SAMPLES:
+            continue
+        slope, intercept = fit_platt([(item.probability, item.outcome) for item in prior])
+        calibrated = _clip(_sigmoid(intercept + slope * _logit(row.probability)), .001, .999)
+        raw = _clip(row.probability, .001, .999)
+        raw_brier += (raw - row.outcome) ** 2
+        calibrated_brier += (calibrated - row.outcome) ** 2
+        raw_log += -(row.outcome * math.log(raw) + (1 - row.outcome) * math.log(1 - raw))
+        calibrated_log += -(row.outcome * math.log(calibrated) + (1 - row.outcome) * math.log(1 - calibrated))
+        scored += 1
+    if scored < MIN_WIN_VALIDATION_SAMPLES:
+        provisional = dict(CALIBRATION_VALIDATION.get(league, {"status": "HOLD"}))
+        provisional.update({
+            "validation_scope": "WIN_WALK_FORWARD",
+            "status": "HOLD", "reason": "INSUFFICIENT_WALK_FORWARD_WINDOW",
+            "sample_count": scored, "minimum_samples": MIN_WIN_VALIDATION_SAMPLES,
+        })
+        return provisional
+    brier_delta = round(calibrated_brier / scored - raw_brier / scored, 8)
+    log_loss_delta = round(calibrated_log / scored - raw_log / scored, 8)
+    # A map has to beat leaving the probabilities alone on both scores, not just one.
+    passed = brier_delta < 0 and log_loss_delta < 0
+    return {
+        "status": "PASS" if passed else "HOLD",
+        "validation_scope": "WIN_WALK_FORWARD",
+        "reason": None if passed else "NO_OUT_OF_SAMPLE_IMPROVEMENT",
+        "sample_count": scored,
+        "minimum_samples": MIN_WIN_VALIDATION_SAMPLES,
+        "raw_brier": round(raw_brier / scored, 8),
+        "calibrated_brier": round(calibrated_brier / scored, 8),
+        "raw_log_loss": round(raw_log / scored, 8),
+        "calibrated_log_loss": round(calibrated_log / scored, 8),
+        "brier_delta": brier_delta,
+        "log_loss_delta": log_loss_delta,
+    }
+
+
 def distribution_calibration_validation(
     observations: list[DistributionCalibrationObservation], league: str,
+    win_validation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Gate outcome reweighting on every distribution family it changes."""
     if len(observations) < MIN_DISTRIBUTION_VALIDATION_SAMPLES:
-        provisional = dict(CALIBRATION_VALIDATION.get(league, {"status": "HOLD"}))
+        # No pre/post distribution pairs yet, which is expected until a map has been live for a
+        # while. Fall back to the win-probability verdict measured from this league's results.
+        provisional = dict(win_validation or CALIBRATION_VALIDATION.get(league, {"status": "HOLD"}))
         provisional.update({
             "distribution_status": "COLLECTING",
             "distribution_sample_count": len(observations),

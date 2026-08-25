@@ -161,6 +161,38 @@ DENSE_INTERVAL_MASS = .60
 # Cover every plausible baseball total posted by a book. Integer values are retained as ints so
 # JSON keys match JavaScript's String(8) rather than becoming "8.0".
 TOTAL_MARKET_LINES = tuple(value // 2 if value % 2 == 0 else value / 2 for value in range(8, 41))
+# Ratio of variance to mean for the runs scored in one half-inning. Real half-innings are
+# nothing like Poisson: across 34,278 MLB half-innings the ratio is 2.14, because runs arrive in
+# rallies rather than one at a time. 73% of half-innings are scoreless and 5.7% score three or
+# more, where a Poisson draw at the same mean gives 61% and 1.4%. Modelling them as Poisson made
+# runs dribble out evenly, which pushed the two clubs' totals together and produced far too many
+# one-run games and far too few blowouts. Fitted per league against the real half-inning tables.
+# Fitted jointly with the team and matchup terms below against the real per-game distributions,
+# because all three draw on the same variance budget: raising one without lowering the others
+# simply inflates every score. Overdispersion this side of the fitted value would match the real
+# half-inning table more closely still, but only by giving game totals more spread than real
+# games have - real innings are negatively dependent within a game (a club that puts up five
+# gets shut down after the pitching change) and this engine draws them independently.
+INNING_VARIANCE_RATIO = {"MLB": 1.6, "KBO": 1.6}
+# Log-scale spread of the unobserved day-of matchup tilt, fitted per league. This is the term
+# that carries the strength gap the model cannot identify: real margins are wider than anything
+# our per-game means explain, but our predicted margins correlate only .08 with actual ones, so
+# widening the means would be false precision. An unattributed opposing tilt widens the margin
+# distribution without claiming to know which club it favours in any given game.
+MATCHUP_VARIANCE = {"MLB": .18, "KBO": .22}
+
+
+def _draw_runs(rng: np.random.Generator, rate: np.ndarray | float, ratio: float) -> np.ndarray:
+    """Runs in one half-inning: overdispersed around `rate` by `ratio`, mean preserved."""
+    if ratio <= 1.0:
+        return rng.poisson(rate)
+    mean = np.maximum(np.asarray(rate, dtype=float), 1e-9)
+    # Negative binomial with variance `ratio` x mean. Shape falls as the mean falls, which is
+    # what keeps a quiet inning quiet instead of merely rescaling a Poisson.
+    shape = mean / (ratio - 1.0)
+    return rng.negative_binomial(shape, shape / (shape + mean))
+
+
 # A representative score is already conditional on the predicted winner winning. Requiring only
 # 50% cover probability inside that branch overstates weak favorites, so promotion beyond the
 # active market run line needs a materially stronger conditional majority. This value is
@@ -289,7 +321,9 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
                     headline_total_over_probability: float | None = None,
                     probability_calibration: dict[str, Any] | None = None,
                     home_event_factors: dict[str, float] | None = None,
-                    away_event_factors: dict[str, float] | None = None) -> dict[str, Any]:
+                    away_event_factors: dict[str, float] | None = None,
+                    inning_variance_ratio: float | None = None,
+                    matchup_variance: float | None = None) -> dict[str, Any]:
     rng = np.random.default_rng(seed)
     if home_lineup is not None and away_lineup is not None:
         # Both lineups have collected splits, so play the game out plate appearance by plate
@@ -303,16 +337,36 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
             headline_spread_probability=headline_spread_probability,
             headline_total_over_probability=headline_total_over_probability,
             probability_calibration=probability_calibration)
-    # A shared gamma run environment creates realistic over-dispersion and correlation
-    # (weather/umpire/park conditions affect both clubs) while preserving expected means.
-    variance = min(.18, max(.02, environment_variance))
-    shape = 1 / variance
-    shared_environment = rng.gamma(shape, variance, simulations)
+    # A shared gamma run environment would make both clubs score together. Real games do not
+    # behave that way: across 1,953 finished MLB games the two clubs' scores correlate -0.02,
+    # and across 555 KBO games -0.03, i.e. independent. The conditions this term was meant to
+    # represent - park, weather, umpire - are already in the run means through the park factor
+    # and the weather multiplier, so drawing them again here double-counted them and forced a
+    # +0.16 correlation into every matchup. That inflated total variance and, because the shared
+    # factor cancels in the difference, squeezed run margins toward one run.
+    variance = min(.18, max(0.0, environment_variance))
+    shared_environment = (rng.gamma(1 / variance, variance, simulations) if variance > 0
+                          else np.ones(simulations))
+    inning_ratio = (float(inning_variance_ratio) if inning_variance_ratio is not None
+                    else INNING_VARIANCE_RATIO.get(league, 1.0))
+    # Whatever separates two clubs on the day that the model could not see - a starter sharper
+    # than his ERA, a lineup that is hot - lifts one side and suppresses the other, because runs
+    # are a contest between an offense and the opposing pitching. That is one unobserved shock
+    # pointing in opposite directions, so it widens run margins without touching run totals,
+    # which independent per-club shocks cannot do. Mean-preserving in both directions.
+    matchup_sigma = max(0.0, float(matchup_variance if matchup_variance is not None
+                                   else MATCHUP_VARIANCE.get(league, 0.0)))
+    if matchup_sigma > 0:
+        tilt = rng.normal(0.0, matchup_sigma, simulations)
+        home_tilt = np.exp(tilt - matchup_sigma ** 2 / 2)
+        away_tilt = np.exp(-tilt - matchup_sigma ** 2 / 2)
+    else:
+        home_tilt = away_tilt = np.ones(simulations)
     # Baseball scoring is more dispersed than a Poisson process even after shared weather/park effects.
     # Independent gamma shocks represent sequencing, defense and bullpen execution specific to each club.
-    home_independent_variance = min(.32, max(.04,
+    home_independent_variance = min(.32, max(.01,
         team_variance if home_team_variance is None else home_team_variance))
-    away_independent_variance = min(.32, max(.04,
+    away_independent_variance = min(.32, max(.01,
         team_variance if away_team_variance is None else away_team_variance))
     home_environment = rng.gamma(1 / home_independent_variance, home_independent_variance, simulations)
     away_environment = rng.gamma(1 / away_independent_variance, away_independent_variance, simulations)
@@ -324,8 +378,8 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     home_weights /= home_weights.sum()
     # Who is on the mound depends on the score, so innings are drawn one at a time. The away
     # staff suppresses home scoring and vice versa.
-    home_rate = home_expected * shared_environment * home_environment
-    away_rate = away_expected * shared_environment * away_environment
+    home_rate = home_expected * shared_environment * home_environment * home_tilt
+    away_rate = away_expected * shared_environment * away_environment * away_tilt
     away_staff_profile = _staff_profile(away_staff, rng, simulations)
     home_staff_profile = _staff_profile(home_staff, rng, simulations)
 
@@ -343,14 +397,16 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
             home_multiplier, home_used = _inning_multiplier(
                 home_staff_profile, inning, home_total - away_total, calibrating)
             home_tiers.update(home_used)
-            away_runs = rng.poisson(away_rate * away_scale * away_weights[inning] * home_multiplier)
+            away_runs = _draw_runs(rng, away_rate * away_scale * away_weights[inning] * home_multiplier,
+                                   inning_ratio)
             away_line[:, inning] = away_runs
             away_total += away_runs
             # Bottom half, with the top half already on the board.
             away_multiplier, away_used = _inning_multiplier(
                 away_staff_profile, inning, away_total - home_total, calibrating)
             away_tiers.update(away_used)
-            home_runs = rng.poisson(home_rate * home_scale * home_weights[inning] * away_multiplier)
+            home_runs = _draw_runs(rng, home_rate * home_scale * home_weights[inning] * away_multiplier,
+                                   inning_ratio)
             if inning == 8:
                 # The home club does not bat in the ninth while ahead, and a walk-off ends the
                 # inning the moment the winning run scores. Both cap home scoring in a way a
@@ -368,11 +424,6 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     calibration_home_line, calibration_away_line, calibration_home, calibration_away = play_nine(calibrating=True)
     _apply_realized_normalizer(home_staff_profile, calibration_home)
     _apply_realized_normalizer(away_staff_profile, calibration_away)
-    home_scale = _rate_correction(home_expected, calibration_home_line)
-    away_scale = _rate_correction(away_expected, calibration_away_line)
-    home_innings, away_innings, home_tier_counts, away_tier_counts = play_nine(False, home_scale, away_scale)
-    home = home_innings.sum(axis=1)
-    away = away_innings.sum(axis=1)
     # League-accurate extra innings. MLB plays the automatic-runner tiebreaker until every game
     # is decided; KBO plays innings 10-11 without a tiebreaker and lets remaining ties stand.
     # Extra innings are the definition of high leverage: both managers are down to their best
@@ -381,41 +432,27 @@ def simulate_scores(home_expected: float, away_expected: float, simulations: int
     away_extra_rate = away_rate * EXTRA_INNING_WEIGHT * _normalized_tier(home_staff_profile, "high_leverage")
     ghost_bonus = MLB_GHOST_RUNNER_BONUS if league == "MLB" else 0.0
     max_extra_innings = MLB_MAX_EXTRA_INNINGS if league == "MLB" else KBO_MAX_EXTRA_INNINGS
-    extra_away_columns: list[np.ndarray] = []
-    extra_home_columns: list[np.ndarray] = []
-    tied = home == away
-    for _ in range(max_extra_innings):
-        if not tied.any():
-            break
-        indices = np.flatnonzero(tied)
-        away_inning_runs = rng.poisson(away_extra_rate[indices] + ghost_bonus)
-        home_inning_runs = rng.poisson(home_extra_rate[indices] + ghost_bonus)
-        # The home half ends the moment the winning run scores (walk-off), capping the margin.
-        home_inning_runs = np.minimum(home_inning_runs, away_inning_runs + 1)
-        away_column = np.full(simulations, -1, dtype=np.int64)
-        home_column = np.full(simulations, -1, dtype=np.int64)
-        away_column[indices] = away_inning_runs
-        home_column[indices] = home_inning_runs
-        extra_away_columns.append(away_column)
-        extra_home_columns.append(home_column)
-        away[indices] += away_inning_runs
-        home[indices] += home_inning_runs
-        tied = home == away
-
-    if league == "MLB" and tied.any():
-        # Beyond the practical cap, decide by relative extra-inning scoring rates.
-        indices = np.flatnonzero(tied)
-        home_strength = home_extra_rate[indices] + ghost_bonus
-        away_strength = away_extra_rate[indices] + ghost_bonus
-        home_walkoff = rng.random(indices.size) < home_strength / (home_strength + away_strength)
-        away_column = np.full(simulations, -1, dtype=np.int64)
-        home_column = np.full(simulations, -1, dtype=np.int64)
-        away_column[indices] = np.where(home_walkoff, 0, 1)
-        home_column[indices] = np.where(home_walkoff, 1, 0)
-        extra_away_columns.append(away_column)
-        extra_home_columns.append(home_column)
-        away[indices] += away_column[indices]
-        home[indices] += home_column[indices]
+    # A club's season run rate already counts the runs it scored in extra innings, so the nine
+    # innings must not be asked to reproduce that whole rate and then have the tiebreaker add
+    # more on top. Play the tiebreaker once on the neutral pass to measure what it contributes,
+    # and hand the nine innings only the rest. Without this every total ran about a third of a
+    # run high, which biased every over/under read toward the over.
+    calibration_extra_home, calibration_extra_away, _, _ = _play_extras(
+        rng, calibration_home_line.sum(axis=1), calibration_away_line.sum(axis=1),
+        home_extra_rate, away_extra_rate, ghost_bonus, max_extra_innings, league,
+        inning_ratio, simulations, collect_columns=False,
+    )
+    home_scale = _rate_correction(home_expected - float(calibration_extra_home.mean()),
+                                  calibration_home_line)
+    away_scale = _rate_correction(away_expected - float(calibration_extra_away.mean()),
+                                  calibration_away_line)
+    home_innings, away_innings, home_tier_counts, away_tier_counts = play_nine(False, home_scale, away_scale)
+    home = home_innings.sum(axis=1)
+    away = away_innings.sum(axis=1)
+    extra_home_added, extra_away_added, extra_home_columns, extra_away_columns = _play_extras(
+        rng, home, away, home_extra_rate, away_extra_rate, ghost_bonus, max_extra_innings,
+        league, inning_ratio, simulations,
+    )
     if extra_away_columns:
         away_innings = np.concatenate([away_innings, np.stack(extra_away_columns, axis=1)], axis=1)
         home_innings = np.concatenate([home_innings, np.stack(extra_home_columns, axis=1)], axis=1)
@@ -1332,6 +1369,61 @@ def _staff_profile(staff: dict[str, Any] | None, rng: np.random.Generator, simul
         "starter_multiplier": starter_multiplier, "starter_innings": starter_innings,
         "bullpen": bullpen, "normalizer": max(.3, normalizer), "exit_inning": exit_inning.astype(np.int64),
     }
+
+
+def _play_extras(rng: np.random.Generator, home: np.ndarray, away: np.ndarray,
+                 home_extra_rate: np.ndarray, away_extra_rate: np.ndarray, ghost_bonus: float,
+                 max_extra_innings: int, league: str, inning_ratio: float, simulations: int,
+                 collect_columns: bool = True) -> tuple[np.ndarray, np.ndarray,
+                                                        list[np.ndarray], list[np.ndarray]]:
+    """Play the tiebreaker on a regulation population, returning the runs each club added.
+
+    `home` and `away` are updated in place when columns are collected, which is how the real
+    pass uses it; the calibration pass works on copies because it only needs the totals.
+    """
+    if not collect_columns:
+        home, away = home.copy(), away.copy()
+    start_home, start_away = home.copy(), away.copy()
+    home_columns: list[np.ndarray] = []
+    away_columns: list[np.ndarray] = []
+    tied = home == away
+    for _ in range(max_extra_innings):
+        if not tied.any():
+            break
+        indices = np.flatnonzero(tied)
+        away_inning_runs = _draw_runs(rng, away_extra_rate[indices] + ghost_bonus, inning_ratio)
+        home_inning_runs = _draw_runs(rng, home_extra_rate[indices] + ghost_bonus, inning_ratio)
+        # The home half ends the moment the winning run scores (walk-off), capping the margin.
+        home_inning_runs = np.minimum(home_inning_runs, away_inning_runs + 1)
+        if collect_columns:
+            away_column = np.full(simulations, -1, dtype=np.int64)
+            home_column = np.full(simulations, -1, dtype=np.int64)
+            away_column[indices] = away_inning_runs
+            home_column[indices] = home_inning_runs
+            away_columns.append(away_column)
+            home_columns.append(home_column)
+        away[indices] += away_inning_runs
+        home[indices] += home_inning_runs
+        tied = home == away
+
+    if league == "MLB" and tied.any():
+        # Beyond the practical cap, decide by relative extra-inning scoring rates.
+        indices = np.flatnonzero(tied)
+        home_strength = home_extra_rate[indices] + ghost_bonus
+        away_strength = away_extra_rate[indices] + ghost_bonus
+        home_walkoff = rng.random(indices.size) < home_strength / (home_strength + away_strength)
+        away_added = np.where(home_walkoff, 0, 1)
+        home_added = np.where(home_walkoff, 1, 0)
+        if collect_columns:
+            away_column = np.full(simulations, -1, dtype=np.int64)
+            home_column = np.full(simulations, -1, dtype=np.int64)
+            away_column[indices] = away_added
+            home_column[indices] = home_added
+            away_columns.append(away_column)
+            home_columns.append(home_column)
+        away[indices] += away_added
+        home[indices] += home_added
+    return home - start_home, away - start_away, home_columns, away_columns
 
 
 def _rate_correction(target: float, calibration_line: np.ndarray) -> float:

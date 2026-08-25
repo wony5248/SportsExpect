@@ -72,14 +72,13 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const fullDistributionScore = p?.full_distribution_score
     ?? p?.score_estimates?.full_distribution
     ?? p?.score_estimates?.mode
-  // The unconditional exact-score mode systematically collapses MLB games into adjacent
-  // one-run finals after ties are resolved. Use the distribution-aware representative for the
-  // headline and keep the honest exact-score mode in the detailed comparison below.
-  const headlineScore = meanScore ?? predictedScore ?? fullDistributionScore
-  const closeGame = Boolean(p && Math.max(p.home_win_probability, p.away_win_probability) < .55)
-  const scenarioBranches = p?.close_game_scenarios ?? p?.outcome_scores
-  const awayWinScenario = scenarioBranches?.AWAY_WIN?.[0]
-  const homeWinScenario = scenarioBranches?.HOME_WIN?.[0]
+  // One integer score on the whole card, and it is the winner-scenario representative. The card
+  // used to show a per-outcome exact-score mode beside it, which is a different estimator over a
+  // different population and routinely disagreed - naming 1:0 for the same club the coherent
+  // selection had at 5:2. A close game is no reason to publish two contradictory scores either:
+  // the forecast still names one winner, so the representative follows that winner.
+  const headlineScore = predictedScore ?? meanScore ?? fullDistributionScore
+  const headlineIsExactScore = Boolean(predictedScore)
   const modeTotal = p?.simulation_modes?.total_runs
   const modeOutcome = p?.simulation_modes?.outcome
   const statisticalExpectedTotal = p?.statistical_expected_total ?? (
@@ -101,6 +100,10 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const conditional = p && coherent ? conditionalMarket(p, game) : null
   const picks = p && coherent && ranking && handicap ? marketPicks(p, game, ranking, handicap, conditional) : null
   const scenarioMargins = conditional ? scenarioMarginBuckets(conditional) : null
+  const upsetWatch = p?.upset_watch
+  const upset = upsetWatch
+    ? { ...upsetWatch, underdogTeam: upsetWatch.underdog === 'HOME' ? game.home : game.away }
+    : null
   // The over side of the same line read over everything, so the two numbers can be compared.
   const fullPopulationTotal = conditional
     ? p?.totals[String(conditional.headline_total.line)]?.over
@@ -155,11 +158,13 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>
         <TeamName team={game.home} side="HOME" />
         {!isFinal && headlineScore && <Box className="matchup-score">
-          <span>평균 예측 점수</span>
-          <strong>{stat(headlineScore.away, 1)} <i>:</i> {stat(headlineScore.home, 1)}</strong>
-          <small>{p?.market_calibration?.enabled
-            ? `Odds API ${p.market_calibration.bookmaker_count ?? 1}곳 합의값을 최대 ${stat(Math.max(p.market_calibration.total_weight ?? 0, p.market_calibration.probability_weight ?? 0) * 100, 0)}% 반영`
-            : '팀·선발·상대전적·구장·잔차를 반영한 전체 시뮬레이션 평균'}</small>
+          <span>{headlineIsExactScore ? '예측 스코어' : '평균 예측 점수'}</span>
+          <strong>{stat(headlineScore.away, headlineIsExactScore ? 0 : 1)} <i>:</i> {stat(headlineScore.home, headlineIsExactScore ? 0 : 1)}</strong>
+          <small>{headlineIsExactScore
+            ? `${(homeFavored ? game.home : game.away).name} 승리 시나리오 기준 · 전체 평균 ${stat(meanScore?.away, 1)} : ${stat(meanScore?.home, 1)}`
+            : p?.market_calibration?.enabled
+              ? `Odds API ${p.market_calibration.bookmaker_count ?? 1}곳 합의값을 최대 ${stat(Math.max(p.market_calibration.total_weight ?? 0, p.market_calibration.probability_weight ?? 0) * 100, 0)}% 반영`
+              : '팀·선발·상대전적·구장·잔차를 반영한 전체 시뮬레이션 평균'}</small>
         </Box>}
       </Box>
       {game.status === 'LIVE' && <Box className="live-game-notice" role="status">
@@ -223,6 +228,29 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           </Box>)}
         </Box>}
 
+        {!isFinal && upset && <Box className={`upset-block${upset.flagged ? ' flagged' : ''}`}>
+          <Stack direction="row" justifyContent="space-between" alignItems="baseline" className="upset-heading">
+            <b>{upset.flagged ? `역배 주시 · ${upset.underdogTeam.name}` : `역배 가능성 · ${upset.underdogTeam.name}`}</b>
+            <small>{upset.comparable
+              ? `우리 ${pct(upset.model_probability)} vs 배당사 ${pct(upset.market_probability!)}`
+              : `우리 ${pct(upset.model_probability)} · 배당 미수집`}</small>
+          </Stack>
+          <Box className="upset-track">
+            <i style={{ width: pct(Math.min(1, upset.model_probability)) }} />
+            {upset.market_probability != null
+              && <b style={{ left: pct(Math.min(1, upset.market_probability)) }} />}
+          </Box>
+          <small className="upset-note">{upset.comparable
+            ? upset.flagged
+              ? `배당사보다 ${(upset.edge! * 100).toFixed(1)}%p 높게 봅니다 (기준 ${(upset.edge_threshold * 100).toFixed(0)}%p) · 세로선이 배당사 확률`
+              : `배당사와 ${Math.abs(upset.edge! * 100).toFixed(1)}%p 차이 · 기준 ${(upset.edge_threshold * 100).toFixed(0)}%p 미만이라 주시 대상은 아닙니다`
+            : '승패 배당이 없어 비교할 기준 가격이 없습니다'}</small>
+          {upset.reasons.length > 0 && <ul className="upset-reasons">
+            {upset.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+          </ul>}
+          <small className="upset-disclaimer">역배 요인은 평균 점수를 바꾸는 대신 결과 분포를 넓히는 방식으로 반영합니다. 이 비교가 실제로 배당사보다 나은지는 아직 검증되지 않았습니다.</small>
+        </Box>}
+
         {!isFinal && conditional && <Box className="scenario-block">
           <Stack direction="row" justifyContent="space-between" alignItems="baseline" className="scenario-heading">
             <b>2차 예측의 전제 · {conditional.winnerTeam.name} 승리</b>
@@ -267,19 +295,11 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           <span>현재 핸디캡·언더오버 기준은 Odds API 값이 아니라 모델 분포가 계산한 공정선입니다.</span>
         </Box>}
 
-        <Box className="score-row">
-          <Box className="primary"><span>평균 점수 · 2만 회 전체</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>평균 총점 {stat(statisticalExpectedTotal, 1)}점{battingLastGap ? ` · ${topic(game.home.name)} 앞서면 9회말을 치지 않아 평균이 낮게 나옵니다` : ''}</small></Box>
-          <Divider orientation="vertical" flexItem />
-          <Box><span>가장 잦은 정확 스코어 · 참고용</span><strong>{stat(fullDistributionScore?.away, 0)} <i>:</i> {stat(fullDistributionScore?.home, 0)}</strong><small>저득점 정수 조합으로 구조적으로 몰릴 수 있음{fullDistributionScore?.probability != null ? ` · 실제 비중 ${pctFine(fullDistributionScore.probability)}` : ''}</small></Box>
+        <Box className="score-row single">
+          <Box className="primary"><span>평균 점수 · {p.model.simulations.toLocaleString()}회 전체</span><strong>{stat(meanScore?.away, 1)} <i>:</i> {stat(meanScore?.home, 1)}</strong><small>평균 총점 {stat(statisticalExpectedTotal, 1)}점{battingLastGap ? ` · ${topic(game.home.name)} 앞서면 9회말을 치지 않아 평균이 낮게 나옵니다` : ''}</small></Box>
         </Box>
 
-        {closeGame && awayWinScenario && homeWinScenario ? <Box className="branch-scores">
-          <span>승률 55% 미만 접전 · 한 점수로 단정하지 않고 양 팀 승리 시나리오를 함께 봅니다</span>
-          <Box className="branch-grid">
-            <Box className={`branch${!homeFavored ? ' likely' : ''}`}><span>{game.away.name}가 이길 때 대표</span><strong>{awayWinScenario.away} <i>:</i> {awayWinScenario.home}</strong><small>원정승 표본 안에서 {pctFine(awayWinScenario.probability_given_outcome)}</small></Box>
-            <Box className={`branch${homeFavored ? ' likely' : ''}`}><span>{game.home.name}가 이길 때 대표</span><strong>{homeWinScenario.away} <i>:</i> {homeWinScenario.home}</strong><small>홈승 표본 안에서 {pctFine(homeWinScenario.probability_given_outcome)}</small></Box>
-          </Box>
-        </Box> : !closeGame && predictedScore ? <Box className="branch-scores">
+        {predictedScore ? <Box className="branch-scores">
           <span>예상 승리팀이 실제로 이긴다는 조건의 대표 점수</span>
           <Box className="branch-grid"><Box className="branch likely"><span>{homeFavored ? game.home.name : game.away.name} 승리 시나리오</span><strong>{expectedScore?.away} <i>:</i> {expectedScore?.home}</strong><small>{representativeSummary(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box></Box>
         </Box> : null}
@@ -1134,10 +1154,6 @@ function outcomeLabel(outcome: 'HOME_WIN' | 'AWAY_WIN' | 'TIE', game: Game) {
   if (outcome === 'HOME_WIN') return `${game.home.name} 승`
   if (outcome === 'AWAY_WIN') return `${game.away.name} 승`
   return game.league === 'MLB' ? '동점' : '무승부'
-}
-
-function favoriteLabel(prediction: NonNullable<Game['prediction']>, game: Game) {
-  return prediction.home_win_probability >= prediction.away_win_probability ? `${game.home.name} 승` : `${game.away.name} 승`
 }
 
 function shortDate(value: string) {

@@ -24,7 +24,7 @@ def main() -> None:
     refresh.add_argument("--league", choices=("ALL", "KBO", "MLB"), default="ALL")
     backtest = sub.add_parser("backtest", help="evaluate stored pre-game predictions without future leakage")
     backtest.add_argument("--league", choices=("ALL", "KBO", "MLB"), default="ALL")
-    backtest.add_argument("--stage", choices=("T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_15M"))
+    backtest.add_argument("--stage", choices=("T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_40M", "T_MINUS_15M"))
     lifecycle = sub.add_parser("model-lifecycle", help="train, promote, or roll back a league model")
     lifecycle.add_argument("--league", choices=("KBO", "MLB"), required=True)
     replay = sub.add_parser("historical-replay", help="replay final games from strictly pregame historical features")

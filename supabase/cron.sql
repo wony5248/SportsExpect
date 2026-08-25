@@ -67,60 +67,49 @@ begin
   end loop;
 end $$;
 
--- Full refresh hourly. Lightweight nearby/live refreshes run every five minutes so first
--- pitch and final status reach an open board promptly without repeating season-wide work.
-select cron.schedule('dugout-kbo-full', '4 * * * *',
+-- Refresh only at the two useful pre-game times. The daily jobs fetch the slate; the dispatcher
+-- itself runs in Supabase each minute, but invokes Vercel only for a scheduled game that is
+-- exactly 40 minutes from first pitch and has not yet captured that checkpoint.
+create or replace function public.invoke_dugout_lineup_refresh(refresh_league text)
+returns bigint
+language plpgsql
+security definer
+set search_path = public, vault, extensions
+as $$
+declare
+  has_due_game boolean;
+begin
+  select exists(
+    select 1
+    from public.games game
+    where game.league = refresh_league
+      and game.status = 'SCHEDULED'
+      and game.start_at > now() + interval '37 minutes 30 seconds'
+      and game.start_at <= now() + interval '42 minutes 30 seconds'
+      and not exists (
+        select 1 from public.prediction_snapshots snapshot
+        where snapshot.game_id = game.id
+          and snapshot.stage = 'T_MINUS_40M'
+          and snapshot.trigger = 'checkpoint_exact'
+      )
+  ) into has_due_game;
+  if not has_due_game then
+    return null;
+  end if;
+  return public.invoke_dugout_refresh(refresh_league, 'checkpoints');
+end;
+$$;
+
+revoke all on function public.invoke_dugout_lineup_refresh(text) from public, anon, authenticated;
+
+-- Cron expressions are UTC: 13:00 KST, 22:00 KST, 23:00 KST respectively.
+select cron.schedule('dugout-kbo-daily-pregame', '0 4 * * *',
   $$select public.invoke_dugout_refresh('KBO', 'full')$$);
-select cron.schedule('dugout-kbo-nearby', '*/5 * * * *',
-  $$select public.invoke_dugout_refresh('KBO', 'nearby')$$);
-select cron.schedule('dugout-mlb-full', '19 * * * *',
-  $$select public.invoke_dugout_refresh('MLB', 'full')$$);
-select cron.schedule('dugout-mlb-nearby', '2-59/5 * * * *',
-  $$select public.invoke_dugout_refresh('MLB', 'nearby')$$);
-
--- Per-game immutable checkpoints. The lightweight endpoint runs every minute,
--- but calls official data providers only when a game enters a ±2.5 minute target window.
-select cron.schedule('dugout-kbo-checkpoints', '* * * * *',
-  $$select public.invoke_dugout_refresh('KBO', 'checkpoints')$$);
-select cron.schedule('dugout-mlb-checkpoints', '* * * * *',
-  $$select public.invoke_dugout_refresh('MLB', 'checkpoints')$$);
-
--- One structured market request per league/day. UTC schedules correspond to
--- 12:00 KST for KBO and 00:00 KST for MLB. Hourly refreshes provide catch-up
--- if either exact-time request fails, while the application daily gate prevents duplicates.
-select cron.schedule('dugout-kbo-market', '0 3 * * *',
-  $$select public.invoke_dugout_refresh('KBO', 'market')$$);
-select cron.schedule('dugout-mlb-market', '0 15 * * *',
+select cron.schedule('dugout-mlb-market', '0 13 * * *',
   $$select public.invoke_dugout_refresh('MLB', 'market')$$);
-
--- 13:10 KST and 00:20 KST: discover the following day's schedule.
-select cron.schedule('dugout-kbo-tomorrow', '10 4 * * *',
-  $$select public.invoke_dugout_refresh('KBO', 'tomorrow')$$);
-select cron.schedule('dugout-mlb-tomorrow', '20 15 * * *',
-  $$select public.invoke_dugout_refresh('MLB', 'tomorrow')$$);
-
--- Batter base-state splits. Missing or 24-hour-old hitters are refreshed; one lineup's worth
--- per run keeps each serverless invocation inside its timeout while the queue drains in passes.
-select cron.schedule('dugout-kbo-splits', '9,39 * * * *',
-  $$select public.invoke_dugout_refresh('KBO', 'splits')$$);
-select cron.schedule('dugout-mlb-splits', '24,54 * * * *',
-  $$select public.invoke_dugout_refresh('MLB', 'splits')$$);
-
--- Rebuild at most ten archive games per league/day from strictly pregame information.
--- These are labelled retrospective replays and never replace a stored live forecast.
-select cron.schedule('dugout-kbo-historical-replay', '0 20 * * *',
-  $$select public.invoke_dugout_refresh('KBO', 'replay')$$);
-select cron.schedule('dugout-mlb-historical-replay', '0 7 * * *',
-  $$select public.invoke_dugout_refresh('MLB', 'replay')$$);
-
--- Daily champion/challenger evaluation. Runs only after the result collectors
--- have had time to finalize the previous slate (05:30 and 16:30 KST).
-select cron.schedule('dugout-kbo-model-lifecycle', '30 20 * * *',
-  $$select public.invoke_dugout_refresh('KBO', 'lifecycle')$$);
-select cron.schedule('dugout-mlb-model-lifecycle', '30 7 * * *',
-  $$select public.invoke_dugout_refresh('MLB', 'lifecycle')$$);
-
--- Inspect runs and HTTP responses:
--- select * from cron.job order by jobname;
--- select * from cron.job_run_details order by start_time desc limit 30;
--- select id, status_code, error_msg, created from net._http_response order by created desc limit 30;
+select cron.schedule('dugout-mlb-daily-pregame', '0 14 * * *',
+  $$select public.invoke_dugout_refresh('MLB', 'full')$$);
+select cron.schedule('dugout-kbo-lineup-40m-dispatch', '* * * * *',
+  $$select public.invoke_dugout_lineup_refresh('KBO')$$);
+select cron.schedule('dugout-mlb-lineup-40m-dispatch', '* * * * *',
+  $$select public.invoke_dugout_lineup_refresh('MLB')$$);

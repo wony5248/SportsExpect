@@ -141,6 +141,23 @@ def _observations_for(prediction: Prediction, game: Game,
         outcome=_side_outcome(total, _number(headline_total.get("line"))),
     ))
 
+    # The moneyline joins them because an upset call is a claim about this market specifically:
+    # that the club the book made the underdog wins more often than the price says. Scored on
+    # the home club so every row reads the same way.
+    watch = payload.get("upset_watch") or {}
+    market_home = None
+    if watch.get("market_probability") is not None:
+        market_home = (float(watch["market_probability"]) if watch.get("underdog") == "HOME"
+                       else 1 - float(watch["market_probability"]))
+    rows.append(DerivedMarketObservation(
+        game_id=game.id, league=game.league, season=season, available_at=available_at,
+        market="MONEYLINE",
+        model_line=None, market_line=None,
+        model_probability=float(prediction.home_win_probability),
+        market_probability=market_home,
+        outcome=_side_outcome(margin, 0),
+    ))
+
     handicap = conditional.get("handicap") or {}
     run_line = _number(handicap.get("run_line"))
     minus_side = handicap.get("minus_side")

@@ -189,6 +189,30 @@ export type Prediction = {
    *  reader is really risking. Absent on forecasts saved before schema 28, and null when the
    *  winning branch held too few simulations to price. */
   winner_conditional_market?: WinnerConditionalMarket | null
+  /** Why this game is more or less predictable than the league baseline. Upsets come from a
+   *  wide distribution, not from a better underdog, so these widen the spread. */
+  upset_volatility?: {
+    shared_volatility: number
+    home_volatility: number
+    away_volatility: number
+    maximum_bonus: number
+    detail?: Record<string, unknown>
+  }
+  /** The club the market made underdog, our probability for it, and the posted price. Flagged
+   *  only when we beat that price by more than the threshold — never on confidence alone. */
+  upset_watch?: {
+    underdog: 'HOME' | 'AWAY'
+    underdog_source: 'MARKET' | 'MODEL'
+    model_probability: number
+    market_probability: number | null
+    edge: number | null
+    edge_threshold: number
+    flagged: boolean
+    comparable: boolean
+    volatility_bonus: number
+    reasons: string[]
+    validation: string
+  }
   tie_probability: number
   top_scores: SimulatedScore[]
   full_distribution_score?: SimulatedScore
@@ -201,12 +225,6 @@ export type Prediction = {
     outcomes?: Record<string, number>
   }
   outcome_scores?: Partial<Record<'HOME_WIN' | 'AWAY_WIN' | 'TIE', {
-    home: number
-    away: number
-    count: number
-    probability_given_outcome: number
-  }[]>>
-  close_game_scenarios?: null | Partial<Record<'HOME_WIN' | 'AWAY_WIN', {
     home: number
     away: number
     count: number

@@ -42,6 +42,10 @@ class ClaudeKeyRegistration(ClaudeKeyAccess):
     enabled: bool = True
 
 
+class ManualRefreshRequest(BaseModel):
+    password: SecretStr = Field(min_length=1, max_length=64)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
@@ -172,6 +176,24 @@ def refresh(target_date: date = Query(alias="date", default_factory=lambda: date
         return run_full_refresh(league, target_date, force=force, trigger="manual_api")
     except LockUnavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@app.post("/api/v1/manual/refresh")
+def manual_refresh(request: ManualRefreshRequest):
+    """Refresh today's pre-game slate only after the page password is verified."""
+    if not secrets.compare_digest(request.password.get_secret_value(), settings.manual_refresh_password):
+        raise HTTPException(status_code=401, detail="새로고침 비밀번호가 올바르지 않습니다.")
+    target_date = datetime.now(KST).date()
+    try:
+        return {
+            "date": target_date.isoformat(),
+            "leagues": {
+                "KBO": run_full_refresh("KBO", target_date, trigger="manual_screen"),
+                "MLB": run_full_refresh("MLB", target_date, trigger="manual_screen"),
+            },
+        }
+    except LockUnavailable as exc:
+        raise HTTPException(status_code=409, detail="이미 최신화가 진행 중입니다. 완료 후 다시 시도하세요.") from exc
 
 
 @app.post("/api/v1/admin/data-integrity/pitchers", dependencies=[Depends(require_admin)])

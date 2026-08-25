@@ -21,7 +21,7 @@ from backend.app.services.probability_calibration import (MAX_CALIBRATION_SAMPLE
                                                           calibrated_probability, fit_platt)
 
 
-EXACT_CHECKPOINT_STAGES = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_15M"}
+EXACT_CHECKPOINT_STAGES = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_40M", "T_MINUS_15M"}
 
 
 def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | None = None) -> dict[str, Any]:

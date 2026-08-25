@@ -391,7 +391,7 @@ def _months_for_recent(target: date, days: int) -> list[tuple[int, int]]:
     return months
 
 
-MARKET_REFRESH_HOURS_KST = {"KBO": 12, "MLB": 0}
+MARKET_REFRESH_HOURS_KST = {"KBO": 12, "MLB": 22}
 
 
 def _market_refresh_due(league: str, latest: datetime | None, now: datetime) -> bool:
