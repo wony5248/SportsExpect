@@ -31,7 +31,8 @@ from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batt
 from backend.app.collectors.kbo.client import SourcePayload
 from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient, _linescore, _weather_context
 from backend.app.collectors.odds import _consensus_event
-from backend.app.services.feature_engineering import (HOME_FIELD_MULTIPLIERS, expected_runs, _effective_lineup_ops,
+from backend.app.services.feature_engineering import (HOME_FIELD_MULTIPLIERS, batted_ball_clumping,
+                                                      expected_runs, _effective_lineup_ops,
                                                       _lineup_matchup_summary, _paired_pitcher_difference,
                                                       _platoon_feature, _recent_pitcher_deviation)
 from backend.app.services.refresh import (SPLIT_FETCH_BUDGET, _collect_batter_splits, _market_event_date,
@@ -43,6 +44,8 @@ from backend.app.services.batting import STRIKEOUT
 from backend.app.services.plate_engine import _half_inning
 from backend.app.services.simulation import simulate_scores
 from backend.app.services.simulation import _draw_runs, evaluate_simulation_recipe
+from backend.app.services.trajectory import (air_density, flight, park_home_run_index,
+                                             park_weather_home_run_multiplier)
 from backend.app.services.prediction import (SIMULATION_SUMMARY_SCHEMA_VERSION,
                                              _apply_daily_bullpen_workload,
                                              apply_market_consensus_anchor,
@@ -2071,6 +2074,124 @@ def test_league_probability_calibration_uses_only_results_final_before_first_pit
     assert unmeasured["enabled"] is False
     assert unmeasured["reason"] == "WALK_FORWARD_VALIDATION_HOLD"
     assert unmeasured["validation"]["status"] == "HOLD"
+
+
+def test_trajectory_model_reproduces_published_carry():
+    """The physics has to land on numbers the sport already knows before it is worth trusting."""
+    sea_level = air_density(22, 0)
+    assert sea_level == pytest.approx(1.19, abs=.02)
+    # Cold air is denser and altitude thins it, which is the whole mechanism.
+    assert air_density(4, 0) > sea_level > air_density(22, 1580)
+
+    reference = flight(103, 28, 0, sea_level)["distance_ft"]
+    # A well struck ball at a home-run angle carries a little over 400 feet.
+    assert 405 < reference < 445
+
+    # Published rules of thumb: about 10 ft of carry lost going from 22C to 4C, and Coors adds
+    # roughly 25-30 ft at a mile of elevation.
+    cold = flight(103, 28, 0, air_density(4, 0))["distance_ft"]
+    assert -16 < cold - reference < -6
+    altitude = flight(103, 28, 0, air_density(22, 1580))["distance_ft"]
+    assert 20 < altitude - reference < 38
+
+    # And roughly five feet per five miles per hour of wind, which is what the effective-wind
+    # fraction exists to reproduce - the raw reported speed gives three times too much.
+    from backend.app.services.trajectory import WIND_EFFECTIVE_FRACTION
+    tail = flight(103, 28, 0, sea_level, wind_mph=10 * WIND_EFFECTIVE_FRACTION)["distance_ft"]
+    assert 6 < tail - reference < 18
+
+    # Harder and higher both carry further, up to the angle where lift stops paying.
+    assert flight(108, 28, 0, sea_level)["distance_ft"] > reference
+    assert flight(103, 45, 0, sea_level)["distance_ft"] < flight(103, 30, 0, sea_level)["distance_ft"]
+
+
+def test_park_home_run_index_ranks_parks_the_way_the_sport_does():
+    indices = {code: park_home_run_index(code, elevation_m=1580 if code == "COL" else 10)["index"]
+               for code in ("COL", "NYY", "CIN", "KC", "DET", "SFG")}
+    # Coors and the short porch at Yankee Stadium are the friendliest yards in the game; Kauffman
+    # and Comerica are among the least. Geometry alone should already say so.
+    assert indices["COL"] > 1.05
+    assert indices["NYY"] > 1.05
+    assert indices["KC"] < .95
+    assert indices["KC"] < indices["CIN"]
+    assert indices["DET"] < indices["NYY"]
+
+    missing = park_home_run_index("KBO-JAMSIL")
+    assert missing["available"] is False
+    assert missing["index"] == 1.0
+
+
+def test_weather_multiplier_is_tonight_against_this_park_not_against_sea_level():
+    def multiplier(stadium, temperature_f, wind, roofed=False):
+        return park_weather_home_run_multiplier(stadium, {
+            "available": True, "temperature_f": temperature_f, "wind": wind,
+            "controlled_roof": roofed})
+
+    warm = multiplier("Wrigley Field", 80, "15 mph, Out To CF")
+    cold = multiplier("Wrigley Field", 48, "15 mph, In From CF")
+    assert warm["multiplier"] > 1.05 > .95 > cold["multiplier"]
+
+    # Coors is a mile up every night of the season, and the season park factor already knows it.
+    # Charging the altitude again here would count it twice, so an ordinary evening at Coors has
+    # to come out neutral.
+    ordinary = multiplier("Coors Field", 72, "0 mph")
+    assert ordinary["multiplier"] == pytest.approx(1.0, abs=.06)
+
+    # A closed roof means the weather outside is not the weather the ball flies through.
+    assert multiplier("Minute Maid Park", 95, "20 mph, Out To CF", roofed=True)["multiplier"] == pytest.approx(1.0, abs=.02)
+
+    # No geometry and no weather both fall back to neutral rather than guessing. KBO parks are
+    # absent from the table by design, so a KBO game is left exactly as it was.
+    assert park_weather_home_run_multiplier("Jamsil Baseball Stadium", {"available": True}
+                                            )["multiplier"] == 1.0
+    assert park_weather_home_run_multiplier("Wrigley Field", {"available": False})["multiplier"] == 1.0
+    assert park_weather_home_run_multiplier(None, None)["multiplier"] == 1.0
+
+    # The weather rides on top of the season park factor rather than replacing it.
+    park = {"home_run": 1.10, "double": 1.0, "triple": 1.0}
+    assert batted_ball_clumping(park, .385, 1.0) < batted_ball_clumping(park, .385, 1.25)
+    assert batted_ball_clumping(park, .385, .75) < batted_ball_clumping(park, .385, 1.0)
+
+
+def test_park_and_contact_reshape_innings_without_rescaling_them():
+    """A ballpark is already in the run means, so here it may only change the shape."""
+    neutral = batted_ball_clumping({"home_run": 1.0, "double": 1.0, "triple": 1.0}, .385)
+    assert neutral == pytest.approx(0.0, abs=1e-9)
+
+    # A park where balls leave the yard makes the same expected total arrive in lumps.
+    launching = batted_ball_clumping({"home_run": 1.35, "double": 1.25, "triple": 1.6}, .385)
+    suppressing = batted_ball_clumping({"home_run": .75, "double": .9, "triple": .9}, .385)
+    assert launching > 0 > suppressing
+
+    # A park can only turn contact into home runs that were struck hard enough to leave, so the
+    # same park does more for a lineup that squares the ball up.
+    assert batted_ball_clumping({"home_run": 1.35, "double": 1.25, "triple": 1.6}, .44) > launching
+    assert batted_ball_clumping({"home_run": 1.35, "double": 1.25, "triple": 1.6}, .33) < launching
+
+    # However extreme the inputs, one game cannot be reshaped without limit.
+    assert abs(batted_ball_clumping({"home_run": 3.0, "double": 3.0, "triple": 3.0}, .60)) <= .35
+    assert abs(batted_ball_clumping({"home_run": .1, "double": .1, "triple": .1}, .10)) <= .35
+
+    # Missing Statcast leaves the shape exactly where the league fit put it.
+    assert batted_ball_clumping(None, None) == pytest.approx(0.0, abs=1e-9)
+
+    # And in the simulation it is a shape change, not a scoring change.
+    flat = simulate_scores(4.6, 4.4, 30_000, 20260825, league="MLB",
+                           home_inning_variance_ratio=1.6, away_inning_variance_ratio=1.6)
+    lumpy = simulate_scores(4.6, 4.4, 30_000, 20260825, league="MLB",
+                            home_inning_variance_ratio=2.1, away_inning_variance_ratio=2.1)
+    assert lumpy["mean_runs"]["home"] == pytest.approx(flat["mean_runs"]["home"], abs=.12)
+    assert lumpy["game_shape"]["blowout_probability"] > flat["game_shape"]["blowout_probability"]
+    assert lumpy["game_shape"]["either_shutout_probability"] > flat["game_shape"]["either_shutout_probability"]
+
+    # Each club carries its own value, because the park is shared but the contact is not.
+    one_sided = simulate_scores(4.6, 4.4, 30_000, 20260825, league="MLB",
+                                home_inning_variance_ratio=2.1, away_inning_variance_ratio=1.2)
+    home_runs = np.array([int(k.split(":")[1]) for k, c in one_sided["frequency_tables"]["scores"].items()
+                          for _ in range(c)])
+    away_runs = np.array([int(k.split(":")[0]) for k, c in one_sided["frequency_tables"]["scores"].items()
+                          for _ in range(c)])
+    assert home_runs.std() > away_runs.std()
 
 
 def test_run_dispersion_is_built_from_three_separable_terms():

@@ -4,6 +4,8 @@ import math
 from datetime import date
 from typing import Any
 
+from backend.app.services.trajectory import park_weather_home_run_multiplier
+
 
 # Home-field run multipliers, fitted against real results rather than assumed. The simulation
 # already gives the home club the batting-last advantage (it skips the ninth while ahead and
@@ -72,6 +74,10 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
     platoon_diff, home_platoon, away_platoon, home_platoon_coverage, away_platoon_coverage = _platoon_feature(lineups or [])
     statcast = _lineup_statcast_features(lineups or [])
     home_park, away_park, park_events = _dynamic_park_factors(pregame, lineups or [])
+    # MLB only: the geometry table covers MLB parks, and KBO has no equivalent, so a KBO game
+    # gets a neutral multiplier and keeps the season park factor exactly as before.
+    park_weather = (park_weather_home_run_multiplier(stadium, pregame.get("weather"))
+                    if league == "MLB" else {"available": False, "multiplier": 1.0})
     home_pitch_quality = _pitcher_statcast(home_pitcher)
     away_pitch_quality = _pitcher_statcast(away_pitcher)
     park_factors = MLB_PARK_FACTORS if league == "MLB" else KBO_PARK_FACTORS
@@ -188,6 +194,17 @@ def build_features(home: Any, away: Any, home_pitcher: Any | None, away_pitcher:
         "starter_xwoba_diff": _paired_nested_difference(away_pitch_quality, home_pitch_quality, "xwoba"),
         "starter_velocity_trend_edge": _v(home_pitch_quality.get("velocity_change"), 0.0) - _v(away_pitch_quality.get("velocity_change"), 0.0),
         "starter_arsenal_stability_edge": _v(away_pitch_quality.get("usage_change"), 0.0) - _v(home_pitch_quality.get("usage_change"), 0.0),
+        "home_lineup_hard_hit": statcast["home_hard_hit"],
+        "away_lineup_hard_hit": statcast["away_hard_hit"],
+        "hard_hit_available": bool(statcast["home_hard_hit_available"] and statcast["away_hard_hit_available"]),
+        # Park and contact together, expressed as a change to the shape of an inning rather than
+        # to its rate. The rate already carries the park through `park_factor`.
+        "home_batted_ball_clumping": batted_ball_clumping(
+            park_events.get("home"), statcast["home_hard_hit"], park_weather.get("multiplier", 1.0)),
+        "away_batted_ball_clumping": batted_ball_clumping(
+            park_events.get("away"), statcast["away_hard_hit"], park_weather.get("multiplier", 1.0)),
+        "park_weather_home_run_multiplier": float(park_weather.get("multiplier") or 1.0),
+        "park_weather_available": bool(park_weather.get("available")),
         "statcast_pitcher_available": bool(home_pitch_quality.get("available") and away_pitch_quality.get("available")),
         "lineup_xwoba_diff": statcast["home_xwoba"] - statcast["away_xwoba"],
         "lineup_pitch_type_edge": statcast["home_pitch_matchup"] - statcast["away_pitch_matchup"],
@@ -514,6 +531,7 @@ def _lineup_statcast_features(lineups: list[Any]) -> dict[str, float]:
     coverage = []
     for side in ("home", "away"):
         xwoba: list[float] = []
+        hard_hit: list[float] = []
         pitch_matchups: list[float] = []
         frv: list[float] = []
         oaa: list[float] = []
@@ -527,6 +545,13 @@ def _lineup_statcast_features(lineups: list[Any]) -> dict[str, float]:
             if expected.get("xwoba") is not None:
                 weight = min(1.0, pa / (pa + 100.0))
                 xwoba.append(.320 + (float(expected["xwoba"]) - .320) * weight)
+            # How often this hitter actually squares one up. A park can only turn contact into
+            # home runs that were struck hard enough to leave, so this is the half of the
+            # interaction the park factor cannot supply.
+            if expected.get("hard_hit_percent") is not None:
+                weight = min(1.0, pa / (pa + 100.0))
+                hard_hit.append(LEAGUE_HARD_HIT_RATE
+                                + (float(expected["hard_hit_percent"]) / 100 - LEAGUE_HARD_HIT_RATE) * weight)
             matchup_rows = list((advanced.get("pitch_type_matchup") or {}).values())
             valid_matchups = [row for row in matchup_rows if row.get("xwoba") is not None]
             if valid_matchups:
@@ -551,6 +576,8 @@ def _lineup_statcast_features(lineups: list[Any]) -> dict[str, float]:
                 if value is not None and pitches:
                     battery.append(float(value) * min(.70, pitches / (pitches + 300.0)))
         output[f"{side}_xwoba"] = sum(xwoba) / len(xwoba) if xwoba else .320
+        output[f"{side}_hard_hit"] = sum(hard_hit) / len(hard_hit) if hard_hit else LEAGUE_HARD_HIT_RATE
+        output[f"{side}_hard_hit_available"] = float(bool(hard_hit))
         output[f"{side}_pitch_matchup"] = sum(pitch_matchups) / len(pitch_matchups) if pitch_matchups else .320
         output[f"{side}_frv"] = sum(frv) / max(9, len(frv))
         output[f"{side}_oaa"] = sum(oaa) / max(9, len(oaa))
@@ -559,6 +586,42 @@ def _lineup_statcast_features(lineups: list[Any]) -> dict[str, float]:
         coverage.append(len(xwoba) / 9)
     output["coverage"] = min(coverage) if coverage else 0.0
     return output
+
+
+# Share of batted balls hit at 95 mph or more, league-wide. The shrink target for a hitter with
+# few plate appearances and the neutral point of the interaction below.
+LEAGUE_HARD_HIT_RATE = .385
+# How far a park and a lineup together may move the shape of an inning, as a proportion of the
+# league-fitted overdispersion. Weights are ordered by how directly each input creates a crooked
+# inning: a home run scores everyone on base at once, an extra-base hit sets one up, and hard
+# contact is what makes either possible.
+BATTED_BALL_CLUMPING = {"home_run": .55, "extra_base": .20, "hard_hit": .25, "limit": .35}
+
+
+def batted_ball_clumping(event_factors: dict[str, Any] | None, hard_hit_rate: float | None,
+                         weather_home_run_multiplier: float = 1.0) -> float:
+    """How much lumpier this club's scoring gets from its contact quality in this park.
+
+    Returned as a proportional change to the inning overdispersion, never to the run rate: the
+    park's effect on how many runs score is already carried by the park factor in the run means,
+    and adding it again here would count the same ballpark twice. What is missing from a mean is
+    that the same expected total arrives differently - a park that lets balls out converts quiet
+    innings into three-run innings, and it can only do that for a lineup that hits the ball hard
+    enough to reach the seats.
+    """
+    events = event_factors or {}
+    # The season park factor says how this yard plays on an ordinary night. The trajectory model
+    # says how far tonight's air is from ordinary. Multiplying them keeps the empirical baseline,
+    # which knows things geometry cannot - a marine layer, a prevailing wind - while adding the
+    # one thing a season average can never contain, which is tonight.
+    home_run = _v(events.get("home_run"), 1.0) * _v(weather_home_run_multiplier, 1.0)
+    extra_base = (_v(events.get("double"), 1.0) + _v(events.get("triple"), 1.0)) / 2
+    contact = (_v(hard_hit_rate, LEAGUE_HARD_HIT_RATE) or LEAGUE_HARD_HIT_RATE) / LEAGUE_HARD_HIT_RATE
+    raw = (BATTED_BALL_CLUMPING["home_run"] * (home_run - 1)
+           + BATTED_BALL_CLUMPING["extra_base"] * (extra_base - 1)
+           + BATTED_BALL_CLUMPING["hard_hit"] * (contact - 1))
+    limit = BATTED_BALL_CLUMPING["limit"]
+    return float(_clip(raw, -limit, limit))
 
 
 def _dynamic_park_factors(pregame: dict[str, Any], lineups: list[Any]) -> tuple[float, float, dict[str, Any]]:

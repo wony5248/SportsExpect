@@ -15,6 +15,28 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .controls .MuiToggleButtonGroup-root { background: rgba(12,35,28,.72); backdrop-filter: blur(12px); }
 .controls .MuiToggleButton-root { padding: 7px 12px; color: #819a90; border-color: rgba(191,233,215,.2); }
 .controls .Mui-selected { color: #7ee7b8 !important; background: rgba(126,231,184,.12) !important; }
+/* This is the one action that starts a costly data refresh, so it must read as an explicit
+   primary action against the dark masthead—not blend in with the passive filters. */
+.controls .manual-refresh-button {
+  color: #fff !important;
+  border: 1px solid #8ff3ca !important;
+  background: linear-gradient(135deg, #137a59, #20a878) !important;
+  box-shadow: 0 7px 18px rgba(0, 0, 0, .32), inset 0 1px 0 rgba(255, 255, 255, .18);
+  font-weight: 850;
+  letter-spacing: -.01em;
+}
+.controls .manual-refresh-button:hover {
+  background: linear-gradient(135deg, #1b956a, #2fc891) !important;
+  box-shadow: 0 9px 22px rgba(0, 0, 0, .38), 0 0 0 3px rgba(126, 231, 184, .16);
+}
+.controls .manual-refresh-button:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 3px;
+}
+.controls .manual-refresh-button.Mui-disabled {
+  color: rgba(255, 255, 255, .68) !important;
+  background: #31564a !important;
+}
 .section-heading { margin: 44px 0 22px; }
 .season-nav { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin: 24px 0 0; padding: 13px 16px; border: 1px solid rgba(126,231,184,.14); border-radius: 12px; background: rgba(126,231,184,.045); }
 .season-nav > div { display: grid; gap: 3px; }.season-nav b { color: #bcd2c9; font-size: .75rem; }.season-nav span { color: #708a80; font-size: .64rem; }
