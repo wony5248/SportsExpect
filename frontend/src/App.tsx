@@ -135,7 +135,7 @@ export default function App() {
               <ToggleButton value="ALL">전체</ToggleButton><ToggleButton value="KBO">KBO</ToggleButton><ToggleButton value="MLB">MLB</ToggleButton>
             </ToggleButtonGroup>
             <TextField type="date" value={date} onChange={(event) => setDate(event.target.value)} size="small" inputProps={{ 'aria-label': '경기 날짜' }} />
-            <Button variant="contained" startIcon={<RefreshRounded />} onClick={openManualRefresh} disabled={manualRefreshBusy}>새로고침 · 최신화</Button>
+            <Button className="manual-refresh-button" variant="contained" startIcon={<RefreshRounded />} onClick={openManualRefresh} disabled={manualRefreshBusy}>새로고침 · 최신화</Button>
             {session ? <>
               <Button variant="outlined" startIcon={<SettingsRounded />} onClick={openClaudeSettings}>내 Claude 설정</Button>
               <Button variant="text" startIcon={<LogoutRounded />} onClick={() => void logout()}>{session.user.email ?? '로그아웃'}</Button>
