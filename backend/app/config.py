@@ -35,6 +35,8 @@ def database_url_from_environment() -> str:
 class Settings:
     database_url: str = database_url_from_environment()
     admin_token: str | None = os.getenv("ADMIN_TOKEN")
+    # The on-screen manual refresh gate is intentionally separate from ADMIN_TOKEN.
+    manual_refresh_password: str = os.getenv("MANUAL_REFRESH_PASSWORD", "0930")
     supabase_url: str | None = os.getenv("SUPABASE_URL")
     supabase_publishable_key: str | None = (
         os.getenv("SUPABASE_PUBLISHABLE_KEY") or os.getenv("SUPABASE_ANON_KEY")

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Alert, Box, Button, CircularProgress, Container, Stack, TextField, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material'
+import { Alert, Box, Button, CircularProgress, Container, Dialog, DialogActions, DialogContent, DialogTitle, Stack, TextField, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material'
 import RefreshRounded from '@mui/icons-material/RefreshRounded'
 import SettingsRounded from '@mui/icons-material/SettingsRounded'
 import SportsBaseballRounded from '@mui/icons-material/SportsBaseballRounded'
 import LoginRounded from '@mui/icons-material/LoginRounded'
 import LogoutRounded from '@mui/icons-material/LogoutRounded'
-import { fetchBacktest, fetchGameDates, fetchGames, fetchOperations, kstToday } from './lib/api'
+import { fetchBacktest, fetchGameDates, fetchGames, fetchOperations, kstToday, runManualRefresh } from './lib/api'
 import { loadAuthSession, onAuthStateChange, signOut } from './lib/auth'
 import type { AuthSession } from './lib/auth'
 import type { Backtest, Game, GameDate, OperationsStatus } from './types'
@@ -27,12 +27,17 @@ export default function App() {
   const [backtest, setBacktest] = useState<Backtest | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [loginOpen, setLoginOpen] = useState(false)
+  const [manualRefreshOpen, setManualRefreshOpen] = useState(false)
+  const [manualRefreshPassword, setManualRefreshPassword] = useState('')
+  const [manualRefreshBusy, setManualRefreshBusy] = useState(false)
+  const [manualRefreshError, setManualRefreshError] = useState<string | null>(null)
   const [session, setSession] = useState<AuthSession | null>(null)
   const [seasonDates, setSeasonDates] = useState<GameDate[]>([])
   const mobile = useMobile()
   const requestId = useRef(0)
   const seasonYear = Number(date.slice(0, 4))
-  const hasActiveGames = date === kstToday() && games.some((game) => game.status === 'SCHEDULED' || game.status === 'LIVE')
+  // Recomputed on every render so the relative age stays truthful.
+  const forecastStamp = forecastFreshness(games)
 
   const load = useCallback(async (background = false) => {
     const currentRequest = ++requestId.current
@@ -63,18 +68,6 @@ export default function App() {
 
   useEffect(() => { void load() }, [load])
   useEffect(() => {
-    if (!hasActiveGames) return
-    const timer = window.setInterval(() => { void load(true) }, 60_000)
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible') void load(true)
-    }
-    document.addEventListener('visibilitychange', refreshWhenVisible)
-    return () => {
-      window.clearInterval(timer)
-      document.removeEventListener('visibilitychange', refreshWhenVisible)
-    }
-  }, [hasActiveGames, load])
-  useEffect(() => {
     let active = true
     void loadAuthSession().then((next) => { if (active) setSession(next) }).catch(() => { if (active) setSession(null) })
     const unsubscribe = onAuthStateChange((next) => { if (active) setSession(next) })
@@ -91,6 +84,31 @@ export default function App() {
   const openClaudeSettings = () => {
     if (!session) { setLoginOpen(true); return }
     setSettingsOpen(true)
+  }
+
+  const openManualRefresh = () => {
+    setManualRefreshPassword('')
+    setManualRefreshError(null)
+    setManualRefreshOpen(true)
+  }
+
+  const submitManualRefresh = async () => {
+    if (!manualRefreshPassword) {
+      setManualRefreshError('새로고침 비밀번호를 입력하세요.')
+      return
+    }
+    setManualRefreshBusy(true)
+    setManualRefreshError(null)
+    try {
+      await runManualRefresh(manualRefreshPassword)
+      setManualRefreshOpen(false)
+      setManualRefreshPassword('')
+      await load()
+    } catch (err) {
+      setManualRefreshError(err instanceof Error ? err.message : '최신화에 실패했습니다.')
+    } finally {
+      setManualRefreshBusy(false)
+    }
   }
 
   const logout = async () => {
@@ -117,7 +135,7 @@ export default function App() {
               <ToggleButton value="ALL">전체</ToggleButton><ToggleButton value="KBO">KBO</ToggleButton><ToggleButton value="MLB">MLB</ToggleButton>
             </ToggleButtonGroup>
             <TextField type="date" value={date} onChange={(event) => setDate(event.target.value)} size="small" inputProps={{ 'aria-label': '경기 날짜' }} />
-            <Button variant="outlined" startIcon={<RefreshRounded />} onClick={() => void load()} disabled={loading}>다시 불러오기</Button>
+            <Button variant="contained" startIcon={<RefreshRounded />} onClick={openManualRefresh} disabled={manualRefreshBusy}>새로고침 · 최신화</Button>
             {session ? <>
               <Button variant="outlined" startIcon={<SettingsRounded />} onClick={openClaudeSettings}>내 Claude 설정</Button>
               <Button variant="text" startIcon={<LogoutRounded />} onClick={() => void logout()}>{session.user.email ?? '로그아웃'}</Button>
@@ -131,7 +149,7 @@ export default function App() {
             <DatePicker dates={seasonDates} value={date} league={league} onChange={setDate} />
           </Box>
           {operations && <Box className={`operations-banner ${operations.status}`}>
-            <Box><b>{operations.status === 'ok' ? '자동 수집 정상' : '자동 수집 점검 필요'}</b>
+            <Box><b>{operations.status === 'ok' ? '자동 사전 갱신 정상' : '자동 사전 갱신 점검 필요'}</b>
               <span>{operations.last_success ? `최근 성공 ${new Date(operations.last_success.finished_at).toLocaleString('ko-KR')}` : '수집 성공 기록 없음'}</span></Box>
             <Box><span>24시간 오류</span><strong>{operations.failures_24h}</strong></Box>
             <Box><span>저장 예측</span><strong>{operations.stored_predictions}</strong></Box>
@@ -146,6 +164,16 @@ export default function App() {
             <Box>
               <Typography className="eyebrow">MATCH BOARD</Typography>
               <Typography variant="h2">{date.replaceAll('-', '.')} · {league === 'ALL' ? 'KBO + MLB' : league}</Typography>
+              {forecastStamp && <Typography component="p" className="forecast-stamp">
+                <b>{formatStamp(forecastStamp.latest)} 기준 예측</b>
+                {forecastStamp.updating > 0
+                  ? <span>{forecastStamp.updating}경기는 최신화 버튼을 누르면 경기 시작 전까지 다시 계산됩니다{
+                      forecastStamp.minutesAgo != null ? ` · ${describeAge(forecastStamp.minutesAgo)}` : ''}</span>
+                  : <span>모든 경기가 시작돼 예측은 더 갱신되지 않습니다</span>}
+                {forecastStamp.staleSpread && <span className="forecast-stamp-spread">
+                  가장 이른 예측은 {formatStamp(forecastStamp.oldest)} 기준
+                </span>}
+              </Typography>}
             </Box>
             <Typography className="game-count">{games.length} GAMES</Typography>
           </Stack>
@@ -186,6 +214,25 @@ export default function App() {
           <p>모든 확률은 통계적 추정치이며 경기 결과 또는 수익을 보장하지 않습니다.</p>
         </footer>
       </Container>
+      <Dialog open={manualRefreshOpen} onClose={manualRefreshBusy ? undefined : () => setManualRefreshOpen(false)} fullWidth maxWidth="xs" className="app-dialog">
+        <DialogTitle>최신 데이터로 새로고침</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ pt: 1 }}>
+            <Typography className="settings-copy">아직 시작하지 않은 오늘의 KBO·MLB 경기만 수집하고 예측을 다시 계산합니다. 양 팀 라인업이 확정된 경기는 타석 단위 시뮬레이션으로 계산됩니다.</Typography>
+            <TextField autoFocus label="새로고침 비밀번호" type="password" value={manualRefreshPassword}
+              onChange={(event) => setManualRefreshPassword(event.target.value)}
+              onKeyDown={(event) => { if (event.key === 'Enter') void submitManualRefresh() }}
+              autoComplete="off" fullWidth disabled={manualRefreshBusy} />
+            {manualRefreshError && <Alert severity="error">{manualRefreshError}</Alert>}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setManualRefreshOpen(false)} disabled={manualRefreshBusy}>취소</Button>
+          <Button variant="contained" onClick={() => void submitManualRefresh()} disabled={manualRefreshBusy}>
+            {manualRefreshBusy ? '최신화 진행 중…' : '최신화 시작'}
+          </Button>
+        </DialogActions>
+      </Dialog>
       {session && <ClaudeSettingsDialog open={settingsOpen} email={session.user.email ?? null} onClose={() => setSettingsOpen(false)} />}
       <LoginDialog open={loginOpen} onClose={() => setLoginOpen(false)} onSignedIn={setSession} />
     </Box>
@@ -194,4 +241,45 @@ export default function App() {
 
 function Metric({ label, value }: { label: string; value: string }) {
   return <Box><span>{label}</span><strong>{value}</strong></Box>
+}
+
+/** A forecast is only ever as of the moment it was saved, and a board of them is only as fresh
+ *  as its stalest card. The newest stamp answers "what time is this", and the oldest is named
+ *  alongside it whenever the two have drifted far enough apart to matter. */
+const STALE_SPREAD_MINUTES = 45
+
+function forecastFreshness(games: Game[]) {
+  const times = games
+    .map((game) => game.prediction?.created_at)
+    .filter((value): value is string => Boolean(value))
+    .map((value) => new Date(value).getTime())
+    .filter((value) => Number.isFinite(value))
+  if (!times.length) return null
+  const latest = new Date(Math.max(...times))
+  const oldest = new Date(Math.min(...times))
+  // Only a game that has not started can still receive a new forecast.
+  const updating = games.filter((game) => game.status === 'SCHEDULED').length
+  const minutesAgo = Math.max(0, Math.round((Date.now() - latest.getTime()) / 60_000))
+  return {
+    latest,
+    oldest,
+    updating,
+    // A relative age is meaningful only while a future game remains on the board.
+    minutesAgo: updating > 0 ? minutesAgo : null,
+    staleSpread: (latest.getTime() - oldest.getTime()) / 60_000 >= STALE_SPREAD_MINUTES,
+  }
+}
+
+function formatStamp(value: Date) {
+  return value.toLocaleString('ko-KR', {
+    month: 'long', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  })
+}
+
+function describeAge(minutes: number) {
+  if (minutes < 1) return '방금 갱신'
+  if (minutes < 60) return `${minutes}분 전 갱신`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}시간 전 갱신`
+  return `${Math.floor(hours / 24)}일 전 갱신`
 }

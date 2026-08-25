@@ -42,7 +42,7 @@ alembic upgrade head
 python scripts/migrate_sqlite_to_postgres.py --sqlite /absolute/path/to/baseball.db
 ```
 
-새로 시작해도 된다면 5번은 생략합니다. Cron이 경기와 예측 데이터를 다시 채웁니다.
+새로 시작해도 된다면 5번은 생략합니다. 배포된 화면의 수동 최신화가 경기와 예측 데이터를 채웁니다.
 
 ## 3. FastAPI를 Vercel에 배포
 
@@ -68,7 +68,7 @@ Git 저장소를 Vercel에서 가져오고 첫 번째 프로젝트를 다음처�
 | `ODDS_API_REGIONS` | `us` (한 지역만 조회해 크레딧 제한) |
 | `ODDS_API_REGIONS_KBO` | `eu,us` (KBO 런라인은 eu 북메이커 위주라 별도 지정) |
 
-`ADMIN_TOKEN`은 Cron 전용 서버 비밀값이며 프런트에 등록하지 않습니다. Claude API 키·모델·활성 여부는 각 사용자가 로그인 후 `내 Claude 설정`에서 관리합니다.
+`ADMIN_TOKEN`은 관리자 API 전용 서버 비밀값이며 프런트에 등록하지 않습니다. 화면의 수동 최신화 비밀번호는 기본값 `0930`이며, 필요하면 API 프로젝트에 `MANUAL_REFRESH_PASSWORD` 환경변수로 바꿀 수 있습니다. Claude API 키·모델·활성 여부는 각 사용자가 로그인 후 `내 Claude 설정`에서 관리합니다.
 
 배포 후 API 주소를 기록하고 확인합니다.
 
@@ -119,34 +119,30 @@ select vault.create_secret('https://YOUR-API.vercel.app', 'dugout_backend_url');
 select vault.create_secret('YOUR_ADMIN_TOKEN', 'dugout_admin_token');
 ```
 
-그다음 [`supabase/cron.sql`](../supabase/cron.sql)의 전체 내용을 SQL Editor에서 실행합니다. 등록되는 작업은 다음과 같습니다.
+그다음 [`supabase/cron.sql`](../supabase/cron.sql)의 전체 내용을 SQL Editor에서 실행합니다. 무료 티어에 맞춰 다음의 사전 경기 갱신만 자동 등록됩니다.
 
-- KBO/MLB 전체 갱신: 각 1시간
-- 경기 임박·진행 상태 갱신: 5분마다, 시작 3시간 전부터 시작 후 6시간까지
-- 경기별 정확 시점 스냅샷: 매분 확인, 실제 외부 수집은 24시간·3시간·60분·15분 창에 들어온 경기만 실행
-- 다음 날 경기 발견: KBO 13:10 KST, MLB 00:20 KST
-- 시장 배당: KBO 12:00 KST, MLB 00:00 KST에 리그당 하루 1회
-- 모델 재학습·승격·롤백: KBO 05:30 KST, MLB 16:30 KST
+- KBO 전체 사전 갱신: 매일 13:00 KST
+- MLB 배당 수집: 매일 22:00 KST
+- MLB 전체 사전 갱신: 매일 23:00 KST
+- 양 리그 라인업 갱신: 경기 시작 정확히 40분 전 1회
 
-중복 호출은 PostgreSQL advisory lock으로 차단되므로 같은 리그·날짜 수집이 동시에 DB를 갱신하지 않습니다.
+40분 전 확인은 Supabase에서 매분 실행하지만, 해당 시간이 된 시작 전 경기가 있을 때만 Vercel API를 호출합니다. 그 외에는 Vercel 사용량이 발생하지 않습니다. 화면 우측 상단 `새로고침 · 최신화`에 비밀번호 `0930`을 입력하면 위 일정과 별개로 즉시 수동 최신화할 수 있습니다.
 
 설정 확인 SQL:
 
 ```sql
-select jobid, jobname, schedule, active from cron.job order by jobname;
-select * from cron.job_run_details order by start_time desc limit 30;
-select id, status_code, error_msg, created from net._http_response order by created desc limit 30;
+select jobid, jobname, schedule, active from cron.job where jobname like 'dugout-%' order by jobname;
 ```
 
-정상 응답은 `200`, 이미 같은 수집이 실행 중이면 `409`입니다. `401`은 Vault 토큰과 Vercel `ADMIN_TOKEN`이 다른 경우이고, `503`은 Vercel에 `ADMIN_TOKEN`이 빠진 경우입니다.
+위 조회에서 `dugout-kbo-daily-pregame`, `dugout-mlb-market`, `dugout-mlb-daily-pregame`, 그리고 두 `lineup-40m-dispatch` 작업만 활성화되어야 합니다.
 
 ## 7. 최종 확인
 
 1. API `/health`가 `database: connected`를 반환합니다.
 2. 수동 KBO 및 MLB 갱신이 각각 `200`을 반환합니다.
 3. 프런트에서 오늘 날짜의 경기 카드가 나타납니다.
-4. `cron.job`에 과거 재현 작업을 포함한 `dugout-*` 작업이 활성화되어 있습니다.
-5. 다음 정각 이후 `net._http_response`에서 응답 코드가 확인됩니다.
+4. `cron.job`에 일일 사전 갱신 3개와 40분 전 dispatcher 2개만 활성화되어 있습니다.
+5. 화면의 `새로고침 · 최신화`에 비밀번호 `0930`을 입력하면 즉시 갱신이 실행됩니다.
 6. 서로 다른 두 사용자로 로그인했을 때 Claude 키 상태와 개인 분석이 분리되는지 확인합니다.
 
 ## 운영상 제한

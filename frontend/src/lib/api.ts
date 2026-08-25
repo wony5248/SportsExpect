@@ -62,6 +62,18 @@ export async function fetchBacktest(league = 'ALL'): Promise<Backtest> {
   return response.json() as Promise<Backtest>
 }
 
+export async function runManualRefresh(password: string): Promise<void> {
+  const response = await request('/api/v1/manual/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password }),
+  }, 300_000)
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({})) as { detail?: string }
+    throw new Error(payload.detail ?? `API ${response.status}: 최신화에 실패했습니다.`)
+  }
+}
+
 async function userRequest(path: string, accessToken: string, init?: RequestInit, timeoutMs = 25_000) {
   const response = await request(path, {
     ...init,

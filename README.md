@@ -41,14 +41,13 @@ docker compose up -d --build
 docker compose exec api python -m backend.app.cli refresh --date 2026-08-22 --league ALL --force
 ```
 
-## 자동 업데이트와 스냅샷
+## 사전 경기 최신화
 
-- KBO·MLB 전체 갱신: Supabase Cron으로 1시간마다
-- 다음 날 일정 선취득: MLB 00:20, KBO 13:10 KST
-- 경기 시작 3시간 전~시작 후 6시간: 5분마다 경기 상태·최종 결과 집중 갱신
-- 정확 시점 수집: 매분 대상 경기만 확인해 시작 24시간·3시간·60분·15분 전 ±2.5분 안에 불변 스냅샷 저장
-- 모델 생명주기: KBO 05:30, MLB 16:30 KST에 날짜순 재학습·승격·롤백 평가
-- 중복 요청: PostgreSQL advisory lock으로 차단
+- KBO는 매일 13:00 KST에, MLB는 매일 23:00 KST에 오늘의 시작 전 경기를 수집하고 예측합니다. MLB 배당 수집은 22:00 KST입니다.
+- Supabase는 매분 경기 시작 40분 전인지 확인하되, 해당 시간이 된 시작 전 경기가 있을 때만 Vercel을 호출해 라인업 기반 예측을 한 번 갱신합니다.
+- 배포 화면 우측 상단 `새로고침 · 최신화`를 누른 뒤 비밀번호 `0930`을 입력하면 위 일정과 별개로 즉시 오늘의 KBO·MLB 데이터를 수집하고 예측합니다.
+- 시작 전(`SCHEDULED`) 경기만 새 예측을 생성합니다. 양 팀의 공식 9인 라인업과 충분한 타자 데이터가 준비된 경기는 타석 단위 시뮬레이션을 사용합니다.
+- 기본 비밀번호는 API 환경변수 `MANUAL_REFRESH_PASSWORD`로 변경할 수 있습니다.
 
 선발 ID, 전체 타순, 선수 생산력, 팀 기록이 달라지면 새 예측을 만들고 변경 이유를 저장합니다. 같은 입력은 예측을 중복 저장하지 않지만 `T-24h`, `T-3h`, `T-60m`, `T-15m` 시점 스냅샷은 남깁니다. 경기 시작 후 생성된 값은 평가에서 제외합니다.
 
@@ -98,7 +97,7 @@ Oracle Cloud VM 배포는 `docs/ORACLE_VM.md`의 순서대로 진행합니다.
 python -m backend.app.cli refresh --league KBO
 python -m backend.app.cli refresh --league MLB
 python -m backend.app.cli backtest --league ALL
-python -m backend.app.cli backtest --league MLB --stage T_MINUS_15M
+python -m backend.app.cli backtest --league MLB --stage T_MINUS_40M
 python -m backend.app.cli model-lifecycle --league KBO
 python -m backend.app.cli historical-replay --league KBO --limit 20
 python -m backend.app.cli backup

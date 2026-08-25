@@ -18,10 +18,7 @@ from backend.app.services.historical_replay import run_historical_replay
 
 RefreshOperation = Callable[..., dict[str, Any]]
 CHECKPOINTS = {
-    "T_MINUS_24H": 24 * 60,
-    "T_MINUS_3H": 3 * 60,
-    "T_MINUS_60M": 60,
-    "T_MINUS_15M": 15,
+    "T_MINUS_40M": 40,
 }
 CHECKPOINT_TOLERANCE_MINUTES = 2.5
 REPLAY_START_DATE = date(2026, 1, 1)

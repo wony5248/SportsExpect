@@ -19,9 +19,15 @@ MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-lo
                    "simulation means + validated overdispersed correlated gamma-Poisson score distribution "
                    "+ inning-by-inning pitcher plan (starter workload, then leverage-tiered relief) "
                    "+ official pregame weather, bullpen workload, platoon, starter form, fielding/running and schedule context "
+                   "+ run dispersion fitted to real game distributions from separable terms "
+                   "(in-inning run clumping, unobserved opposing matchup tilt, per-club shock) "
+                   "+ upset volatility (bullpen fatigue, weather, travel, unannounced starter) "
+                   "applied to the spread rather than the means "
                    "+ leakage-safe team offense/defense residual EWMA calibration "
                    "+ conservative pregame bookmaker-consensus total/win anchor when available "
                    "+ league walk-forward Platt win calibration with outcome-branch reweighting "
+                   "+ two-stage market read: the run line and total are priced inside only the simulations "
+                   "the forecast winner wins "
                    "+ decision-theoretic Bayes-median headline scenario coherent with winner, run line and total "
                    "+ league-accurate extra innings "
                    "(MLB ghost-runner tiebreaker until decided, KBO ties stand after inning 11)")
@@ -31,7 +37,18 @@ MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-lo
 # 25: adds leakage-safe opponent strength, official player Statcast snapshots, actual reliever
 # workload by tier, and handed/event-specific park effects inside the PA engine. Older replays
 # must be regenerated under those semantics.
-SIMULATION_SUMMARY_SCHEMA_VERSION = 27
+# 28: adds the two-stage market read. Stage one names a winner from the full population; the run
+# line and the total are then priced inside only the simulations that winner wins, and the
+# headline integer score is selected under those same conditional decisions.
+# 29: removes the shared run environment, which had forced a +0.16 correlation between the two
+# clubs' scores where real games show about -0.02, and re-fits team variance against the real
+# per-game distributions. Every stored score distribution changes, so older replays must be
+# regenerated. Also routes the upset factors into run variance rather than the run means.
+# 30: rebuilds the dispersion from three fitted terms instead of one - runs clump inside an
+# inning, an unobserved matchup tilt widens margins without widening totals, and a small smooth
+# per-club shock remains. Against 1,934 MLB finals this lands team SD, total SD and the
+# two clubs' correlation within .01 of the real values.
+SIMULATION_SUMMARY_SCHEMA_VERSION = 30
 
 
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,
@@ -121,7 +138,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         # integer headline scenario agrees with the exact total and run line shown beside it.
         "headline_market": {
             key: headline_market.get(key) for key in (
-                "total_line", "home_spread", "home_implied_probability",
+                "total_line", "home_spread", "home_spread_probability", "total_over_probability",
+                "home_implied_probability",
                 "away_implied_probability", "bookmaker_count", "provider", "collected_at",
             )
         },
@@ -140,21 +158,33 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     seed = int(simulation_seed_hash[:16], 16) % (2**32)
     combined_ops = float(features["home_ops"]) + float(features["away_ops"])
     combined_whip = float(getattr(home_pitcher, "whip", None) or 1.35) + float(getattr(away_pitcher, "whip", None) or 1.35)
-    environment_variance = max(.04, min(.14, .075 + .035 * (combined_ops - 1.44) + .018 * (combined_whip - 2.70)))
-    # Fitted against real team-game run distributions rather than chosen by hand: sweeping the
-    # dispersion and scoring each setting by total variation distance from the empirical
-    # histogram put MLB at .26 (error .060 -> .034 over 3,876 team-games) and left KBO at .16,
-    # which already matched. Re-fit whenever the scoring environment moves materially.
-    team_variance = .16 if game.league == "KBO" else .26
+    # The shared run environment is gone. Both clubs scoring together is not a property of real
+    # baseball - across 1,953 MLB and 555 KBO finals their scores correlate about -0.02 - and
+    # park and weather already move the run means, so drawing them again as a common factor
+    # double-counted them. See the note in simulation.simulate_scores.
+    environment_variance = 0.0
+    # The smooth per-club shock is now the smallest of the three dispersion terms, because most
+    # of what it used to stand in for belongs elsewhere: run clumping inside an inning, and the
+    # unobserved matchup tilt. Fitted jointly with those two against the real per-game
+    # distributions; see INNING_VARIANCE_RATIO and MATCHUP_VARIANCE in simulation.py. Re-fit all
+    # three together whenever the scoring environment moves materially - alone this number just
+    # rescales every score.
+    team_variance = .03 if game.league == "KBO" else .06
     if not (features["home_starter_confirmed"] and features["away_starter_confirmed"]):
         team_variance += .03
     if not (features["home_lineup_confirmed"] and features["away_lineup_confirmed"]):
         team_variance += .02
-    team_variance = min(.32, team_variance)
-    home_team_variance = min(.32, max(.04, team_variance * float(
+    # An upset is a wide distribution, not a better underdog. Every factor below used to move
+    # only the run means, where it can at best nudge the favourite down a fraction of a run;
+    # routed into the spread it does what it actually does in a ballgame, which is make the
+    # result less predictable and hand the weaker club a real chance.
+    volatility = _volatility_factors(features, (game_context or {}).get("pregame") or {},
+                                     combined_ops, combined_whip)
+    team_variance = min(.32, team_variance + volatility["shared_volatility"])
+    home_team_variance = min(.32, max(.01, (team_variance + volatility["home_volatility"]) * float(
         residual_context.get("home_variance_multiplier") or 1.0
     )))
-    away_team_variance = min(.32, max(.04, team_variance * float(
+    away_team_variance = min(.32, max(.01, (team_variance + volatility["away_volatility"]) * float(
         residual_context.get("away_variance_multiplier") or 1.0
     )))
     # The plate-appearance engine needs both lineups to have collected base-state splits.
@@ -170,6 +200,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         home_team_variance=home_team_variance, away_team_variance=away_team_variance,
         headline_total_line=headline_market.get("total_line"),
         headline_home_spread=headline_market.get("home_spread"),
+        headline_spread_probability=headline_market.get("home_spread_probability"),
+        headline_total_over_probability=headline_market.get("total_over_probability"),
         probability_calibration=probability_calibration,
         home_event_factors=park_events.get("home"), away_event_factors=park_events.get("away"),
     )
@@ -183,6 +215,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "away_lineup": away_table.tolist() if away_table is not None and home_table is not None else None,
         "headline_total_line": headline_market.get("total_line"),
         "headline_home_spread": headline_market.get("home_spread"),
+        "headline_spread_probability": headline_market.get("home_spread_probability"),
+        "headline_total_over_probability": headline_market.get("total_over_probability"),
         "probability_calibration": probability_calibration,
         "home_event_factors": park_events.get("home"), "away_event_factors": park_events.get("away"),
     }
@@ -262,6 +296,10 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "display_expected_score": display_score,
             "score_estimates": score_estimates,
             "simulation_environment_variance": round(environment_variance, 4),
+            # Why this particular game is more or less predictable than the league baseline.
+            "upset_volatility": volatility,
+            "upset_watch": upset_watch(home_probability, headline_market, volatility,
+                                       home.team.name, away.team.name),
             "simulation_team_variance": round(team_variance, 4),
             "simulation_home_team_variance": round(home_team_variance, 4),
             "simulation_away_team_variance": round(away_team_variance, 4),
@@ -292,17 +330,24 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "features": features,
             "handicap": {key: round(value, 4) for key, value in simulation["handicap"].items()},
             "market_handicap": simulation["market_handicap"],
+            # The run line and total the model reached on its own, stored beside the ones the
+            # market posted so every finished game becomes a labelled comparison row.
+            "model_fair_lines": simulation["model_fair_lines"],
+            # Second-stage markets, priced inside the branch the forecast winner actually wins.
+            # The card reads its handicap and total picks from here; the unconditional blocks
+            # above remain as the full-population reference.
+            "winner_conditional_market": simulation["winner_conditional_market"],
             "totals": simulation["totals"],
             "tie_probability": round(simulation["tie_probability"], 4),
             "top_scores": simulation["top_scores"],
             "full_distribution_score": simulation["full_distribution_score"],
             "winner_conditional_score": simulation["winner_conditional_score"],
             "projected_score_candidates": simulation["projected_score_candidates"],
+            # Per-outcome exact-score modes, kept as a distribution diagnostic. Never a headline:
+            # the mode over a branch is a different estimator over a different population than
+            # the coherent representative, and on a close game the two routinely disagree. The
+            # card publishes one integer score, and it is the representative.
             "outcome_scores": simulation["outcome_scores"],
-            "close_game_scenarios": (
-                {key: simulation["outcome_scores"].get(key, []) for key in ("AWAY_WIN", "HOME_WIN")}
-                if max(home_probability, away_probability) < .55 else None
-            ),
             "team_run_distribution": simulation["team_run_distribution"],
             "frequency_tables": simulation["frequency_tables"],
             # Kept server-side for deterministic post-game replay; the API serializer removes it.
@@ -427,6 +472,157 @@ def apply_market_consensus_anchor(home_runs: float, away_runs: float,
         "anchored_home": round(anchored_home, 6),
         "anchored_away": round(anchored_away, 6),
         "anchored_total": round(anchored_home + anchored_away, 6),
+    }
+
+
+# How much extra run-scoring spread each upset factor may add, in gamma-variance units. Small
+# on purpose: the base spread is fitted against real games, and these push a specific matchup
+# off that baseline rather than replacing it. The cap keeps any single game from turning into
+# noise no matter how many factors line up at once.
+MAX_VOLATILITY_BONUS = .06
+UPSET_VOLATILITY_WEIGHTS = {
+    # A slugging matchup against shaky pitching does not just score more, it scores less
+    # predictably: innings end in crooked numbers rather than a steady drip.
+    "matchup_scoring": .030,
+    # Wind and temperature that move run expectancy also fatten the tails, which the run-mean
+    # multiplier alone cannot express.
+    "weather": .020,
+    # A club whose leverage arms are used up cannot protect a lead, so its game states diverge.
+    "bullpen_fatigue": .030,
+    # Travel and compressed scheduling show up as ragged execution, not as a uniform decline.
+    "schedule_fatigue": .020,
+    # An unannounced starter is a genuinely unknown quantity, not an average one.
+    "starter_unconfirmed": .015,
+}
+
+
+def _volatility_factors(features: dict[str, Any], pregame: dict[str, Any],
+                        combined_ops: float, combined_whip: float) -> dict[str, Any]:
+    """Widen the run distribution for the conditions that actually produce upsets.
+
+    Favourites lose when a game stops behaving like its averages: a bullpen that cannot hold a
+    lead, a wind that turns fly balls into home runs, a club on its fourth city in five days, a
+    starter nobody has announced. None of that makes the weaker club better on average, which is
+    why feeding it into the run means barely moves a forecast. It makes the result less certain,
+    and an uncertain result is exactly what gives the underdog its chance.
+    """
+    def clamp(value: float) -> float:
+        return max(0.0, min(1.0, value))
+
+    # Both clubs share the conditions of the ballpark they are standing in.
+    matchup = clamp((combined_ops - 1.44) / .16) * .6 + clamp((combined_whip - 2.70) / .40) * .4
+    weather_multiplier = float(features.get("weather_run_multiplier") or 1.0)
+    weather = clamp(abs(weather_multiplier - 1.0) / .08) if features.get("weather_available") else 0.0
+    shared = (UPSET_VOLATILITY_WEIGHTS["matchup_scoring"] * matchup
+              + UPSET_VOLATILITY_WEIGHTS["weather"] * weather)
+
+    bullpen = pregame.get("bullpen") or {}
+    schedule = pregame.get("schedule") or {}
+    sides: dict[str, float] = {}
+    detail: dict[str, Any] = {}
+    for side in ("home", "away"):
+        workload = bullpen.get(side) or {}
+        relief = clamp(float(workload.get("fatigue_index") or 0.0)) if workload.get("available") else 0.0
+        travel = clamp(float((schedule.get(side) or {}).get("fatigue_index") or 0.0) / .25)
+        unconfirmed = 0.0 if features.get(f"{side}_starter_confirmed") else 1.0
+        bonus = (UPSET_VOLATILITY_WEIGHTS["bullpen_fatigue"] * relief
+                 + UPSET_VOLATILITY_WEIGHTS["schedule_fatigue"] * travel
+                 + UPSET_VOLATILITY_WEIGHTS["starter_unconfirmed"] * unconfirmed)
+        sides[side] = min(MAX_VOLATILITY_BONUS, bonus)
+        detail[side] = {
+            "bullpen_fatigue": round(relief, 4), "schedule_fatigue": round(travel, 4),
+            "starter_unconfirmed": bool(unconfirmed),
+            "bullpen_available": bool(workload.get("available")),
+            "volatility_bonus": round(sides[side], 5),
+        }
+    return {
+        "shared_volatility": min(MAX_VOLATILITY_BONUS, shared),
+        "home_volatility": sides["home"],
+        "away_volatility": sides["away"],
+        "detail": {
+            "matchup_scoring": round(matchup, 4),
+            "weather": round(weather, 4),
+            "weather_run_multiplier": round(weather_multiplier, 4),
+            "shared_bonus": round(min(MAX_VOLATILITY_BONUS, shared), 5),
+            **detail,
+        },
+        "weights": UPSET_VOLATILITY_WEIGHTS,
+        "maximum_bonus": MAX_VOLATILITY_BONUS,
+    }
+
+
+# An upset call has to clear the posted price by a real margin before it is worth naming. Below
+# this the gap is inside the noise of a two-parameter calibration map fitted on a few hundred
+# games, and every game on the slate would carry one.
+UPSET_EDGE_THRESHOLD = .04
+# A volatility factor is only worth naming to a reader once it is actually elevated.
+VOLATILITY_REPORTING_FLOOR = .25
+
+
+def upset_watch(home_probability: float, market: dict[str, Any], volatility: dict[str, Any],
+                home_name: str, away_name: str) -> dict[str, Any]:
+    """Whether the club the market has as the underdog is worth a second look, and why.
+
+    Two separate things have to be true before an upset is worth naming. The result has to be
+    genuinely uncertain - which is what the volatility factors above widen - and the price has
+    to be paying more for that uncertainty than we think it is worth. A wide game at a fair
+    price is not an opportunity, and a mispriced game nobody can call is not either.
+
+    This is deliberately not sold as a validated edge. The model has not yet shown it beats the
+    closing moneyline out of sample; derived_market_calibration accumulates exactly that
+    evidence, and until it says otherwise this block is an observation with its reasons attached.
+    """
+    market_home = market.get("home_implied_probability")
+    market_away = market.get("away_implied_probability")
+    priced = (isinstance(market_home, (int, float)) and isinstance(market_away, (int, float))
+              and 0 < float(market_home) < 1 and 0 < float(market_away) < 1)
+    # The market decides who the underdog is; that is the whole point of comparing against it.
+    # With no price, fall back to our own weaker club so the card can still explain the shape.
+    if priced:
+        underdog = "HOME" if float(market_home) < float(market_away) else "AWAY"
+    else:
+        underdog = "HOME" if home_probability < .5 else "AWAY"
+    model_probability = home_probability if underdog == "HOME" else 1 - home_probability
+    market_probability = None
+    if priced:
+        total = float(market_home) + float(market_away)
+        # The two sides are already de-vigged upstream, but renormalise so the pair sums to one
+        # whatever the provider sent.
+        market_probability = (float(market_home) if underdog == "HOME" else float(market_away)) / total
+    edge = model_probability - market_probability if market_probability is not None else None
+    detail = volatility.get("detail") or {}
+    side = detail.get("home" if underdog == "HOME" else "away") or {}
+    opponent = detail.get("away" if underdog == "HOME" else "home") or {}
+    underdog_name = home_name if underdog == "HOME" else away_name
+    favorite_name = away_name if underdog == "HOME" else home_name
+    reasons: list[str] = []
+    if float(opponent.get("bullpen_fatigue") or 0) >= VOLATILITY_REPORTING_FLOOR:
+        reasons.append(f"{favorite_name} 불펜 소모 큼 · 리드를 지키기 어려움")
+    if float(opponent.get("schedule_fatigue") or 0) >= VOLATILITY_REPORTING_FLOOR:
+        reasons.append(f"{favorite_name} 이동·일정 피로 누적")
+    if opponent.get("starter_unconfirmed"):
+        reasons.append(f"{favorite_name} 선발 미확정 · 실제 등판 편차가 큼")
+    if float(detail.get("weather") or 0) >= VOLATILITY_REPORTING_FLOOR:
+        reasons.append("날씨가 득점 환경을 평소와 다르게 만듦")
+    if float(detail.get("matchup_scoring") or 0) >= VOLATILITY_REPORTING_FLOOR:
+        reasons.append("타선 대비 투수력이 약한 난타전 구도")
+    if float(side.get("bullpen_fatigue") or 0) >= VOLATILITY_REPORTING_FLOOR:
+        reasons.append(f"{underdog_name}도 불펜 소모가 커 양방향 변동성")
+    return {
+        "underdog": underdog,
+        "underdog_source": "MARKET" if priced else "MODEL",
+        "model_probability": round(model_probability, 4),
+        "market_probability": round(market_probability, 4) if market_probability is not None else None,
+        "edge": round(edge, 4) if edge is not None else None,
+        "edge_threshold": UPSET_EDGE_THRESHOLD,
+        # Named only when the price is beaten by more than the threshold. Never on model
+        # confidence alone: without a price there is nothing to disagree with.
+        "flagged": bool(edge is not None and edge >= UPSET_EDGE_THRESHOLD),
+        "comparable": bool(edge is not None),
+        "volatility_bonus": round(float(volatility.get("shared_volatility") or 0)
+                                  + float(side.get("volatility_bonus") or 0), 5),
+        "reasons": reasons,
+        "validation": "NOT_YET_PROVEN_AGAINST_CLOSING_PRICE",
     }
 
 

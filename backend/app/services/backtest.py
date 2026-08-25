@@ -14,12 +14,14 @@ from backend.app.services.team_residuals import (ResidualObservation, apply_resi
                                                  baseline_expected_runs, probability_from_run_means,
                                                  residual_context, RESIDUAL_ENABLED_LEAGUES,
                                                  _prediction_regime)
-from backend.app.services.simulation import _coherent_scenario_score_projection
+from backend.app.services.derived_market_calibration import DerivedMarketHistory
+from backend.app.services.simulation import (_coherent_scenario_score_projection,
+                                              _winner_conditional_market)
 from backend.app.services.probability_calibration import (MAX_CALIBRATION_SAMPLES, MIN_CALIBRATION_SAMPLES,
                                                           calibrated_probability, fit_platt)
 
 
-EXACT_CHECKPOINT_STAGES = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_15M"}
+EXACT_CHECKPOINT_STAGES = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_40M", "T_MINUS_15M"}
 
 
 def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | None = None) -> dict[str, Any]:
@@ -209,6 +211,9 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
             "official_live_metric": False,
             "disclosure": "경기 전 데이터만 사용해 현재 코드로 다시 계산한 회고 성능입니다.",
         },
+        # The derived markets scored against the numbers the book actually posted, which is the
+        # only benchmark that says whether disagreeing with it was skill.
+        "derived_market_calibration": DerivedMarketHistory.from_session(session, league).report(),
         "headline_score_backtest": {
             "official_live": _headline_score_backtest(rows, markets),
             "historical_replay": _headline_score_backtest(replay_rows, markets),
@@ -471,17 +476,34 @@ def _headline_score_backtest(
             continue
         pregame_markets = [row for row in markets.get(game.id, []) if game.start_at is None or
                            _naive(row.collected_at) <= _naive(game.start_at)]
-        total_line = pregame_markets[-1].total_line if pregame_markets else None
-        home_spread = ((pregame_markets[-1].raw or {}).get("home_spread")
-                       if pregame_markets else None)
+        latest_market = pregame_markets[-1] if pregame_markets else None
+        total_line = latest_market.total_line if latest_market else None
+        market_raw = (latest_market.raw or {}) if latest_market else {}
+        home_spread = market_raw.get("home_spread")
+        # The live selector decided its run line and total against these prices, so replaying it
+        # without them would measure a selector that never ran.
+        home_spread_probability = market_raw.get("home_spread_probability")
+        total_over_probability = market_raw.get("total_over_probability")
+        # The live selector reads the run line and the total inside the branch its forecast
+        # winner wins, so the replayed selector has to be handed the same conditional block or
+        # the comparison measures a selector that no longer exists.
+        conditional = _winner_conditional_market(
+            score_counts, simulations,
+            prediction.home_win_probability, prediction.away_win_probability,
+            total_line, home_spread, home_spread_probability, total_over_probability,
+        )
         current, _ = _coherent_scenario_score_projection(
             score_counts, total_counts, margin_counts, simulations, game.league,
             prediction.home_expected_runs, prediction.away_expected_runs,
             prediction.home_win_probability, prediction.away_win_probability,
             {key: float(handicap[key]) for key in required_handicap}, total_line, home_spread,
+            conditional,
         )
-        stored_rows.append(_headline_score_row(stored, result, total_counts, simulations, total_line))
-        current_rows.append(_headline_score_row(current, result, total_counts, simulations, total_line))
+        # Both selectors are scored against the direction the card actually publishes, which is
+        # the conditional one whenever the branch was large enough to price.
+        prefer_over = _total_direction(conditional, total_counts, simulations, total_line)
+        stored_rows.append(_headline_score_row(stored, result, total_line, prefer_over))
+        current_rows.append(_headline_score_row(current, result, total_line, prefer_over))
     return {
         "sample_size": len(current_rows),
         "stored_selector": _headline_score_metrics(stored_rows),
@@ -489,15 +511,25 @@ def _headline_score_backtest(
     }
 
 
+def _total_direction(conditional: dict[str, Any] | None, total_counts: Counter[int],
+                     simulations: int, total_line: float | None) -> bool | None:
+    """Whether the published card leans over at this line, or None when there is no line."""
+    if total_line is None:
+        return None
+    if conditional:
+        return conditional["headline_total"]["pick"] == "OVER"
+    over = sum(count for total, count in total_counts.items() if total > total_line) / simulations
+    under = sum(count for total, count in total_counts.items() if total < total_line) / simulations
+    return over >= under
+
+
 def _headline_score_row(score: dict[str, Any], result: GameResult,
-                        total_counts: Counter[int], simulations: int, total_line: float | None) -> dict[str, Any]:
+                        total_line: float | None, prefer_over: bool | None) -> dict[str, Any]:
     home, away = int(score["home"]), int(score["away"])
     actual_home, actual_away = int(result.home_score), int(result.away_score)
     total_coherent = None
-    if total_line is not None:
-        over = sum(count for total, count in total_counts.items() if total > total_line) / simulations
-        under = sum(count for total, count in total_counts.items() if total < total_line) / simulations
-        total_coherent = (home + away > total_line) if over >= under else (home + away < total_line)
+    if total_line is not None and prefer_over is not None:
+        total_coherent = (home + away > total_line) if prefer_over else (home + away < total_line)
     return {
         "home_error": home - actual_home, "away_error": away - actual_away,
         "total_error": home + away - actual_home - actual_away,

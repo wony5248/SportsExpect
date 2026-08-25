@@ -305,6 +305,10 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
             market_context = ({
                 "total_line": market.total_line,
                 "home_spread": market.home_spread,
+                # Priced only in `raw`: neither derived market has a dedicated price column, and
+                # their de-vigged prices are what the second-stage reads compare themselves against.
+                "home_spread_probability": (market.raw or {}).get("home_spread_probability"),
+                "total_over_probability": (market.raw or {}).get("total_over_probability"),
                 "home_implied_probability": market.home_implied_probability,
                 "away_implied_probability": market.away_implied_probability,
                 "bookmaker_count": market.bookmaker_count,
@@ -387,7 +391,7 @@ def _months_for_recent(target: date, days: int) -> list[tuple[int, int]]:
     return months
 
 
-MARKET_REFRESH_HOURS_KST = {"KBO": 12, "MLB": 0}
+MARKET_REFRESH_HOURS_KST = {"KBO": 12, "MLB": 22}
 
 
 def _market_refresh_due(league: str, latest: datetime | None, now: datetime) -> bool:

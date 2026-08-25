@@ -24,6 +24,13 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .operations-banner > div { display: grid; gap: 3px; }.operations-banner span { color: #7b958b; font-size: .68rem; }.operations-banner b { color: #cce1d8; }.operations-banner strong { color: #7ee7b8; text-align: right; }
 .section-heading h2 { margin-top: 6px; font-size: clamp(1.75rem, 4vw, 2.5rem); }
 .game-count { color: #718b81; font-size: .75rem !important; font-weight: 800 !important; letter-spacing: .13em !important; }
+/* What time the board is as of, which is the first thing a reader needs before trusting it. */
+.forecast-stamp { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 10px !important; }
+.forecast-stamp b { color: #cfe7dc; font-size: .8rem; font-weight: 750; font-variant-numeric: tabular-nums; }
+.forecast-stamp span { color: #718b81; font-size: .68rem; }
+.forecast-stamp b::before { content: ''; display: inline-block; width: 6px; height: 6px; margin-right: 7px;
+  border-radius: 50%; background: #65dbaa; vertical-align: middle; }
+.forecast-stamp .forecast-stamp-spread { color: #8a7f5f; }
 .game-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 18px; align-items: start; }
 /* Korean wraps mid-word by default, which produced breaks like "승부치 / 기" and
    "이닝 흐 / 름". keep-all moves the break to a space; break-word still saves a single
@@ -117,7 +124,41 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .pick.lead .pick-gauge i { background: #7ee7b8; }
 .pick > b { color: #7ee7b8; font-size: 1.35rem; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
 .pick > small { color: #6b847b; font-size: .58rem; line-height: 1.35; }
+/* Second-stage picks are read inside one branch, so they are marked as conditional and always
+   carry the chance of actually landing beneath the headline percentage. */
+.pick.conditional { border-color: rgba(126,231,184,.22); background: rgba(126,231,184,.055); }
+.pick-joint { color: #8ba299; font-size: .58rem; font-variant-numeric: tabular-nums; }
+.pick-joint::before { content: ''; display: inline-block; width: 5px; height: 5px; margin-right: 5px;
+  border-radius: 2px; background: rgba(126,231,184,.5); vertical-align: middle; }
+/* Where the underdog stands against the posted price, and what makes the game unpredictable. */
+.upset-block { display: grid; gap: 8px; margin-top: 14px; padding: 13px 14px; border-radius: 13px;
+  border: 1px solid rgba(189,231,213,.13); background: rgba(3,16,12,.34); }
+.upset-block.flagged { border-color: rgba(215,185,107,.4); background: rgba(215,185,107,.07); }
+.upset-heading b { color: #cfe7dc; font-size: .74rem; font-weight: 750; }
+.upset-block.flagged .upset-heading b { color: #e8d49a; }
+.upset-heading small { color: #7d968c; font-size: .61rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.upset-track { position: relative; height: 7px; border-radius: 4px; background: rgba(119,155,140,.16); }
+.upset-track i { display: block; height: 100%; border-radius: 4px; background: #9db0a8; }
+.upset-block.flagged .upset-track i { background: #d7b96b; }
+.upset-track b { position: absolute; top: -3px; width: 2px; height: 13px; border-radius: 1px; background: #eaf4ef; }
+.upset-note { color: #8ba299; font-size: .6rem; line-height: 1.45; }
+.upset-reasons { margin: 0; padding-left: 16px; display: grid; gap: 3px; }
+.upset-reasons li { color: #a8bdb2; font-size: .62rem; line-height: 1.4; }
+.upset-disclaimer { color: #6b847b; font-size: .56rem; line-height: 1.4; }
+/* The branch every second-stage number is conditional on, stated once and in full. */
+.scenario-block { display: grid; gap: 9px; margin-top: 14px; padding: 13px 14px; border-radius: 13px;
+  border: 1px solid rgba(126,231,184,.2); background: rgba(126,231,184,.05); }
+.scenario-heading b { color: #cfe7dc; font-size: .74rem; font-weight: 750; }
+.scenario-heading small { color: #7d968c; font-size: .61rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.scenario-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
+.scenario-grid > div { display: grid; gap: 2px; padding: 9px 10px; border-radius: 10px; background: rgba(3,16,12,.32); }
+.scenario-grid span { color: #708a80; font-size: .59rem; line-height: 1.3; word-break: keep-all; }
+.scenario-grid strong { color: #eaf4ef; font-size: 1.02rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+.scenario-grid strong i { color: #49665b; font-style: normal; padding: 0 3px; }
+.scenario-grid small { color: #667f75; font-size: .56rem; line-height: 1.35; }
+.scenario-note { color: #8ba299; font-size: .59rem; line-height: 1.45; }
 .score-row { display: grid; grid-template-columns: 1fr 1px 1fr; gap: 14px; padding: 18px 4px 20px; }
+.score-row.single { grid-template-columns: 1fr; }
 .score-row > div { display: grid; align-content: center; }
 .score-row span, .market-row span { color: #728b81; font-size: .67rem; }
 .score-row strong { margin-top: 4px; font-size: 1.12rem; }
@@ -228,6 +269,7 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
 .margin-bar i { display: block; height: 100%; }
 .margin-bar i.close { background: #65dbaa; }
 .margin-bar i.clear { background: #9db0a8; }
+.margin-bar i.wide { background: #b8a98d; }
 .margin-bar i.blowout { background: #d7b96b; }
 .margin-bar i.level { background: #7f95b5; }
 .margin-legend { display: flex; flex-wrap: wrap; gap: 3px 10px; }
@@ -235,6 +277,7 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
 .margin-legend span::before { content: ''; width: 7px; height: 7px; border-radius: 2px; }
 .margin-legend span.close::before { background: #65dbaa; }
 .margin-legend span.clear::before { background: #9db0a8; }
+.margin-legend span.wide::before { background: #b8a98d; }
 .margin-legend span.blowout::before { background: #d7b96b; }
 .margin-legend span.level::before { background: #7f95b5; }
 .branch-scores { display: grid; gap: 7px; margin: -6px 0 16px; padding: 0 4px; }
@@ -337,6 +380,10 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
     word-break: keep-all; overflow-wrap: break-word; font-size: .63rem !important; }
   /* Three markets stay side by side even on a phone; they are the point of the card. */
   .pick-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+  .scenario-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .scenario-heading { align-items: flex-start !important; }
+  .scenario-grid strong { font-size: .88rem; }
+  .pick-joint { font-size: .53rem; }
   .pick { padding: 10px 9px; gap: 5px; border-radius: 11px; }
   .pick-market { font-size: .57rem; gap: 4px; }
   .pick-market i { padding: 1px 4px; font-size: .55rem; }
@@ -368,6 +415,7 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
 .margin-bar i { display: block; height: 100%; }
 .margin-bar i.close { background: #65dbaa; }
 .margin-bar i.clear { background: #9db0a8; }
+.margin-bar i.wide { background: #b8a98d; }
 .margin-bar i.blowout { background: #d7b96b; }
 .margin-bar i.level { background: #7f95b5; }
 .margin-legend { display: flex; flex-wrap: wrap; gap: 3px 10px; }
@@ -375,6 +423,7 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
 .margin-legend span::before { content: ''; width: 7px; height: 7px; border-radius: 2px; }
 .margin-legend span.close::before { background: #65dbaa; }
 .margin-legend span.clear::before { background: #9db0a8; }
+.margin-legend span.wide::before { background: #b8a98d; }
 .margin-legend span.blowout::before { background: #d7b96b; }
 .margin-legend span.level::before { background: #7f95b5; }
 .branch-scores { display: grid; gap: 7px; margin: -6px 0 16px; padding: 0 4px; }
@@ -412,6 +461,9 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
   .section-heading { align-items: flex-start !important; }
   .section-heading h2 { font-size: 1.55rem; }
   .game-count { padding-top: 23px; font-size: .66rem !important; }
+  .forecast-stamp { gap: 2px 8px; }
+  .forecast-stamp b { font-size: .74rem; }
+  .forecast-stamp span { font-size: .63rem; }
   .score-row span { font-size: .61rem; }
   .score-row strong { font-size: .86rem; }
   .score-row > div.primary strong { font-size: 1rem; }
