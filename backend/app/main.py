@@ -45,6 +45,7 @@ class ClaudeKeyRegistration(ClaudeKeyAccess):
 class ManualRefreshRequest(BaseModel):
     password: SecretStr = Field(min_length=1, max_length=64)
     league: str = Field(default="ALL", pattern="^(ALL|KBO|MLB)$")
+    target_date: date
 
 
 @asynccontextmanager
@@ -184,7 +185,7 @@ def manual_refresh(request: ManualRefreshRequest):
     """Refresh the selected pre-game slate only after the page password is verified."""
     if not secrets.compare_digest(request.password.get_secret_value(), settings.manual_refresh_password):
         raise HTTPException(status_code=401, detail="새로고침 비밀번호가 올바르지 않습니다.")
-    target_date = datetime.now(KST).date()
+    target_date = request.target_date
     try:
         leagues = ("KBO", "MLB") if request.league == "ALL" else (request.league,)
         return {

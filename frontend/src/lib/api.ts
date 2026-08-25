@@ -62,11 +62,11 @@ export async function fetchBacktest(league = 'ALL'): Promise<Backtest> {
   return response.json() as Promise<Backtest>
 }
 
-export async function runManualRefresh(password: string, league: 'ALL' | 'KBO' | 'MLB'): Promise<void> {
+export async function runManualRefresh(password: string, league: 'ALL' | 'KBO' | 'MLB', targetDate: string): Promise<void> {
   const response = await request('/api/v1/manual/refresh', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ password, league }),
+    body: JSON.stringify({ password, league, target_date: targetDate }),
   }, 300_000)
   if (!response.ok) {
     const payload = await response.json().catch(() => ({})) as { detail?: string }
