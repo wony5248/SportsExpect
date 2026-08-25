@@ -11,7 +11,7 @@ from backend.app.models import Game, PredictionSnapshot
 from backend.app.services.operations import job_lock
 from backend.app.services.refresh import (backfill_batter_splits, backfill_kbo_innings,
                                           backfill_mlb_innings, refresh_kbo, refresh_market,
-                                          refresh_mlb)
+                                          refresh_mlb, discover_schedule)
 from backend.app.services.model_lifecycle import run_model_lifecycle
 from backend.app.services.historical_replay import run_historical_replay
 
@@ -44,15 +44,23 @@ def _missing_leagues_for_date(session, target_date: date) -> set[str]:
 
 
 def run_full_refresh(league: str, target_date: date | None = None, *, force: bool = False,
-                     trigger: str = "supabase_cron", include_inning_backfill: bool = True) -> dict[str, Any]:
+                     trigger: str = "supabase_cron", include_inning_backfill: bool = True,
+                     game_ids: set[str] | None = None, include_lineups: bool = True,
+                     only_changed: bool = False) -> dict[str, Any]:
     target_date = target_date or datetime.now(KST).date()
-    with job_lock(f"refresh:{league}:{target_date.isoformat()}"):
+    lock_scope = ",".join(sorted(game_ids)) if game_ids else "all"
+    with job_lock(f"refresh:{league}:{target_date.isoformat()}:{lock_scope}"):
         if league == "KBO":
             return refresh_kbo(
                 target_date, force=force, trigger=trigger,
                 include_inning_backfill=include_inning_backfill,
+                game_ids=game_ids, include_lineups=include_lineups,
+                only_changed=only_changed,
             )
-        return refresh_mlb(target_date, force=force, trigger=trigger)
+        return refresh_mlb(
+            target_date, force=force, trigger=trigger, game_ids=game_ids,
+            include_lineups=include_lineups, only_changed=only_changed,
+        )
 
 
 def run_nearby_refresh(league: str) -> dict[str, Any]:
@@ -165,13 +173,27 @@ def run_innings_backfill(league: str, limit: int = 50) -> dict[str, Any]:
         return backfill_kbo_innings(limit) if league == "KBO" else backfill_mlb_innings(limit)
 
 
-def run_cron_refresh(league: str, scope: str) -> dict[str, Any]:
+def run_cron_refresh(league: str, scope: str, *, target_date: date | None = None,
+                     game_ids: set[str] | None = None, only_changed: bool = False) -> dict[str, Any]:
     if scope == "full":
         return run_full_refresh(league)
     if scope == "nearby":
         return run_nearby_refresh(league)
     if scope == "tomorrow":
         return run_tomorrow_discovery(league)
+    if scope == "discover":
+        if target_date is None:
+            raise ValueError("discover scope requires target_date")
+        with job_lock(f"discover:{league}:{target_date.isoformat()}"):
+            return discover_schedule(league, target_date)
+    if scope == "games":
+        if target_date is None or not game_ids:
+            raise ValueError("games scope requires target_date and game_ids")
+        return run_full_refresh(
+            league, target_date, trigger="supabase_changed_2h" if only_changed else "supabase_chunked_daily",
+            include_inning_backfill=False, game_ids=game_ids, include_lineups=False,
+            only_changed=only_changed,
+        )
     if scope == "market":
         return run_market_refresh(league)
     if scope == "checkpoints":

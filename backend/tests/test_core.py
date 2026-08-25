@@ -1380,6 +1380,15 @@ def test_confirmed_lineup_change_creates_new_prediction_input():
     changed[-1] = SimpleNamespace(side="home", batting_order=9, player_id="replacement", player_name="Replacement",
                                   value=.900, value_metric="OPS", confirmed=True)
     before = predict_game(game, home, away, pitcher("home-p"), pitcher("away-p"), base)
+    unchanged = predict_game(
+        game, home, away, pitcher("home-p"), pitcher("away-p"), base,
+        known_input_hash=before["input_hash"],
+    )
+    assert unchanged == {
+        "input_hash": before["input_hash"],
+        "input_payload": before["input_payload"],
+        "unchanged": True,
+    }
     after = predict_game(game, home, away, pitcher("home-p"), pitcher("away-p"), changed)
     assert before["input_hash"] != after["input_hash"]
     assert before["input_payload"]["features"]["home_lineup_index"] != (

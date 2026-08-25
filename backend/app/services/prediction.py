@@ -62,7 +62,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
                  model_runtime: dict[str, Any] | None = None,
                  bullpens: dict[str, dict[str, Any] | None] | None = None,
                  lineup_tables: dict[str, Any] | None = None,
-                 prediction_context: dict[str, Any] | None = None) -> dict[str, Any]:
+                 prediction_context: dict[str, Any] | None = None,
+                 known_input_hash: str | None = None) -> dict[str, Any]:
     model_name = (model_runtime or {}).get("model_name") or (prediction_context or {}).get("model_name") or (
         "KBO_MATCHUP_V16" if game.league == "KBO" else "MLB_MATCHUP_V15"
     )
@@ -152,6 +153,11 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         "pregame_context": (game_context or {}).get("pregame") or {},
     }
     input_hash = hashlib.sha256(json.dumps(input_data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    # A frequent refresh still rebuilds the inexpensive feature/input fingerprint so official
+    # starter, weather, market and team changes are detected. When that fingerprint matches the
+    # latest saved forecast, avoid paying for another identical Monte Carlo population.
+    if known_input_hash is not None and input_hash == known_input_hash:
+        return {"input_hash": input_hash, "input_payload": input_data, "unchanged": True}
     # Common random numbers make before/after market-anchor comparisons stable: market changes
     # the run means, but not the random stream used to quantify that change.
     simulation_seed_data = {

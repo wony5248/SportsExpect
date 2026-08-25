@@ -219,10 +219,23 @@ def cancelled_game_data_integrity(repair: bool = Query(default=False), session: 
 @app.post("/api/v1/admin/cron/refresh", dependencies=[Depends(require_admin)])
 def cron_refresh(
     league: str = Query(pattern="^(KBO|MLB)$"),
-    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle|splits|replay|innings)$"),
+    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle|splits|replay|innings|discover|games)$"),
+    target_date: date | None = Query(default=None, alias="date"),
+    game_ids: str | None = Query(default=None),
+    only_changed: bool = Query(default=False),
 ):
+    selected_ids = {value for value in (game_ids or "").split(",") if value}
+    if scope == "games" and (target_date is None or not selected_ids):
+        raise HTTPException(status_code=422, detail="games 범위에는 date와 game_ids가 필요합니다.")
+    if scope == "discover" and target_date is None:
+        raise HTTPException(status_code=422, detail="discover 범위에는 date가 필요합니다.")
+    if len(selected_ids) > 5:
+        raise HTTPException(status_code=422, detail="한 번에 최대 5경기까지만 최신화할 수 있습니다.")
     try:
-        return run_cron_refresh(league, scope)
+        return run_cron_refresh(
+            league, scope, target_date=target_date,
+            game_ids=selected_ids or None, only_changed=only_changed,
+        )
     except LockUnavailable as exc:
         # A concurrent full/nearby run is expected occasionally; Cron can safely retry later.
         raise HTTPException(status_code=409, detail=str(exc)) from exc

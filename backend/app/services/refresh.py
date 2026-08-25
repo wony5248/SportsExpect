@@ -14,7 +14,7 @@ from backend.app.collectors.mlb import MlbClient
 from backend.app.collectors.odds import OddsClient
 from backend.app.config import KST, settings
 from backend.app.database import SessionLocal, database_now, init_db, session_scope
-from backend.app.models import CrawlLog, Game, GameResult, LineupEntry, MarketConsensus, PitcherStat, Team
+from backend.app.models import CrawlLog, Game, GameResult, LineupEntry, MarketConsensus, PitcherStat, Prediction, Team
 from backend.app.repositories.repository import (
     fresh_batter_split_ids,
     latest_team_stat,
@@ -41,9 +41,34 @@ from backend.app.services.probability_calibration import LeagueProbabilityCalibr
 from backend.app.services.pregame_context import prediction_context
 
 
+def discover_schedule(league: str, target_date: date) -> dict[str, Any]:
+    """Store one KST slate without running enrichments or simulations."""
+    init_db()
+    client = KboClient() if league == "KBO" else MlbClient()
+    errors: list[str] = []
+    try:
+        source = _tracked(
+            f"{league.lower()}_games", "/ws/Main.asmx/GetKboGameList" if league == "KBO" else "/api/v1/schedule",
+            lambda: client.games(target_date), errors,
+        )
+        rows = source.data if source else []
+        if source:
+            with session_scope() as session:
+                for raw in rows:
+                    upsert_game(session, raw, source.source_url, source.collected_at, league)
+        return {
+            "league": league, "date": target_date.isoformat(), "games": len(rows),
+            "scheduled": sum(row.get("status") == "SCHEDULED" for row in rows),
+            "errors": errors,
+        }
+    finally:
+        client.close()
+
+
 def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None = None,
                 game_ids: set[str] | None = None, trigger: str = "manual",
-                checkpoint_stage: str | None = None, include_inning_backfill: bool = True) -> dict[str, Any]:
+                checkpoint_stage: str | None = None, include_inning_backfill: bool = True,
+                include_lineups: bool = True, only_changed: bool = False) -> dict[str, Any]:
     init_db()
     own_client = client is None
     client = client or KboClient()
@@ -57,7 +82,8 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
             with session_scope() as session:
                 for raw in fetched_games:
                     upsert_game(session, raw, games_source.source_url, games_source.collected_at, "KBO")
-            scheduled = [row for row in fetched_games if row.get("status") == "SCHEDULED"]
+            scheduled = [row for row in fetched_games if row.get("status") == "SCHEDULED"
+                         and (not game_ids or row["external_id"] in game_ids)]
             context_source = _tracked(
                 "kbo_pregame_context", "/ws/Schedule.asmx/GetTodayGames + GetBoxScoreScroll",
                 lambda: client.slate_context(target_date, scheduled), errors,
@@ -123,7 +149,9 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
                 # refresh and can exhaust Vercel's full 300-second request limit. The dedicated
                 # T-40 dispatcher supplies game_ids, so it always enters this branch when lineups
                 # are expected; an ordinary page refresh enters only inside the live-data window.
-                should_fetch_lineup = bool(game_ids) or -30 <= minutes_to_start <= settings.live_update_window_minutes
+                should_fetch_lineup = include_lineups and (
+                    bool(game_ids) or -30 <= minutes_to_start <= settings.live_update_window_minutes
+                )
                 if should_fetch_lineup:
                     lineup_source = _tracked(
                         f"kbo_lineups_{raw['external_id']}", "/ws/Schedule.asmx/GetLineUpAnalysis",
@@ -145,7 +173,10 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
         inning_backfill = (backfill_kbo_innings(10, target_date=target_date, client=client)
                            if include_inning_backfill else {"status": "skipped", "reason": "pregame refresh"})
         market_status = _refresh_market("KBO", errors)
-        predicted = _predict_games("KBO", target_date, game_ids, errors, trigger, checkpoint_stage)
+        predicted = _predict_games(
+            "KBO", target_date, game_ids, errors, trigger, checkpoint_stage,
+            only_changed=only_changed,
+        )
         with session_scope() as session:
             evaluations = evaluate_pending_predictions(session, "KBO", target_date)
         return {"date": target_date.isoformat(), "games": len(fetched_games) or predicted, "predictions": predicted,
@@ -159,7 +190,8 @@ def refresh_kbo(target_date: date, force: bool = False, client: KboClient | None
 
 def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None = None,
                 game_ids: set[str] | None = None, trigger: str = "manual",
-                checkpoint_stage: str | None = None) -> dict[str, Any]:
+                checkpoint_stage: str | None = None, include_lineups: bool = True,
+                only_changed: bool = False) -> dict[str, Any]:
     init_db()
     own_client = client is None
     client = client or MlbClient()
@@ -173,7 +205,8 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
             with session_scope() as session:
                 for raw in fetched_games:
                     upsert_game(session, raw, games_source.source_url, games_source.collected_at, "MLB")
-            scheduled = [row for row in fetched_games if row.get("status") == "SCHEDULED"]
+            scheduled = [row for row in fetched_games if row.get("status") == "SCHEDULED"
+                         and (not game_ids or row["external_id"] in game_ids)]
             context_source = _tracked(
                 "mlb_pregame_context", "/api/v1.1/game/{gamePk}/feed/live + prior box scores",
                 lambda: client.slate_context(target_date, scheduled), errors,
@@ -220,7 +253,10 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
                         for pitcher in starter_source.data:
                             upsert_pitcher(session, game, pitcher, starter_source.source_url, starter_source.collected_at)
             minutes_to_start = (raw["start_at"].astimezone(KST) - now).total_seconds() / 60
-            should_fetch_lineup = bool(game_ids) or raw["status"] == "LIVE" or -30 <= minutes_to_start <= settings.live_update_window_minutes
+            should_fetch_lineup = include_lineups and (
+                bool(game_ids) or raw["status"] == "LIVE"
+                or -30 <= minutes_to_start <= settings.live_update_window_minutes
+            )
             if should_fetch_lineup:
                 lineup_source = _tracked(
                     f"mlb_lineups_{raw['external_id']}", "/api/v1.1/game/{gamePk}/feed/live",
@@ -236,7 +272,10 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
                         if game:
                             replace_lineups(session, game, lineup_source.data, lineup_source.source_url, lineup_source.collected_at)
         market_status = _refresh_market("MLB", errors)
-        predicted = _predict_games("MLB", target_date, game_ids, errors, trigger, checkpoint_stage)
+        predicted = _predict_games(
+            "MLB", target_date, game_ids, errors, trigger, checkpoint_stage,
+            only_changed=only_changed,
+        )
         with session_scope() as session:
             evaluations = evaluate_pending_predictions(session, "MLB", target_date)
         return {"date": target_date.isoformat(), "league": "MLB", "games": len(fetched_games) or predicted,
@@ -257,7 +296,7 @@ def refresh_all(target_date: date, force: bool = False, trigger: str = "manual")
 
 
 def _predict_games(league: str, target_date: date, game_ids: set[str] | None, errors: list[str], trigger: str,
-                   checkpoint_stage: str | None = None) -> int:
+                   checkpoint_stage: str | None = None, *, only_changed: bool = False) -> int:
     predicted = 0
     with session_scope() as session:
         query = select(Game).options(joinedload(Game.home_team), joinedload(Game.away_team)).where(
@@ -340,13 +379,20 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 "market": market_context,
             }
             captured_at = datetime.now(KST)
+            latest_input_hash = session.scalar(select(Prediction.input_hash).where(
+                Prediction.game_id == game.id,
+                Prediction.origin == "LIVE_PREGAME",
+            ).order_by(Prediction.created_at.desc()).limit(1)) if only_changed else None
             result = predict_game(
                 game, home, away, by_side.get("home"), by_side.get("away"), lineups, context,
                 model_runtime=model_runtime,
                 bullpens={"home": bullpen_profiles.get(game.home_team_id),
                           "away": bullpen_profiles.get(game.away_team_id)},
                 lineup_tables=lineup_table_data,
+                known_input_hash=latest_input_hash,
             )
+            if result.get("unchanged"):
+                continue
             save_prediction(
                 session, game, result, stage=checkpoint_stage or _prediction_stage(game, captured_at),
                 trigger=trigger, captured_at=captured_at,
