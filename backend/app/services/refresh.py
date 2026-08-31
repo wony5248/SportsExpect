@@ -316,19 +316,34 @@ def predict_stored_games(league: str, target_date: date, *, trigger: str = "stor
             query = query.where(Game.external_id.in_(game_ids))
         scheduled_ids = list(session.scalars(query).all())
 
-    # Commit one game at a time. A malformed or newly postponed fixture must never roll back the
-    # rest of the slate, which was the failure mode of the original all-slate transaction.
-    predicted = 0
-    for external_id in scheduled_ids:
-        game_errors: list[str] = []
-        try:
-            predicted += _predict_games(league, target_date, {external_id}, game_errors, trigger)
-        except Exception as exc:
-            game_errors.append(f"{external_id}: {type(exc).__name__}: {exc}")
-        errors.extend(game_errors)
+    # Load the expensive residual/calibration histories once for the slate. `_predict_games`
+    # commits each completed game independently, so a later failure or request timeout cannot
+    # roll back predictions that have already finished.
+    completed_ids: set[str] = set()
+    try:
+        predicted = _predict_games(
+            league, target_date, set(scheduled_ids), errors, trigger,
+            completed_game_ids=completed_ids,
+        )
+    except Exception as exc:
+        # The normal path shares one history snapshot across the slate. If a single fixture has
+        # malformed inputs, retry only the unfinished fixtures in isolated sessions so that game
+        # cannot prevent the remainder from being forecast.
+        errors.append(f"shared prediction pass: {type(exc).__name__}: {exc}")
+        predicted = len(completed_ids)
+        for external_id in scheduled_ids:
+            if external_id in completed_ids:
+                continue
+            try:
+                predicted += _predict_games(
+                    league, target_date, {external_id}, errors, trigger,
+                    completed_game_ids=completed_ids,
+                )
+            except Exception as game_exc:
+                errors.append(f"{external_id}: {type(game_exc).__name__}: {game_exc}")
 
     with session_scope() as session:
-        evaluations = evaluate_pending_predictions(session, league, target_date)
+        evaluate_pending_predictions(session, league, target_date)
     failed = bool(scheduled_ids) and predicted == 0
     _log(
         f"{league.lower()}_stored_prediction",
@@ -348,7 +363,8 @@ def predict_stored_games(league: str, target_date: date, *, trigger: str = "stor
 
 
 def _predict_games(league: str, target_date: date, game_ids: set[str] | None, errors: list[str], trigger: str,
-                   checkpoint_stage: str | None = None, *, only_changed: bool = False) -> int:
+                   checkpoint_stage: str | None = None, *, only_changed: bool = False,
+                   completed_game_ids: set[str] | None = None) -> int:
     predicted = 0
     with session_scope() as session:
         query = select(Game).options(joinedload(Game.home_team), joinedload(Game.away_team)).where(
@@ -453,6 +469,12 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 session, game, result, stage=checkpoint_stage or _prediction_stage(game, captured_at),
                 trigger=trigger, captured_at=captured_at,
             )
+            # Persist progress before moving to the next fixture. Supabase's async HTTP worker
+            # can terminate the request at 290 seconds; without this checkpoint the surrounding
+            # transaction rolled the entire slate back even after several forecasts completed.
+            session.commit()
+            if completed_game_ids is not None:
+                completed_game_ids.add(game.external_id)
             predicted += 1
     return predicted
 

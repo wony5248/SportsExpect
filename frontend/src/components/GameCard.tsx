@@ -72,11 +72,12 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const fullDistributionScore = p?.full_distribution_score
     ?? p?.score_estimates?.full_distribution
     ?? p?.score_estimates?.mode
-  // A conditional winner score is useful for a second scenario, but as the headline it
-  // overstates margins by excluding all close losses and upsets. The full-population mean is
-  // the score forecast; the conditional integer remains explicitly labelled below.
-  const headlineScore = meanScore ?? predictedScore ?? fullDistributionScore
-  const headlineIsExactScore = !meanScore && Boolean(predictedScore)
+  // The card face needs one readable baseball score, not fractional expected runs. Prefer the
+  // coherence-selected representative score, then the full-distribution mode; rounding the mean
+  // is only a compatibility fallback for forecasts saved before score candidates were stored.
+  const headlineScore = predictedScore ?? fullDistributionScore ?? (meanScore ? {
+    away: Math.round(meanScore.away), home: Math.round(meanScore.home),
+  } : undefined)
   const modeTotal = p?.simulation_modes?.total_runs
   const modeOutcome = p?.simulation_modes?.outcome
   const statisticalExpectedTotal = p?.statistical_expected_total ?? (
@@ -159,11 +160,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>
         <TeamName team={game.home} side="HOME" />
         {!isFinal && headlineScore && <Box className="matchup-score">
-          <span>{headlineIsExactScore ? '예측 스코어' : '전체 평균 예상 득점'}</span>
-          <strong>{stat(headlineScore.away, headlineIsExactScore ? 0 : 1)} <i>:</i> {stat(headlineScore.home, headlineIsExactScore ? 0 : 1)}</strong>
-          <small>{headlineIsExactScore
-            ? `${(homeFavored ? game.home : game.away).name} 승리 시행에서 선정 · 전체 평균 ${stat(p?.away_expected_runs, 1)} : ${stat(p?.home_expected_runs, 1)}`
-            : `팀·선발·라인업·구장·잔차를 반영한 전체 ${p?.model.simulations.toLocaleString() ?? ''}회 평균 · 배당 기준점은 비교용`}</small>
+          <span>유력 예상 점수</span>
+          <strong>{stat(headlineScore.away, 0)} <i>:</i> {stat(headlineScore.home, 0)}</strong>
+          <small>전체 평균 {stat(meanScore?.away, 1)} : {stat(meanScore?.home, 1)} · 시뮬레이션의 승패·총점 방향을 함께 반영</small>
         </Box>}
       </Box>
       {game.status === 'LIVE' && <Box className="live-game-notice" role="status">
