@@ -306,13 +306,41 @@ def predict_stored_games(league: str, target_date: date, *, trigger: str = "stor
     worker reaches its request deadline; later per-game refreshes append a fresher forecast.
     """
     init_db()
+    started = datetime.now(KST)
     errors: list[str] = []
-    predicted = _predict_games(league, target_date, game_ids, errors, trigger)
+    with SessionLocal() as session:
+        query = select(Game.external_id).where(
+            Game.league == league, Game.game_date == target_date, Game.status == "SCHEDULED",
+        ).order_by(Game.start_at, Game.external_id)
+        if game_ids:
+            query = query.where(Game.external_id.in_(game_ids))
+        scheduled_ids = list(session.scalars(query).all())
+
+    # Commit one game at a time. A malformed or newly postponed fixture must never roll back the
+    # rest of the slate, which was the failure mode of the original all-slate transaction.
+    predicted = 0
+    for external_id in scheduled_ids:
+        game_errors: list[str] = []
+        try:
+            predicted += _predict_games(league, target_date, {external_id}, game_errors, trigger)
+        except Exception as exc:
+            game_errors.append(f"{external_id}: {type(exc).__name__}: {exc}")
+        errors.extend(game_errors)
+
     with session_scope() as session:
         evaluations = evaluate_pending_predictions(session, league, target_date)
+    failed = bool(scheduled_ids) and predicted == 0
+    _log(
+        f"{league.lower()}_stored_prediction",
+        "FAILED" if failed else "SUCCESS",
+        "database://stored-pregame-inputs",
+        started,
+        "; ".join(errors)[:4000] if errors else None,
+    )
     return {
         "date": target_date.isoformat(),
         "league": league,
+        "scheduled": len(scheduled_ids),
         "predictions": predicted,
         "errors": errors,
         "source": "STORED_DATA",

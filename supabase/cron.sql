@@ -164,6 +164,41 @@ $$;
 
 revoke all on function public.invoke_dugout_chunked_refresh(text, date, boolean) from public, anon, authenticated;
 
+-- MLB starter enrichment can approach the serverless deadline even for five games. Fan the
+-- late daily refresh out one game per HTTP request so each prediction commits independently.
+create or replace function public.invoke_dugout_per_game_refresh(
+  refresh_league text,
+  refresh_date date,
+  changed_only boolean
+)
+returns integer
+language plpgsql
+security definer
+set search_path = public, vault, extensions
+as $$
+declare
+  game_external_id text;
+  invoked integer := 0;
+begin
+  for game_external_id in
+    select game.external_id
+    from public.games game
+    where game.league = refresh_league
+      and game.game_date = refresh_date
+      and game.status = 'SCHEDULED'
+    order by game.start_at, game.external_id
+  loop
+    perform public.invoke_dugout_game_chunk(
+      refresh_league, refresh_date, array[game_external_id], changed_only
+    );
+    invoked := invoked + 1;
+  end loop;
+  return invoked;
+end;
+$$;
+
+revoke all on function public.invoke_dugout_per_game_refresh(text, date, boolean) from public, anon, authenticated;
+
 -- Idempotently replace only Dugout Lab jobs when this file is run again.
 -- The command check also removes legacy jobs created before the dugout-* naming convention.
 do $$
@@ -242,7 +277,7 @@ select cron.schedule('dugout-mlb-next-day-discovery', '55 13 * * *',
     'MLB', 'discover', (now() at time zone 'Asia/Seoul')::date + 1
   )$$);
 select cron.schedule('dugout-mlb-daily-pregame', '0 14 * * *',
-  $$select public.invoke_dugout_chunked_refresh(
+  $$select public.invoke_dugout_per_game_refresh(
     'MLB', (now() at time zone 'Asia/Seoul')::date + 1, false
   )$$);
 -- Every two hours at minute 10 of even KST hours. These calls never collect lineups and the
