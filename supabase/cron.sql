@@ -23,7 +23,7 @@ begin
   if refresh_league not in ('KBO', 'MLB') then
     raise exception 'Unsupported league: %', refresh_league;
   end if;
-  if refresh_scope not in ('full', 'nearby', 'tomorrow', 'market', 'checkpoints', 'lifecycle', 'splits', 'replay', 'discover', 'games') then
+  if refresh_scope not in ('full', 'nearby', 'tomorrow', 'market', 'checkpoints', 'lifecycle', 'splits', 'replay', 'discover', 'games', 'predict') then
     raise exception 'Unsupported scope: %', refresh_scope;
   end if;
 
@@ -227,6 +227,16 @@ select cron.schedule('dugout-kbo-market-checkpoints', '*/10 * * * *',
   $$select public.invoke_dugout_refresh('KBO', 'market')$$);
 select cron.schedule('dugout-mlb-market-checkpoints', '5-59/10 * * * *',
   $$select public.invoke_dugout_refresh('MLB', 'market')$$);
+-- Publish a usable next-day baseline at 13:00 KST. This uses only committed records and is
+-- intentionally independent from the slower starter/provider enrichment later in the day.
+select cron.schedule('dugout-mlb-early-next-day-discovery', '50 3 * * *',
+  $$select public.invoke_dugout_dated_refresh(
+    'MLB', 'discover', (now() at time zone 'Asia/Seoul')::date + 1
+  )$$);
+select cron.schedule('dugout-mlb-early-prediction', '0 4 * * *',
+  $$select public.invoke_dugout_dated_refresh(
+    'MLB', 'predict', (now() at time zone 'Asia/Seoul')::date + 1
+  )$$);
 select cron.schedule('dugout-mlb-next-day-discovery', '55 13 * * *',
   $$select public.invoke_dugout_dated_refresh(
     'MLB', 'discover', (now() at time zone 'Asia/Seoul')::date + 1

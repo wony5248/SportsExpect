@@ -263,6 +263,66 @@ def test_dated_full_cron_refresh_uses_the_requested_slate(monkeypatch):
     assert result == {"date": "2026-09-01"}
 
 
+def test_stored_prediction_scope_skips_provider_collection(monkeypatch):
+    target = date(2026, 9, 1)
+    calls = []
+
+    def fake_predict(league, target_date, *, trigger, game_ids):
+        calls.append((league, target_date, trigger, game_ids))
+        return {"predictions": 12}
+
+    monkeypatch.setattr(jobs_module, "predict_stored_games", fake_predict)
+    result = jobs_module.run_cron_refresh("MLB", "predict", target_date=target)
+    assert calls == [("MLB", target, "supabase_stored_prediction", None)]
+    assert result == {"predictions": 12}
+
+
+def test_manual_background_refresh_queues_baseline_then_one_request_per_game():
+    from backend.app.main import ManualRefreshRequest, manual_refresh
+
+    class Rows:
+        def all(self):
+            return ["MLB-1", "MLB-2", "MLB-3"]
+
+    class FakeSession:
+        committed = False
+
+        def __init__(self):
+            self.calls = []
+
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        def scalars(self, _statement):
+            return Rows()
+
+        def scalar(self, statement, parameters):
+            self.calls.append((str(statement), parameters))
+            return len(self.calls)
+
+        def commit(self):
+            self.committed = True
+
+        def rollback(self):
+            raise AssertionError("queueing should not roll back")
+
+    session = FakeSession()
+    result = manual_refresh(ManualRefreshRequest(
+        password=settings.manual_refresh_password,
+        league="MLB",
+        target_date=date(2026, 9, 1),
+    ), session)
+    assert result["status"] == "QUEUED"
+    assert result["browser_independent"] is True
+    assert result["leagues"]["MLB"] == {
+        "mode": "STORED_BASELINE_THEN_SINGLE_GAME", "requests": 4, "games": 3,
+    }
+    assert "'predict'" in session.calls[0][0]
+    assert all("invoke_dugout_game_chunk" in sql for sql, _ in session.calls[1:])
+    assert [params["game_id"] for _, params in session.calls[1:]] == ["MLB-1", "MLB-2", "MLB-3"]
+    assert session.committed is True
+
+
 def test_mlb_lineup_reads_batting_side_from_official_game_data_people():
     response = {
         "gameData": {"players": {"ID7": {"batSide": {"code": "L"}}}},

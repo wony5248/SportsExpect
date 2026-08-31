@@ -236,7 +236,8 @@ unset DUGOUT_ADMIN_TOKEN
 - 전체 수집: KBO 매시 04분, MLB 매시 19분
 - 임박·진행 경기: 각 리그 5분 간격
 - 정확 스냅샷: 매분 검사, T-24h·T-3h·T-60m·T-15m ±2.5분
-- 다음 날 일정: KBO 13:10 KST, MLB 00:20 KST
+- MLB 다음 날 일정·기본 예측: 12:50 KST 일정 선취득, 13:00 KST 저장 데이터 예측
+- MLB 늦은 최신화: 22:55 KST 일정 재확인, 23:00 KST 경기별 외부 데이터 재계산
 - 시장: KBO 12:00 KST, MLB 00:00 KST
 - 타자 split: 리그별 매시간 두 번
 - 과거 재현: KBO 05:00 KST, MLB 16:00 KST

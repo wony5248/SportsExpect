@@ -297,6 +297,28 @@ def refresh_all(target_date: date, force: bool = False, trigger: str = "manual")
             "errors": kbo["errors"] + mlb["errors"]}
 
 
+def predict_stored_games(league: str, target_date: date, *, trigger: str = "stored_prediction",
+                         game_ids: set[str] | None = None) -> dict[str, Any]:
+    """Create forecasts from data already committed to the database, without network collection.
+
+    This deliberately runs separately from the slower MLB starter/stat enrichment path. It gives
+    every scheduled game a usable baseline forecast even when an upstream provider or serverless
+    worker reaches its request deadline; later per-game refreshes append a fresher forecast.
+    """
+    init_db()
+    errors: list[str] = []
+    predicted = _predict_games(league, target_date, game_ids, errors, trigger)
+    with session_scope() as session:
+        evaluations = evaluate_pending_predictions(session, league, target_date)
+    return {
+        "date": target_date.isoformat(),
+        "league": league,
+        "predictions": predicted,
+        "errors": errors,
+        "source": "STORED_DATA",
+    }
+
+
 def _predict_games(league: str, target_date: date, game_ids: set[str] | None, errors: list[str], trigger: str,
                    checkpoint_stage: str | None = None, *, only_changed: bool = False) -> int:
     predicted = 0

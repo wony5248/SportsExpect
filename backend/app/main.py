@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import KST, settings
 from backend.app.database import SessionLocal, init_db
-from backend.app.models import Team
+from backend.app.models import Game, Team
 from backend.app.repositories.repository import (cancelled_game_pregame_integrity, game_cards, game_dates,
                                                  game_detail, performance_metrics)
 from backend.app.services.operations import LockUnavailable, backup_database, operational_status
@@ -196,11 +196,27 @@ def manual_refresh(request: ManualRefreshRequest, session: Session = Depends(get
         if session.get_bind().dialect.name == "postgresql":
             queued: dict[str, dict[str, int | str]] = {}
             for league in leagues:
-                chunk_count = int(session.scalar(text(
-                    "select public.invoke_dugout_chunked_refresh(:league, :target_date, false)"
-                ), {"league": league, "target_date": target_date}) or 0)
-                if chunk_count:
-                    queued[league] = {"mode": "CHUNKED", "requests": chunk_count}
+                game_ids = list(session.scalars(select(Game.external_id).where(
+                    Game.league == league,
+                    Game.game_date == target_date,
+                    Game.status == "SCHEDULED",
+                ).order_by(Game.start_at, Game.external_id)).all())
+                if game_ids:
+                    # First create a fast baseline from committed data. Full provider refreshes
+                    # then run one game per request so none can consume the whole pg_net deadline.
+                    session.scalar(text(
+                        "select public.invoke_dugout_dated_refresh(:league, 'predict', :target_date)"
+                    ), {"league": league, "target_date": target_date})
+                    for game_id in game_ids:
+                        session.scalar(text(
+                            "select public.invoke_dugout_game_chunk("
+                            ":league, :target_date, ARRAY[:game_id]::text[], false)"
+                        ), {"league": league, "target_date": target_date, "game_id": game_id})
+                    queued[league] = {
+                        "mode": "STORED_BASELINE_THEN_SINGLE_GAME",
+                        "requests": len(game_ids) + 1,
+                        "games": len(game_ids),
+                    }
                     continue
                 request_id = int(session.scalar(text(
                     "select public.invoke_dugout_dated_refresh(:league, 'full', :target_date)"
@@ -255,7 +271,7 @@ def cancelled_game_data_integrity(repair: bool = Query(default=False), session: 
 @app.post("/api/v1/admin/cron/refresh", dependencies=[Depends(require_admin)])
 def cron_refresh(
     league: str = Query(pattern="^(KBO|MLB)$"),
-    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle|splits|replay|innings|discover|games)$"),
+    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle|splits|replay|innings|discover|games|predict)$"),
     target_date: date | None = Query(default=None, alias="date"),
     game_ids: str | None = Query(default=None),
     only_changed: bool = Query(default=False),
@@ -265,6 +281,8 @@ def cron_refresh(
         raise HTTPException(status_code=422, detail="games 범위에는 date와 game_ids가 필요합니다.")
     if scope == "discover" and target_date is None:
         raise HTTPException(status_code=422, detail="discover 범위에는 date가 필요합니다.")
+    if scope == "predict" and target_date is None:
+        raise HTTPException(status_code=422, detail="predict 범위에는 date가 필요합니다.")
     if len(selected_ids) > 5:
         raise HTTPException(status_code=422, detail="한 번에 최대 5경기까지만 최신화할 수 있습니다.")
     try:

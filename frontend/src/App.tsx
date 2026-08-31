@@ -39,6 +39,9 @@ export default function App() {
   const [seasonDates, setSeasonDates] = useState<GameDate[]>([])
   const mobile = useMobile()
   const requestId = useRef(0)
+  const refreshPollTimer = useRef<number | null>(null)
+  const selectedBoard = useRef({ date, league })
+  selectedBoard.current = { date, league }
   const seasonYear = Number(date.slice(0, 4))
   // Recomputed on every render so the relative age stays truthful.
   const forecastStamp = forecastFreshness(games)
@@ -72,7 +75,23 @@ export default function App() {
   const latestLoad = useRef(load)
   latestLoad.current = load
 
+  const pollQueuedRefresh = (targetDate: string, targetLeague: 'ALL' | 'KBO' | 'MLB', attempt = 0) => {
+    const delays = [5_000, 10_000, 20_000, 40_000, 80_000, 120_000]
+    if (attempt >= delays.length) return
+    if (refreshPollTimer.current != null) window.clearTimeout(refreshPollTimer.current)
+    refreshPollTimer.current = window.setTimeout(() => {
+      const selected = selectedBoard.current
+      if (selected.date === targetDate && selected.league === targetLeague) {
+        void latestLoad.current(true)
+      }
+      pollQueuedRefresh(targetDate, targetLeague, attempt + 1)
+    }, delays[attempt])
+  }
+
   useEffect(() => { void load() }, [load])
+  useEffect(() => () => {
+    if (refreshPollTimer.current != null) window.clearTimeout(refreshPollTimer.current)
+  }, [])
   useEffect(() => {
     let active = true
     void loadAuthSession().then((next) => { if (active) setSession(next) }).catch(() => { if (active) setSession(null) })
@@ -119,8 +138,9 @@ export default function App() {
       if (refresh.status === 'QUEUED' && refresh.browser_independent) {
         setManualRefreshNotice({
           severity: 'success',
-          message: `${targetLabel} 최신화가 서버에 접수됐습니다. 이제 다른 사이트로 이동하거나 브라우저 탭을 닫아도 계속 진행됩니다. 나중에 돌아오면 저장된 최신 결과가 표시됩니다.`,
+          message: `${targetLabel} 최신화가 서버에 접수됐습니다. 저장된 데이터로 기본 예측을 먼저 만들고, 경기별 최신 수집을 이어서 진행합니다. 다른 사이트로 이동하거나 탭을 닫아도 계속됩니다.`,
         })
+        pollQueuedRefresh(targetDate, targetLeague)
       } else {
         setManualRefreshNotice({
           severity: 'success',

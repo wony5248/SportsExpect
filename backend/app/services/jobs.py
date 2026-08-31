@@ -11,7 +11,7 @@ from backend.app.models import Game, PredictionSnapshot
 from backend.app.services.operations import job_lock
 from backend.app.services.refresh import (backfill_batter_splits, backfill_kbo_innings,
                                           backfill_mlb_innings, refresh_kbo, refresh_market,
-                                          refresh_mlb, discover_schedule)
+                                          refresh_mlb, discover_schedule, predict_stored_games)
 from backend.app.services.model_lifecycle import run_model_lifecycle
 from backend.app.services.historical_replay import run_historical_replay
 
@@ -194,6 +194,14 @@ def run_cron_refresh(league: str, scope: str, *, target_date: date | None = None
             include_inning_backfill=False, game_ids=game_ids, include_lineups=False,
             only_changed=only_changed,
         )
+    if scope == "predict":
+        if target_date is None:
+            raise ValueError("predict scope requires target_date")
+        with job_lock(f"predict:{league}:{target_date.isoformat()}"):
+            return predict_stored_games(
+                league, target_date, trigger="supabase_stored_prediction",
+                game_ids=game_ids,
+            )
     if scope == "market":
         return run_market_refresh(league)
     if scope == "checkpoints":
