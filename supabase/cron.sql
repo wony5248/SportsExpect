@@ -220,6 +220,13 @@ select cron.schedule('dugout-kbo-daily-pregame', '0 4 * * *',
   $$select public.invoke_dugout_refresh('KBO', 'full')$$);
 select cron.schedule('dugout-mlb-market', '0 13 * * *',
   $$select public.invoke_dugout_refresh('MLB', 'market')$$);
+-- The API performs a cheap local due-check first and contacts the odds provider only when an
+-- upcoming game is missing its T-24h/T-3h/T-60m/T-15m quote.  Frequent dispatch therefore
+-- improves closing-line coverage without multiplying provider calls for completed stages.
+select cron.schedule('dugout-kbo-market-checkpoints', '*/10 * * * *',
+  $$select public.invoke_dugout_refresh('KBO', 'market')$$);
+select cron.schedule('dugout-mlb-market-checkpoints', '5-59/10 * * * *',
+  $$select public.invoke_dugout_refresh('MLB', 'market')$$);
 select cron.schedule('dugout-mlb-next-day-discovery', '55 13 * * *',
   $$select public.invoke_dugout_dated_refresh(
     'MLB', 'discover', (now() at time zone 'Asia/Seoul')::date + 1

@@ -14,9 +14,10 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from backend.app.config import KST, database_url_from_environment, settings
 from backend.app.database.base import Base
-from backend.app.models import (Game, GameResult, GameStarter, LineupEntry, ModelVersion, PitcherStat, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
+from backend.app.models import (Game, GameResult, GameStarter, LineupEntry, MarketSnapshot, ModelVersion, PitcherStat, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
                                 ModelLifecycleEvent, TeamBullpenEvent, UserClaudeSetting)
-from backend.app.repositories.repository import _prediction_changes, game_cards, game_dates, upsert_game
+from backend.app.repositories.repository import (_market_snapshot_stage, _prediction_changes, game_cards,
+                                                  game_dates, upsert_game, upsert_market_consensus)
 from backend.app.services.archived_starters import _totals_before, starter_view
 from backend.app.services.backtest import _walk_forward_probability, walk_forward_backtest
 from backend.app.services.bullpen import apply_profile_update, derive_profile, load_profiles, seed_league
@@ -50,6 +51,7 @@ from backend.app.services.prediction import (SIMULATION_SUMMARY_SCHEMA_VERSION,
                                              _apply_daily_bullpen_workload,
                                              apply_market_consensus_anchor,
                                              blend_classifier_into_means, build_score_estimates,
+                                             favorite_fragility_score,
                                              predict_game)
 from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
                                        _missing_leagues_for_date, checkpoint_stage_for_minutes)
@@ -64,12 +66,20 @@ from backend.app.services.runtime_secrets import decrypt_secret, encrypt_secret
 from backend.app.services.team_residuals import (ResidualObservation, TeamResidualHistory,
                                                  apply_residual_adjustment, available_before,
                                                  residual_context)
+from backend.app.services.residual_attribution import attribute_score_residual
+from backend.app.services.market_offset import (MarketOffsetObservation, fit_market_offset,
+                                                 market_offset_shadow_probability,
+                                                 walk_forward_offset_validation)
+from backend.app.services.paired_ablation import paired_ablation_report
 from backend.app.services.pregame_context import prediction_context
 from backend.app.services.data_integrity import summarize_pitcher_rows
-from backend.app.services.derived_market_calibration import DerivedMarketHistory
+from backend.app.services.derived_market_calibration import (DerivedMarketHistory,
+                                                              DerivedMarketObservation,
+                                                              _underdog_metrics)
 from backend.app.services.probability_calibration import (CALIBRATION_VALIDATION,
                                                           LeagueProbabilityCalibrationHistory,
                                                           walk_forward_win_validation,
+                                                          walk_forward_segmented_validation,
                                                           DistributionCalibrationObservation,
                                                           ProbabilityObservation,
                                                           calibrated_probability,
@@ -203,6 +213,41 @@ def test_mlb_weather_adjustment_is_neutral_when_missing_and_capped_when_publishe
     assert dome["run_multiplier"] == 1.0
 
 
+def test_market_snapshots_retain_unchanged_checkpoint_and_executable_prices():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        away = Team(league="MLB", code="AW", name="Away")
+        home = Team(league="MLB", code="HM", name="Home")
+        session.add_all([away, home]); session.flush()
+        start = datetime(2026, 8, 23, 18, tzinfo=KST)
+        game = Game(external_id="MARKET-1", league="MLB", game_date=start.date(), start_at=start,
+                    away_team_id=away.id, home_team_id=home.id, status="SCHEDULED", source="test",
+                    source_url="test", collected_at=start - timedelta(days=1))
+        session.add(game); session.flush()
+        quote = {
+            "provider": "The Odds API", "bookmaker_count": 4, "total_line": 8.5,
+            "home_spread": -1.5, "home_implied_probability": .58,
+            "away_implied_probability": .42, "home_decimal_odds": 1.72,
+            "away_decimal_odds": 2.20,
+        }
+        upsert_market_consensus(session, game, quote, "provider", start - timedelta(hours=20))
+        session.flush()
+        upsert_market_consensus(session, game, quote, "provider", start - timedelta(hours=3))
+        session.flush()
+        snapshots = session.scalars(select(MarketSnapshot).order_by(MarketSnapshot.collected_at)).all()
+        assert [row.raw["snapshot_stage"] for row in snapshots] == ["T_MINUS_24H", "T_MINUS_3H"]
+        assert snapshots[0].raw["observation_role"] == "OPENING"
+        assert snapshots[-1].raw["home_decimal_odds"] == 1.72
+
+
+def test_market_snapshot_stage_never_labels_post_start_as_closing():
+    start = datetime(2026, 8, 23, 18, tzinfo=KST)
+    game = SimpleNamespace(start_at=start)
+    assert _market_snapshot_stage(game, start - timedelta(minutes=15))[0] == "T_MINUS_15M"
+    assert _market_snapshot_stage(game, start + timedelta(seconds=1))[0] == "POST_START_REJECTED"
+
+
 def test_mlb_lineup_reads_batting_side_from_official_game_data_people():
     response = {
         "gameData": {"players": {"ID7": {"batSide": {"code": "L"}}}},
@@ -326,6 +371,118 @@ def test_stored_simulation_recipe_reproduces_actual_result_frequencies():
     assert evaluation["actual_outcome_count"] > evaluation["actual_score_count"]
     assert evaluation["inning_data_available"] is True
     assert evaluation["actual_inning_path_count"] >= 0
+
+
+def test_score_residual_attribution_separates_starter_and_bullpen_phases():
+    prediction = SimpleNamespace(
+        home_expected_runs=5.0, away_expected_runs=4.0, home_win_probability=.62,
+        payload={"residual_calibration": {
+            "league_residual_sd": 2.5,
+            "home": {"matchup_residual_flag": False},
+            "away": {"matchup_residual_flag": True},
+        }},
+    )
+    result = SimpleNamespace(
+        home_score=2, away_score=7,
+        innings={"home": [0, 1, 0, 0, 0, 0, 1, 0, 0],
+                 "away": [1, 0, 1, 0, 1, 0, 2, 2, 0]},
+    )
+    attribution = attribute_score_residual(prediction, result)
+    assert attribution["favorite_lost"] is True
+    assert attribution["home"]["early_starter_phase"]["actual_runs"] == 1
+    assert attribution["away"]["late_bullpen_phase"]["actual_runs"] == 4
+    assert attribution["home"]["routing"] == "MEAN_REVERSION"
+    assert attribution["inning_split_available"] is True
+
+
+def test_favorite_fragility_scores_simulated_stall_and_bullpen_collapse_paths():
+    features = {
+        "home_starter_confirmed": True, "home_lineup_confirmed": True,
+        "home_large_residual_flag": False,
+    }
+    simulation = {
+        "home_two_way_probability": .64,
+        "game_shape": {
+            "favorite_side": "HOME", "favorite_scores_0_to_2_and_loses": .16,
+            "favorite_leads_after_five_then_loses": .08,
+            "underdog_leads_after_five_and_wins": .12,
+        },
+    }
+    output = favorite_fragility_score(features, {
+        "bullpen": {"home": {"available": True, "fatigue_index": .8}},
+        "schedule": {"home": {"fatigue_index": .15}},
+    }, {}, simulation, .08)
+    assert output["favorite"] == "HOME"
+    assert output["score"] >= 35
+    assert output["upset_paths"]["favorite_leads_after_five_then_loses"] == .08
+    assert output["directional_run_adjustment"] == 0
+
+
+def test_market_offset_shadow_learns_only_the_model_market_disagreement():
+    start = datetime(2026, 4, 1, 18)
+    rows = []
+    for index in range(520):
+        market = .55
+        model = .68
+        # The truth is between market and model, so the fitted disagreement weight should be
+        # positive but smaller than blindly replacing the market with the model.
+        outcome = 1.0 if index % 100 < 60 else 0.0
+        rows.append(MarketOffsetObservation(index, 2026, start + timedelta(hours=index),
+                                            market, model, outcome))
+    intercept, weight = fit_market_offset(rows[:300])
+    shadow = market_offset_shadow_probability(.68, .55, {
+        "enabled": True, "intercept": intercept, "disagreement_weight": weight,
+        "sample_count": 300,
+    })
+    assert .55 < shadow["shadow_probability"] < .68
+    assert shadow["production_enabled"] is False
+    report = walk_forward_offset_validation(rows)
+    assert report["sample_count"] >= 300
+    assert report["shadow_brier"] < report["market_brier"]
+
+
+def test_underdog_promotion_requires_price_roi_and_positive_closing_line_value():
+    start = datetime(2026, 4, 1, 18)
+    rows = [DerivedMarketObservation(
+        game_id=index, league="MLB", season=2026, available_at=start + timedelta(hours=index),
+        market="MONEYLINE", model_line=None, market_line=None,
+        model_probability=.60, market_probability=.67,
+        outcome=0.0 if index % 10 < 4 else 1.0,
+        home_decimal_odds=1.5, away_decimal_odds=3.0,
+    ) for index in range(320)]
+    timelines = [{
+        "game_id": index, "league": "MLB", "closing_home_probability": .64,
+    } for index in range(320)]
+    report = _underdog_metrics(rows, timelines)
+    assert report["sample_size"] == 320
+    assert report["edge_sample_size"] == 320
+    assert report["unit_roi"] > 0
+    assert report["mean_probability_clv"] > 0
+    assert report["status"]["state"] == "READY"
+
+
+def test_paired_ablation_uses_same_seed_and_reports_each_shadow_variant():
+    recipe = {
+        "home_expected": 5.0, "away_expected": 4.0, "simulations": 2000, "seed": 77,
+        "environment_variance": 0.0, "team_variance": .10, "league": "MLB",
+        "home_staff": None, "away_staff": None,
+        "home_team_variance": .12, "away_team_variance": .11,
+    }
+    prediction = SimpleNamespace(payload={
+        "simulation_recipe": recipe,
+        "residual_calibration": {
+            "baseline_home_expected_runs": 4.8, "baseline_away_expected_runs": 4.1,
+            "home_variance_multiplier": 1.0, "away_variance_multiplier": 1.0,
+        },
+        "market_calibration": {"model_home_before": 5.0, "model_away_before": 4.0},
+        "headline_market": {}, "upset_volatility": {"shared_volatility": .02},
+    })
+    game = SimpleNamespace()
+    result = SimpleNamespace(home_score=6, away_score=3)
+    report = paired_ablation_report([(prediction, game, result, None)])
+    assert report["sample_size"] == 1
+    assert report["common_random_numbers"] is True
+    assert set(report["metrics"]) == {"production", "no_residual", "no_market", "no_upset_volatility"}
 
 
 def test_historical_replay_is_audited_evaluated_and_serialized_separately():
@@ -1601,9 +1758,11 @@ def test_total_pick_is_decided_against_the_market_price_not_a_flat_half():
     assert cheap_total["comparable"] is True
     assert cheap_total["pick"] == "OVER" and cheap_total["edge"] > 0
     assert dear_total["pick"] == "UNDER" and dear_total["edge"] < 0
-    # The headline score follows the pick, so the score and the total on the card agree.
-    assert cheap["projected_score"]["home"] + cheap["projected_score"]["away"] > 8.5
-    assert dear["projected_score"]["home"] + dear["projected_score"]["away"] < 8.5
+    # The total read is priced from an unchanged score population; its market price must not
+    # choose a different representative score.
+    assert (cheap["projected_score"]["home"], cheap["projected_score"]["away"]) == (
+        dear["projected_score"]["home"], dear["projected_score"]["away"]
+    )
     assert cheap["projected_score"]["total_conditioning"] == "MARKET_EDGE"
 
     # Both sides leaned over inside the winning branch, so a branch-majority rule would have
@@ -1702,27 +1861,23 @@ def test_market_run_line_sets_dynamic_cover_population_for_headline_score():
     (6.8, 3.1, 9.5),
     (3.5, 5.5, 8.5),
 ])
-def test_coherent_headline_score_matches_same_population_total_direction(
+def test_coherent_headline_score_is_not_selected_to_match_total_direction(
     home_expected, away_expected, total_line,
 ):
     result = simulate_scores(
         home_expected, away_expected, 20_000, 20260824,
         league="MLB", headline_total_line=total_line,
     )
-    primary = result["projected_score"]
-    total = primary["home"] + primary["away"]
-    # The direction is decided inside the winning branch, so that is the population it must
-    # agree with. The full-population totals stay on the payload as the reference reading.
-    probabilities = result["winner_conditional_market"]["headline_total"]
-    probabilities = {"over": probabilities["over_probability"], "under": probabilities["under_probability"]}
-    if probabilities["over"] >= probabilities["under"]:
-        assert primary["headline_total_pick"] == "OVER"
-        assert total > total_line
-    else:
-        assert primary["headline_total_pick"] == "UNDER"
-        assert total < total_line
-    assert primary["headline_total_line"] == total_line
-    assert primary["scenario_probability"] > 0
+    result_at_other_line = simulate_scores(
+        home_expected, away_expected, 20_000, 20260824,
+        league="MLB", headline_total_line=total_line + 2,
+    )
+    # Total directions remain reportable, but neither the book's threshold nor the resulting
+    # over/under side is allowed to force the representative winner scenario into a score.
+    assert result["projected_score"]["home"] == result_at_other_line["projected_score"]["home"]
+    assert result["projected_score"]["away"] == result_at_other_line["projected_score"]["away"]
+    assert result["projected_score"]["headline_total_line"] == total_line
+    assert result["projected_score"]["scenario_probability"] > 0
 
 
 def test_verified_market_consensus_conservatively_changes_simulation_population():
@@ -1758,12 +1913,13 @@ def test_verified_market_consensus_conservatively_changes_simulation_population(
                                          "away_implied_probability": .40}},
     )
     assert lower["input_hash"] != upper["input_hash"]
-    assert lower["payload"]["frequency_tables"] != upper["payload"]["frequency_tables"]
-    assert lower["home_expected_runs"] + lower["away_expected_runs"] < (
+    assert lower["payload"]["frequency_tables"] == upper["payload"]["frequency_tables"]
+    assert lower["home_expected_runs"] + lower["away_expected_runs"] == (
         upper["home_expected_runs"] + upper["away_expected_runs"]
     )
     assert lower["payload"]["market_calibration"]["enabled"] is True
-    assert 0 < lower["payload"]["market_calibration"]["total_weight"] <= .4
+    assert lower["payload"]["market_calibration"]["total_weight"] == 0
+    assert lower["payload"]["market_calibration"]["total_role"] == "REFERENCE_ONLY_DERIVED_TOTAL_COMPARISON"
     assert lower["payload"]["primary_score"]["headline_total_line"] == 7.5
     assert upper["payload"]["primary_score"]["headline_total_line"] == 10.5
     assert lower["input_hash"] != spread["input_hash"]
@@ -1779,14 +1935,29 @@ def test_unverified_bare_market_number_cannot_move_model_means():
     assert audit["reason"] == "NO_VERIFIED_PREGAME_MARKET"
 
 
-def test_market_anchor_preserves_model_majority_and_caps_consensus_influence():
+def test_verified_run_line_without_moneyline_is_reference_only_for_scores():
+    """A handicap direction is not score input; retain it only for later comparison."""
+    baseline = {
+        "provider": "TEST_BOOKS", "bookmaker_count": 4,
+        "collected_at": "2026-08-24T10:00:00+09:00", "total_line": 8.5,
+    }
+    home_a, away_a, audit_a = apply_market_consensus_anchor(5.2, 4.3, baseline, "MLB")
+    home_b, away_b, audit_b = apply_market_consensus_anchor(
+        5.2, 4.3, {**baseline, "home_spread": -2.5}, "MLB")
+    assert (home_b, away_b) == (home_a, away_a)
+    assert audit_b["spread_role"] == "REFERENCE_ONLY_DERIVED_HANDICAP_COMPARISON"
+    assert audit_a["market_home_probability"] is None
+    assert audit_b["market_home_probability"] is None
+
+
+def test_market_moneyline_can_temper_margin_but_total_is_reference_only():
     home, away, audit = apply_market_consensus_anchor(7.0, 3.0, {
         "provider": "TEST_BOOKS", "bookmaker_count": 8, "total_line": 8.0,
         "home_implied_probability": .45, "away_implied_probability": .55,
     }, "MLB")
     assert audit["enabled"] is True
-    assert audit["total_weight"] == .4
-    assert home + away < 10.0
+    assert audit["total_weight"] == 0
+    assert home + away == 10.0
     # A contradictory market tempers a large model edge but cannot blindly reverse it.
     assert home > away
     assert audit["anchored_home_probability"] < audit["model_home_probability_before"]
@@ -2360,6 +2531,26 @@ def test_win_calibration_gate_is_measured_walk_forward_not_hardcoded():
     assert CALIBRATION_VALIDATION["MLB"]["status"] == "HOLD"
 
 
+def test_segmented_calibration_challenger_shrinks_overconfident_strong_favorites():
+    start = datetime(2026, 4, 1, 18, 30)
+    rows = []
+    for index in range(720):
+        strong = index % 2 == 0
+        probability = .76 if strong else .56
+        realized_rate = .56 if strong else .56
+        rows.append(ProbabilityObservation(
+            game_id=index + 1, season=2026, available_at=start + timedelta(hours=index),
+            probability=probability,
+            outcome=1.0 if index % 100 < realized_rate * 100 else 0.0,
+            stage="T_MINUS_15M" if index % 3 else "T_MINUS_24H",
+        ))
+    report = walk_forward_segmented_validation(rows, "MLB")
+    assert report["sample_count"] >= 150
+    assert report["segmented_predictions"] >= 60
+    assert report["candidate_brier"] < report["raw_brier"]
+    assert report["candidate_log_loss"] < report["raw_log_loss"]
+
+
 def test_backtest_probability_calibration_ignores_results_not_final_at_cutoff():
     cutoff = datetime(2026, 8, 24, 18, 30)
     prior = [
@@ -2595,6 +2786,8 @@ def test_market_consensus_removes_two_way_margin_and_uses_median_lines():
     # The home team's median run-line point: negative means the market's -1.5 favorite is home.
     assert row["home_spread"] == -1.5
     assert abs(row["home_implied_probability"] + row["away_implied_probability"] - 1) < 1e-9
+    assert row["home_decimal_odds"] == 1.85
+    assert row["away_decimal_odds"] == 2.05
     # The run line's point barely moves, so its price is where the market states how likely the
     # favourite is to clear it. Without a price there is nothing to compare a model against.
     assert row["home_spread_probability"] is None

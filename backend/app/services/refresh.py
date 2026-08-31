@@ -14,7 +14,8 @@ from backend.app.collectors.mlb import MlbClient
 from backend.app.collectors.odds import OddsClient
 from backend.app.config import KST, settings
 from backend.app.database import SessionLocal, database_now, init_db, session_scope
-from backend.app.models import CrawlLog, Game, GameResult, LineupEntry, MarketConsensus, PitcherStat, Prediction, Team
+from backend.app.models import (CrawlLog, Game, GameResult, LineupEntry, MarketConsensus,
+                                MarketSnapshot, PitcherStat, Prediction, Team)
 from backend.app.repositories.repository import (
     fresh_batter_split_ids,
     latest_team_stat,
@@ -38,6 +39,7 @@ from backend.app.services.prediction_evaluation import evaluate_pending_predicti
 from backend.app.services.team_residuals import TeamResidualHistory
 from backend.app.services.team_strength import TeamStrengthHistory
 from backend.app.services.probability_calibration import LeagueProbabilityCalibrationHistory
+from backend.app.services.market_offset import MarketOffsetHistory
 from backend.app.services.pregame_context import prediction_context
 
 
@@ -309,6 +311,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
         residual_history = TeamResidualHistory.from_session(session, league)
         strength_history = TeamStrengthHistory.from_session(session, league)
         probability_history = LeagueProbabilityCalibrationHistory.from_session(session, league)
+        market_offset_history = MarketOffsetHistory.from_session(session, league)
         # Seed any team that has no profile yet, then read them all back, so a bullpen update
         # made since the last refresh reaches this slate's predictions. Both are optional
         # enrichments: if their tables are not migrated yet the slate still gets predictions.
@@ -363,6 +366,8 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 "total_over_probability": (market.raw or {}).get("total_over_probability"),
                 "home_implied_probability": market.home_implied_probability,
                 "away_implied_probability": market.away_implied_probability,
+                "home_decimal_odds": (market.raw or {}).get("home_decimal_odds"),
+                "away_decimal_odds": (market.raw or {}).get("away_decimal_odds"),
                 "bookmaker_count": market.bookmaker_count,
                 "provider": market.provider,
                 "collected_at": market.collected_at.isoformat(),
@@ -375,6 +380,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                 "team_residuals": residual_history.context_for(game, regime),
                 "team_strength": strength_history.context_for(game),
                 "probability_calibration": probability_history.context_for(game),
+                "market_offset": market_offset_history.context_for(game),
                 "pregame": prediction_context(session, game),
                 "market": market_context,
             }
@@ -451,6 +457,7 @@ def _months_for_recent(target: date, days: int) -> list[tuple[int, int]]:
 
 
 MARKET_REFRESH_HOURS_KST = {"KBO": 12, "MLB": 22}
+MARKET_CHECKPOINT_LOOKAHEAD_HOURS = 36
 
 
 def _market_refresh_due(league: str, latest: datetime | None, now: datetime) -> bool:
@@ -459,6 +466,27 @@ def _market_refresh_due(league: str, latest: datetime | None, now: datetime) -> 
     if now < scheduled:
         scheduled -= timedelta(days=1)
     return latest is None or latest < scheduled
+
+
+def _market_checkpoint_due(session: Session, league: str, now: datetime) -> bool:
+    """Whether any upcoming game lacks the quote checkpoint appropriate for `now`.
+
+    This query is deliberately local and cheap.  Cron may ask frequently, but an external odds
+    request is made only four times per game horizon at most: T-24h, T-3h, T-60m and T-15m.
+    """
+    cutoff = now + timedelta(hours=MARKET_CHECKPOINT_LOOKAHEAD_HOURS)
+    games = session.scalars(select(Game).where(
+        Game.league == league, Game.status == "SCHEDULED", Game.start_at.is_not(None),
+        Game.start_at > now, Game.start_at <= cutoff,
+    )).all()
+    for game in games:
+        stage = _prediction_stage(game, now)
+        snapshots = session.scalars(select(MarketSnapshot).where(
+            MarketSnapshot.game_id == game.id,
+        )).all()
+        if not any((row.raw or {}).get("snapshot_stage") == stage for row in snapshots):
+            return True
+    return False
 
 
 def _market_event_date(value: str | None) -> date | None:
@@ -491,7 +519,8 @@ def _refresh_market(league: str, errors: list[str]) -> dict[str, Any]:
         latest = session.scalar(select(func.max(CrawlLog.finished_at)).where(
             CrawlLog.collector == collector, CrawlLog.status == "SUCCESS",
         ))
-    if not _market_refresh_due(league, latest, now):
+        checkpoint_due = _market_checkpoint_due(session, league, now)
+    if not checkpoint_due and not _market_refresh_due(league, latest, now):
         return {"status": "already_collected", "matched_games": 0}
     client = OddsClient()
     try:
@@ -502,7 +531,9 @@ def _refresh_market(league: str, errors: list[str]) -> dict[str, Any]:
         matched_games = 0
         with session_scope() as session:
             games = session.scalars(select(Game).options(joinedload(Game.home_team), joinedload(Game.away_team)).where(
-                Game.league == league, Game.status.in_(("SCHEDULED", "LIVE")),
+                # Prices first observed after first pitch are not pregame evidence and must
+                # never become a closing line by accident.
+                Game.league == league, Game.status == "SCHEDULED",
             )).all()
             by_matchup = {
                 (game.game_date, _team_key(game.away_team.name), _team_key(game.home_team.name)): game

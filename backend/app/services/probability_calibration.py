@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import Game, GameResult, Prediction
+from backend.app.models import Game, GameResult, Prediction, PredictionSnapshot
 
 
 MIN_CALIBRATION_SAMPLES = 30
@@ -29,6 +29,7 @@ CALIBRATION_VALIDATION = {
 # Below this a walk-forward win-probability verdict is noise. The map has two parameters and
 # needs a fitting window before it can be scored at all.
 MIN_WIN_VALIDATION_SAMPLES = 150
+MIN_SEGMENT_CALIBRATION_SAMPLES = 60
 CALIBRATION_GUARDRAILS = {
     "brier": 0.0, "log_loss": 0.0, "run_mae": .02, "total_mae": .03,
     "margin_mae": .03, "handicap_brier": .002, "total_brier": .002,
@@ -43,6 +44,7 @@ class ProbabilityObservation:
     available_at: datetime
     probability: float
     outcome: float
+    stage: str = "UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,14 @@ class LeagueProbabilityCalibrationHistory:
             if current is None or _prefer(prediction, current[0]):
                 by_game[game.id] = (prediction, game, result)
 
+        prediction_ids = [prediction.id for prediction, _, _ in by_game.values()]
+        stage_by_prediction: dict[int, str] = {}
+        if prediction_ids:
+            snapshots = session.scalars(select(PredictionSnapshot).where(
+                PredictionSnapshot.prediction_id.in_(prediction_ids),
+            ).order_by(PredictionSnapshot.captured_at)).all()
+            for snapshot in snapshots:
+                stage_by_prediction[snapshot.prediction_id] = snapshot.stage
         observations = []
         distribution_observations = []
         for prediction, game, result in by_game.values():
@@ -116,12 +126,19 @@ class LeagueProbabilityCalibrationHistory:
                 available_at=result.finalized_at,
                 probability=_clip(float(raw_probability), .001, .999),
                 outcome=1.0 if result.home_score > result.away_score else 0.0,
+                stage=stage_by_prediction.get(
+                    prediction.id,
+                    "HISTORICAL_REPLAY" if prediction.origin == "HISTORICAL_REPLAY" else "UNKNOWN",
+                ),
             ))
         win_validation = walk_forward_win_validation(
             sorted(observations, key=lambda row: (row.available_at, row.game_id)), league,
         )
         validation = distribution_calibration_validation(
             distribution_observations, league, win_validation,
+        )
+        validation["segmented_challenger"] = walk_forward_segmented_validation(
+            sorted(observations, key=lambda row: (row.available_at, row.game_id)), league,
         )
         return cls(observations, validation)
 
@@ -218,6 +235,76 @@ def walk_forward_win_validation(observations: list[ProbabilityObservation],
         "brier_delta": brier_delta,
         "log_loss_delta": log_loss_delta,
     }
+
+
+def walk_forward_segmented_validation(observations: list[ProbabilityObservation],
+                                      league: str) -> dict[str, Any]:
+    """Shadow-test calibration by information horizon and favorite strength.
+
+    The segmented map never touches production merely because one retrospective slice looks
+    attractive.  Each row is scored with parameters fitted only on earlier finals in the same
+    coarse stage/favorite regime, falling back to the league map until 60 comparable games exist.
+    """
+    raw_brier = raw_log = candidate_brier = candidate_log = 0.0
+    scored = segmented = known_stage_predictions = 0
+    segment_counts: dict[str, int] = {}
+    for index, row in enumerate(observations):
+        prior = [candidate for candidate in observations[:index]
+                 if candidate.season == row.season and candidate.available_at <= row.available_at]
+        global_prior = prior[-MAX_CALIBRATION_SAMPLES:]
+        if len(global_prior) < MIN_CALIBRATION_SAMPLES:
+            continue
+        key = _calibration_segment(row)
+        known_stage_predictions += int(not key.startswith("UNKNOWN:"))
+        same_segment = [candidate for candidate in prior if _calibration_segment(candidate) == key]
+        training = same_segment[-MAX_CALIBRATION_SAMPLES:] if len(same_segment) >= MIN_SEGMENT_CALIBRATION_SAMPLES else global_prior
+        segmented += int(training is not global_prior)
+        segment_counts[key] = segment_counts.get(key, 0) + 1
+        slope, intercept = fit_platt([(item.probability, item.outcome) for item in training])
+        candidate = _clip(_sigmoid(intercept + slope * _logit(row.probability)), .001, .999)
+        raw = _clip(row.probability, .001, .999)
+        raw_brier += (raw - row.outcome) ** 2
+        candidate_brier += (candidate - row.outcome) ** 2
+        raw_log += -(row.outcome * math.log(raw) + (1 - row.outcome) * math.log(1 - raw))
+        candidate_log += -(row.outcome * math.log(candidate) + (1 - row.outcome) * math.log(1 - candidate))
+        scored += 1
+    if scored < MIN_WIN_VALIDATION_SAMPLES:
+        return {
+            "status": "COLLECTING", "league": league, "sample_count": scored,
+            "minimum_samples": MIN_WIN_VALIDATION_SAMPLES,
+            "minimum_segment_samples": MIN_SEGMENT_CALIBRATION_SAMPLES,
+        }
+    brier_delta = candidate_brier / scored - raw_brier / scored
+    log_delta = candidate_log / scored - raw_log / scored
+    passed = (brier_delta < 0 and log_delta < 0
+              and segmented >= MIN_SEGMENT_CALIBRATION_SAMPLES
+              and known_stage_predictions >= MIN_SEGMENT_CALIBRATION_SAMPLES)
+    return {
+        "status": "READY" if passed else "HOLD",
+        "league": league, "sample_count": scored, "segmented_predictions": segmented,
+        "known_stage_predictions": known_stage_predictions,
+        "minimum_segment_samples": MIN_SEGMENT_CALIBRATION_SAMPLES,
+        "raw_brier": round(raw_brier / scored, 8),
+        "candidate_brier": round(candidate_brier / scored, 8),
+        "raw_log_loss": round(raw_log / scored, 8),
+        "candidate_log_loss": round(candidate_log / scored, 8),
+        "brier_delta": round(brier_delta, 8), "log_loss_delta": round(log_delta, 8),
+        "segments_scored": segment_counts,
+        "production_enabled": False,
+    }
+
+
+def _calibration_segment(row: ProbabilityObservation) -> str:
+    favorite = max(row.probability, 1 - row.probability)
+    strength = "TOSSUP" if favorite < .55 else ("LEAN" if favorite < .65 else "STRONG")
+    stage = row.stage
+    if stage in {"T_MINUS_15M", "T_MINUS_40M", "T_MINUS_60M"}:
+        horizon = "LATE"
+    elif stage in {"T_MINUS_3H", "T_MINUS_24H"}:
+        horizon = "EARLY"
+    else:
+        horizon = "UNKNOWN"
+    return f"{horizon}:{strength}"
 
 
 def distribution_calibration_validation(

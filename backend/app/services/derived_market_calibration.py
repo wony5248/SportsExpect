@@ -18,19 +18,26 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
+import math
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.models import Game, GameResult, Prediction
+from backend.app.models import Game, GameResult, MarketSnapshot, Prediction
 
 
 # Below this a bias estimate is indistinguishable from noise, and an edge hit rate certainly is.
-MIN_DERIVED_MARKET_SAMPLES = 100
+MIN_DERIVED_MARKET_SAMPLES = 300
+MIN_UNDERDOG_EDGE_SAMPLES = 75
 # The model must beat the closing price as a forecast, not merely differ from it, before any
 # correction fitted here is allowed to touch a prediction.
-DERIVED_MARKET_GUARDRAIL = {"brier_improvement": 0.0, "minimum_samples": MIN_DERIVED_MARKET_SAMPLES}
+DERIVED_MARKET_GUARDRAIL = {
+    "brier_improvement": 0.0, "log_loss_improvement": 0.0,
+    "minimum_samples": MIN_DERIVED_MARKET_SAMPLES,
+    "minimum_underdog_edge_samples": MIN_UNDERDOG_EDGE_SAMPLES,
+    "minimum_unit_roi": 0.0, "minimum_probability_clv": 0.0,
+}
 # Edge buckets reported back, in probability points.
 EDGE_BUCKETS = ((0.0, .02), (.02, .05), (.05, .10), (.10, 1.0))
 
@@ -52,13 +59,17 @@ class DerivedMarketObservation:
     market_probability: float | None
     # 1 when the priced side won, 0 when it lost, None on a push.
     outcome: float | None
+    home_decimal_odds: float | None = None
+    away_decimal_odds: float | None = None
 
 
 class DerivedMarketHistory:
     """Finished games paired only with forecasts that could not have seen their result."""
 
-    def __init__(self, observations: list[DerivedMarketObservation]):
+    def __init__(self, observations: list[DerivedMarketObservation],
+                 market_timelines: list[dict[str, Any]] | None = None):
         self.observations = sorted(observations, key=lambda row: (row.available_at, row.game_id))
+        self.market_timelines = market_timelines or []
 
     @classmethod
     def from_session(cls, session: Session, league: str = "ALL") -> DerivedMarketHistory:
@@ -90,7 +101,20 @@ class DerivedMarketHistory:
         observations: list[DerivedMarketObservation] = []
         for prediction, game, result in by_game.values():
             observations.extend(_observations_for(prediction, game, result))
-        return cls(observations)
+        timeline_query = (
+            select(MarketSnapshot, Game)
+            .join(Game, Game.id == MarketSnapshot.game_id)
+            .where(Game.start_at.is_not(None))
+            .order_by(MarketSnapshot.game_id, MarketSnapshot.collected_at)
+        )
+        if league != "ALL":
+            timeline_query = timeline_query.where(Game.league == league)
+        timeline_rows: dict[int, list[tuple[MarketSnapshot, Game]]] = defaultdict(list)
+        for snapshot, game in session.execute(timeline_query).all():
+            if _naive(snapshot.collected_at) <= _naive(game.start_at):
+                timeline_rows[game.id].append((snapshot, game))
+        timelines = [_market_timeline(rows) for rows in timeline_rows.values() if rows]
+        return cls(observations, timelines)
 
     def report(self) -> dict[str, Any]:
         """Everything accumulated so far, split by market and by league."""
@@ -99,18 +123,61 @@ class DerivedMarketHistory:
         for row in self.observations:
             by_market[row.market].append(row)
             by_league[row.league].append(row)
+        market_reports = {
+            market: _market_metrics(market, rows, self.market_timelines)
+            for market, rows in sorted(by_market.items())
+        }
         return {
             "sample_size": len(self.observations),
             "collected_through": (max(row.available_at for row in self.observations).isoformat()
                                   if self.observations else None),
             "guardrail": DERIVED_MARKET_GUARDRAIL,
-            "markets": {market: _metrics(rows) for market, rows in sorted(by_market.items())},
+            "market_timing": _market_timing_report(self.market_timelines),
+            "markets": market_reports,
             "leagues": {
-                name: {market: _metrics([row for row in rows if row.market == market])
+                name: {market: _market_metrics(
+                    market, [row for row in rows if row.market == market],
+                    [timeline for timeline in self.market_timelines if timeline["league"] == name],
+                )
                        for market in sorted({row.market for row in rows})}
                 for name, rows in sorted(by_league.items())
             },
         }
+
+
+def _market_timeline(rows: list[tuple[MarketSnapshot, Game]]) -> dict[str, Any]:
+    opening, closing = rows[0][0], rows[-1][0]
+    stages = [str((snapshot.raw or {}).get("snapshot_stage") or "LEGACY") for snapshot, _ in rows]
+    return {
+        "game_id": rows[0][1].id,
+        "league": rows[0][1].league,
+        "observations": len(rows),
+        "stages": stages,
+        "opening_home_probability": opening.home_implied_probability,
+        "closing_home_probability": closing.home_implied_probability,
+        "opening_home_odds": _number((opening.raw or {}).get("home_decimal_odds")),
+        "closing_home_odds": _number((closing.raw or {}).get("home_decimal_odds")),
+        "probability_move": (
+            float(closing.home_implied_probability) - float(opening.home_implied_probability)
+            if closing.home_implied_probability is not None and opening.home_implied_probability is not None
+            else None
+        ),
+    }
+
+
+def _market_timing_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    required = {"T_MINUS_24H", "T_MINUS_3H", "T_MINUS_60M", "T_MINUS_15M"}
+    moves = [abs(float(row["probability_move"])) for row in rows if row["probability_move"] is not None]
+    return {
+        "games": len(rows),
+        "with_open_and_close": sum(row["observations"] >= 2 for row in rows),
+        "complete_checkpoint_games": sum(required.issubset(set(row["stages"])) for row in rows),
+        "mean_absolute_home_probability_move": _round(_mean(moves), 6),
+        "stage_coverage": {
+            stage: sum(stage in row["stages"] for row in rows)
+            for stage in sorted(required)
+        },
+    }
 
 
 def _observations_for(prediction: Prediction, game: Game,
@@ -156,6 +223,8 @@ def _observations_for(prediction: Prediction, game: Game,
         model_probability=float(prediction.home_win_probability),
         market_probability=market_home,
         outcome=_side_outcome(margin, 0),
+        home_decimal_odds=_number((payload.get("headline_market") or {}).get("home_decimal_odds")),
+        away_decimal_odds=_number((payload.get("headline_market") or {}).get("away_decimal_odds")),
     ))
 
     handicap = conditional.get("handicap") or {}
@@ -173,6 +242,16 @@ def _observations_for(prediction: Prediction, game: Game,
         outcome=_side_outcome(minus_margin, run_line),
     ))
     return rows
+
+
+def _market_metrics(market: str, rows: list[DerivedMarketObservation],
+                    timelines: list[dict[str, Any]]) -> dict[str, Any]:
+    output = _metrics(rows)
+    if market == "MONEYLINE":
+        underdog = _underdog_metrics(rows, timelines)
+        output["underdog"] = underdog
+        output["status"] = underdog["status"]
+    return output
 
 
 def _metrics(rows: list[DerivedMarketObservation]) -> dict[str, Any]:
@@ -214,6 +293,74 @@ def _metrics(rows: list[DerivedMarketObservation]) -> dict[str, Any]:
         "edge_buckets": _edge_buckets(priced),
         "status": _status(len(priced), improvement),
     }
+
+
+def _underdog_metrics(rows: list[DerivedMarketObservation],
+                      timelines: list[dict[str, Any]]) -> dict[str, Any]:
+    closing = {row["game_id"]: row for row in timelines}
+    samples: list[dict[str, Any]] = []
+    for row in rows:
+        if row.market_probability is None or row.model_probability is None or row.outcome is None:
+            continue
+        home_underdog = row.market_probability < .5
+        market_probability = row.market_probability if home_underdog else 1 - row.market_probability
+        model_probability = row.model_probability if home_underdog else 1 - row.model_probability
+        outcome = row.outcome if home_underdog else 1 - row.outcome
+        odds = row.home_decimal_odds if home_underdog else row.away_decimal_odds
+        timeline = closing.get(row.game_id) or {}
+        closing_home = timeline.get("closing_home_probability")
+        closing_underdog = ((float(closing_home) if home_underdog else 1 - float(closing_home))
+                            if closing_home is not None else None)
+        samples.append({
+            "model": model_probability, "market": market_probability, "outcome": outcome,
+            "edge": model_probability - market_probability, "odds": odds,
+            "clv": closing_underdog - market_probability if closing_underdog is not None else None,
+        })
+    selected = [row for row in samples if row["edge"] >= .04]
+    settled = [row for row in selected if row["odds"] is not None and row["odds"] > 1]
+    clv_rows = [row for row in selected if row["clv"] is not None]
+    model_brier = _mean([(row["model"] - row["outcome"]) ** 2 for row in samples])
+    market_brier = _mean([(row["market"] - row["outcome"]) ** 2 for row in samples])
+    model_log = _mean([_binary_log_loss(row["model"], row["outcome"]) for row in samples])
+    market_log = _mean([_binary_log_loss(row["market"], row["outcome"]) for row in samples])
+    roi = _mean([(row["odds"] - 1) if row["outcome"] else -1.0 for row in settled])
+    probability_clv = _mean([row["clv"] for row in clv_rows])
+    brier_improvement = (market_brier - model_brier
+                         if market_brier is not None and model_brier is not None else None)
+    log_improvement = (market_log - model_log
+                       if market_log is not None and model_log is not None else None)
+    reasons = []
+    if len(samples) < MIN_DERIVED_MARKET_SAMPLES:
+        reasons.append("INSUFFICIENT_PRICED_UNDERDOGS")
+    if len(selected) < MIN_UNDERDOG_EDGE_SAMPLES:
+        reasons.append("INSUFFICIENT_EDGE_SELECTIONS")
+    if brier_improvement is None or brier_improvement <= 0:
+        reasons.append("NO_BRIER_IMPROVEMENT_OVER_MARKET")
+    if log_improvement is None or log_improvement <= 0:
+        reasons.append("NO_LOG_LOSS_IMPROVEMENT_OVER_MARKET")
+    if roi is None or roi <= 0:
+        reasons.append("NON_POSITIVE_UNIT_ROI")
+    if probability_clv is None or probability_clv < 0:
+        reasons.append("NON_POSITIVE_CLOSING_LINE_VALUE")
+    return {
+        "sample_size": len(samples), "edge_sample_size": len(selected),
+        "settled_price_sample_size": len(settled), "clv_sample_size": len(clv_rows),
+        "model_brier": _round(model_brier, 6), "market_brier": _round(market_brier, 6),
+        "brier_improvement": _round(brier_improvement, 6),
+        "model_log_loss": _round(model_log, 6), "market_log_loss": _round(market_log, 6),
+        "log_loss_improvement": _round(log_improvement, 6),
+        "edge_pick_hit_rate": _round(_mean([row["outcome"] for row in selected])),
+        "unit_roi": _round(roi, 6), "mean_probability_clv": _round(probability_clv, 6),
+        "status": {
+            "state": "READY" if not reasons else ("COLLECTING" if len(samples) < MIN_DERIVED_MARKET_SAMPLES else "HOLD"),
+            "reasons": reasons, "guardrail": DERIVED_MARKET_GUARDRAIL,
+        },
+    }
+
+
+def _binary_log_loss(probability: float, outcome: float) -> float:
+    probability = min(.999, max(.001, float(probability)))
+    return -(outcome * math.log(probability) + (1 - outcome) * math.log(1 - probability))
 
 
 def _edge_buckets(rows: list[DerivedMarketObservation]) -> list[dict[str, Any]]:

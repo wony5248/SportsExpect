@@ -998,13 +998,10 @@ def _coherent_scenario_score_projection(
         if favorite_margin(home_runs, away_runs) >= 1
         and not (league == "MLB" and home_runs == away_runs)
     ]
-    # Handicap used to filter this list before the total was applied. That made the representative
-    # score follow a market the UI no longer publishes. All downstream display predictions now
-    # begin with the same event: the straight-win favorite wins this simulated game.
-    total_rows = [row for row in winner_rows if (
-        row[0] + row[1] > line if total_pick == "OVER" else row[0] + row[1] < line
-    )]
-    eligible = total_rows or winner_rows
+    # The score scenario is conditional only on the predicted winner winning. Neither handicap
+    # nor total market directions may filter it: markets are priced against this distribution,
+    # not permitted to reshape a score selected from it.
+    eligible = winner_rows
     if not eligible:
         eligible = [(home_runs, away_runs, count) for (home_runs, away_runs), count in score_counts.items()
                     if not (league == "MLB" and home_runs == away_runs)]
@@ -1242,6 +1239,14 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
     }
     regulation = slice(0, 9)
     extras_played = (away_innings[:, 9:] >= 0).any(axis=1) if away_innings.shape[1] > 9 else np.zeros(1, dtype=bool)
+    home_favored = home_two_way >= away_two_way
+    home_through_five = np.maximum(home_innings[:, :5], 0).sum(axis=1)
+    away_through_five = np.maximum(away_innings[:, :5], 0).sum(axis=1)
+    favorite_runs = home if home_favored else away
+    favorite_led_after_five = home_through_five > away_through_five if home_favored else away_through_five > home_through_five
+    underdog_led_after_five = away_through_five > home_through_five if home_favored else home_through_five > away_through_five
+    favorite_lost = away > home if home_favored else home > away
+    underdog_won = favorite_lost
     result = {
         "engine": engine,
         # A club's season run rate counts extra-inning runs, so the full-game mean is what the
@@ -1304,6 +1309,10 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
             "one_run_probability": float(np.mean(np.abs(home - away) <= 1)),
             "blowout_probability": float(np.mean(np.abs(home - away) >= 5)),
             "either_shutout_probability": float(np.mean((home == 0) | (away == 0))),
+            "favorite_side": "HOME" if home_favored else "AWAY",
+            "favorite_scores_0_to_2_and_loses": float(np.mean((favorite_runs <= 2) & favorite_lost)),
+            "favorite_leads_after_five_then_loses": float(np.mean(favorite_led_after_five & favorite_lost)),
+            "underdog_leads_after_five_and_wins": float(np.mean(underdog_led_after_five & underdog_won)),
         },
     }
     if observed_result is not None:

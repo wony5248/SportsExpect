@@ -128,7 +128,11 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .probability-track i { background: #9dafaa; }
 .probability-track b { background: #65dbaa; }
 /* The three markets a reader came to check. This is the loudest block on the card by design. */
+/* Sized to the picks it actually holds. Handicap is not published, so the strip is usually two
+   wide and must fill the row rather than leaving a third column standing empty. */
 .pick-strip { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 16px; }
+.pick-strip[data-count="1"] { grid-template-columns: minmax(0, 1fr); }
+.pick-strip[data-count="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .pick-strip-title { grid-column: 1 / -1; color: #728b81; font-size: .67rem; }
 .pick { position: relative; display: grid; gap: 6px; padding: 13px 14px; border-radius: 13px;
   border: 1px solid rgba(189,231,213,.13); background: rgba(3,16,12,.34); }
@@ -402,7 +406,11 @@ footer p { flex-basis: 100%; margin: 0; font-weight: 400; letter-spacing: 0; }
     word-break: keep-all; overflow-wrap: break-word; font-size: .63rem !important; }
   /* Three markets stay side by side even on a phone; they are the point of the card. */
   .pick-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
+  .pick-strip[data-count="1"] { grid-template-columns: minmax(0, 1fr); }
+  .pick-strip[data-count="2"] { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .scenario-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  /* An odd tile count in two columns would otherwise leave a hole; the last one fills the row. */
+  .scenario-grid > div:last-child:nth-child(odd) { grid-column: 1 / -1; }
   .scenario-heading { align-items: flex-start !important; }
   .scenario-grid strong { font-size: .88rem; }
   .pick-joint { font-size: .53rem; }

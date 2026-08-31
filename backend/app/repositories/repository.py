@@ -356,6 +356,8 @@ def replace_lineups(session: Session, game: Game, entries: list[dict[str, Any]],
 def upsert_market_consensus(session: Session, game: Game, raw: dict[str, Any], source_url: str,
                             collected_at: datetime) -> MarketConsensus:
     provider = str(raw.get("provider", "The Odds API"))
+    snapshot_raw = dict(raw)
+    snapshot_stage, minutes_to_start = _market_snapshot_stage(game, collected_at)
     row = session.scalar(select(MarketConsensus).where(
         MarketConsensus.game_id == game.id, MarketConsensus.provider == provider,
     ))
@@ -369,6 +371,15 @@ def upsert_market_consensus(session: Session, game: Game, raw: dict[str, Any], s
     latest_snapshot = session.scalar(select(MarketSnapshot).where(
         MarketSnapshot.game_id == game.id, MarketSnapshot.provider == provider,
     ).order_by(MarketSnapshot.collected_at.desc()).limit(1))
+    first_snapshot = session.scalar(select(MarketSnapshot.id).where(
+        MarketSnapshot.game_id == game.id, MarketSnapshot.provider == provider,
+    ).limit(1)) is None
+    snapshot_raw.update({
+        "snapshot_stage": snapshot_stage,
+        "minutes_to_start": minutes_to_start,
+        "observation_role": "OPENING" if first_snapshot else "CHECKPOINT",
+        "is_pregame": minutes_to_start is None or minutes_to_start >= 0,
+    })
     comparison = (values["bookmaker_count"], values["total_line"], values["home_spread"],
                   raw.get("home_spread_probability"), raw.get("total_over_probability"),
                   values["home_implied_probability"], values["away_implied_probability"])
@@ -378,11 +389,14 @@ def upsert_market_consensus(session: Session, game: Game, raw: dict[str, Any], s
                  (latest_snapshot.raw or {}).get("total_over_probability"),
                  latest_snapshot.home_implied_probability, latest_snapshot.away_implied_probability)
                 if latest_snapshot else None)
-    if comparison != previous:
+    previous_stage = (latest_snapshot.raw or {}).get("snapshot_stage") if latest_snapshot else None
+    # A checkpoint is evidence even when the quote itself did not move.  Retaining one row per
+    # stage lets the closing-price audit distinguish "unchanged" from "not collected".
+    if snapshot_stage != "POST_START_REJECTED" and (comparison != previous or snapshot_stage != previous_stage):
         session.add(MarketSnapshot(
             game_id=game.id, provider=provider, bookmaker_count=values["bookmaker_count"],
             total_line=values["total_line"], home_implied_probability=values["home_implied_probability"],
-            away_implied_probability=values["away_implied_probability"], raw=raw,
+            away_implied_probability=values["away_implied_probability"], raw=snapshot_raw,
             source_url=source_url, collected_at=collected_at,
         ))
     if row is None:
@@ -392,6 +406,25 @@ def upsert_market_consensus(session: Session, game: Game, raw: dict[str, Any], s
         for key, value in values.items():
             setattr(row, key, value)
     return row
+
+
+def _market_snapshot_stage(game: Game, collected_at: datetime) -> tuple[str, int | None]:
+    """Classify immutable quotes by information horizon without looking past first pitch."""
+    if game.start_at is None:
+        return "TIME_UNCONFIRMED", None
+    start_at = game.start_at if game.start_at.tzinfo else game.start_at.replace(tzinfo=KST)
+    captured = collected_at if collected_at.tzinfo else collected_at.replace(tzinfo=KST)
+    seconds_to_start = (start_at - captured).total_seconds()
+    minutes = round(seconds_to_start / 60)
+    if seconds_to_start < 0:
+        return "POST_START_REJECTED", minutes
+    if minutes > 12 * 60:
+        return "T_MINUS_24H", minutes
+    if minutes > 120:
+        return "T_MINUS_3H", minutes
+    if minutes > 35:
+        return "T_MINUS_60M", minutes
+    return "T_MINUS_15M", minutes
 
 
 def get_or_create_model(session: Session, name: str, algorithm: str) -> ModelVersion:
@@ -773,6 +806,8 @@ def _market_payload(market: MarketConsensus, prediction: Prediction | None) -> d
         "total_over_probability": (market.raw or {}).get("total_over_probability"),
         "home_implied_probability": market.home_implied_probability,
         "away_implied_probability": market.away_implied_probability,
+        "home_decimal_odds": (market.raw or {}).get("home_decimal_odds"),
+        "away_decimal_odds": (market.raw or {}).get("away_decimal_odds"),
         "source_url": market.source_url, "collected_at": _iso(market.collected_at),
     }
     if prediction:

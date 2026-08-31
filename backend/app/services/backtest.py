@@ -17,7 +17,11 @@ from backend.app.services.team_residuals import (ResidualObservation, apply_resi
 from backend.app.services.derived_market_calibration import DerivedMarketHistory
 from backend.app.services.simulation import (_coherent_scenario_score_projection,
                                               _winner_conditional_market)
-from backend.app.services.probability_calibration import (MAX_CALIBRATION_SAMPLES, MIN_CALIBRATION_SAMPLES,
+from backend.app.services.residual_attribution import residual_attribution_report
+from backend.app.services.market_offset import MarketOffsetHistory
+from backend.app.services.paired_ablation import paired_ablation_report
+from backend.app.services.probability_calibration import (LeagueProbabilityCalibrationHistory,
+                                                          MAX_CALIBRATION_SAMPLES, MIN_CALIBRATION_SAMPLES,
                                                           calibrated_probability, fit_platt)
 
 
@@ -200,6 +204,15 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
         "readiness": _readiness(len(evaluated), completed_results),
         "metrics": _metrics(evaluated, "probability") if evaluated else {"sample_size": 0, "message": "실전 경기 전 예측 표본이 없습니다."},
         "walk_forward_calibrated": _metrics(evaluated, "calibrated_probability") if evaluated else {"sample_size": 0},
+        "segmented_calibration_challenger": {
+            name: ((LeagueProbabilityCalibrationHistory.from_session(session, name).validation or {})
+                   .get("segmented_challenger", {}))
+            for name in (("KBO", "MLB") if league == "ALL" else (league,))
+        },
+        "market_offset_shadow": {
+            name: MarketOffsetHistory.from_session(session, name).validation
+            for name in (("KBO", "MLB") if league == "ALL" else (league,))
+        },
         "expanding_home_rate_baseline": _metrics(evaluated, "baseline_probability") if evaluated else {"sample_size": 0},
         "historical_replay": {
             "sample_size": len(replay_evaluated),
@@ -226,6 +239,14 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
             "method": ("Each game is adjusted only from earlier finalized games. The comparison force-applies "
                        "the August 23 residual policy retrospectively to measure counterfactual lift."),
             "lower_is_better": ["runs_mae", "runs_rmse", "brier_score", "log_loss", "calibration_error"],
+        },
+        "residual_attribution": {
+            "official_live": residual_attribution_report(rows),
+            "historical_replay": residual_attribution_report(replay_rows),
+        },
+        "paired_ablation": {
+            "official_live": paired_ablation_report(rows),
+            "historical_replay": paired_ablation_report(replay_rows),
         },
         "context_feature_monitoring": _context_feature_monitoring(evaluated),
         "market_consensus_baseline": market_metrics,

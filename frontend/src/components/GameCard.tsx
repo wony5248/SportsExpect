@@ -72,10 +72,11 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const fullDistributionScore = p?.full_distribution_score
     ?? p?.score_estimates?.full_distribution
     ?? p?.score_estimates?.mode
-  // The headline is the representative integer score among simulations where the team with the
-  // higher straight-win probability actually won. It is not used to derive another market.
-  const headlineScore = predictedScore ?? meanScore ?? fullDistributionScore
-  const headlineIsExactScore = Boolean(predictedScore)
+  // A conditional winner score is useful for a second scenario, but as the headline it
+  // overstates margins by excluding all close losses and upsets. The full-population mean is
+  // the score forecast; the conditional integer remains explicitly labelled below.
+  const headlineScore = meanScore ?? predictedScore ?? fullDistributionScore
+  const headlineIsExactScore = !meanScore && Boolean(predictedScore)
   const modeTotal = p?.simulation_modes?.total_runs
   const modeOutcome = p?.simulation_modes?.outcome
   const statisticalExpectedTotal = p?.statistical_expected_total ?? (
@@ -158,13 +159,11 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>
         <TeamName team={game.home} side="HOME" />
         {!isFinal && headlineScore && <Box className="matchup-score">
-          <span>{headlineIsExactScore ? '우세팀 승리 대표 점수' : '전체 평균 예상 득점'}</span>
+          <span>{headlineIsExactScore ? '예측 스코어' : '전체 평균 예상 득점'}</span>
           <strong>{stat(headlineScore.away, headlineIsExactScore ? 0 : 1)} <i>:</i> {stat(headlineScore.home, headlineIsExactScore ? 0 : 1)}</strong>
           <small>{headlineIsExactScore
-            ? `${(homeFavored ? game.home : game.away).name} 승리 시행에서 선정 · 전체 평균 ${stat(meanScore?.away, 1)} : ${stat(meanScore?.home, 1)}`
-            : p?.market_calibration?.enabled
-              ? `전체 ${p.model.simulations.toLocaleString()}회 평균 · Odds API ${p.market_calibration.bookmaker_count ?? 1}곳 합의값을 최대 ${stat(Math.max(p.market_calibration.total_weight ?? 0, p.market_calibration.probability_weight ?? 0) * 100, 0)}% 반영`
-              : `팀·선발·상대전적·구장·잔차를 반영한 전체 ${p?.model.simulations.toLocaleString() ?? ''}회 평균`}</small>
+            ? `${(homeFavored ? game.home : game.away).name} 승리 시행에서 선정 · 전체 평균 ${stat(p?.away_expected_runs, 1)} : ${stat(p?.home_expected_runs, 1)}`
+            : `팀·선발·라인업·구장·잔차를 반영한 전체 ${p?.model.simulations.toLocaleString() ?? ''}회 평균 · 배당 기준점은 비교용`}</small>
         </Box>}
       </Box>
       {game.status === 'LIVE' && <Box className="live-game-notice" role="status">
@@ -202,16 +201,16 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
       {p && coherent ? <>
         <Box className="probability-block">
           <Stack direction="row" justifyContent="space-between" alignItems="baseline">
-            <Box><span className={`probability${homeFavored ? '' : ' accent'}`}>{pct(p.away_win_probability)}</span><small>{game.away.name}{homeFavored ? '' : ' · 우세'}</small></Box>
+            <Box><span className={`probability${homeFavored ? '' : ' accent'}`}>{pct(p.away_win_probability)}</span><small>{game.away.name}</small></Box>
             <Typography className="metric-label">{p.extra_innings
               ? game.league === 'MLB' ? '이길 확률 · 연장 승부치기까지 포함' : '이길 확률 · 무승부 제외'
               : '이길 확률 · 무승부 제외'}</Typography>
-            <Box textAlign="right"><span className={`probability${homeFavored ? ' accent' : ''}`}>{pct(p.home_win_probability)}</span><small>{game.home.name}{homeFavored ? ' · 우세' : ''}</small></Box>
+            <Box textAlign="right"><span className={`probability${homeFavored ? ' accent' : ''}`}>{pct(p.home_win_probability)}</span><small>{game.home.name}</small></Box>
           </Stack>
           <Box className="probability-track"><i style={{ width: pct(p.away_win_probability) }} /><b style={{ width: pct(p.home_win_probability) }} /></Box>
         </Box>
 
-        {!isFinal && picks && picks.length > 0 && <Box className="pick-strip">
+        {!isFinal && picks && picks.length > 0 && <Box className="pick-strip" data-count={picks.length}>
           <span className="pick-strip-title">예측 결과 · 일반 승패 / 총점 · 핸디캡 예측은 제공하지 않습니다</span>
           {picks.map((pick) => <Box key={pick.key}
             className={`pick${pick.stage === 2 ? ' conditional' : ''}${pick.hit == null ? '' : pick.hit ? ' hit' : ' miss'}`}>
@@ -281,7 +280,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         </Box>
 
         {predictedScore ? <Box className="branch-scores">
-          <span>예상 승리팀이 실제로 이긴다는 조건의 대표 점수</span>
+          <span>2차 시나리오 · 예상 승리팀이 실제로 이긴 경우의 대표 점수</span>
           <Box className="branch-grid"><Box className="branch likely"><span>{homeFavored ? game.home.name : game.away.name} 승리 시나리오</span><strong>{expectedScore?.away} <i>:</i> {expectedScore?.home}</strong><small>{representativeSummary(predictedScore)}{p.extra_innings ? '' : ' · 9이닝만 계산한 이전 모델'}</small></Box></Box>
         </Box> : null}
 
@@ -447,7 +446,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
                 <small>{personalAnalysis.model} · {personalAnalysis.disclaimer}</small>
               </Box>}
             </Box>
-            <Typography className="source-note">이 경기를 {p.model.simulations.toLocaleString()}번 가상으로 치러본 결과입니다. 팀 타격·수비, 선발과 불펜, 구장, 공개된 날씨·일정·라인업 요인은 모든 시행의 득점률에 반영됩니다. 타석 엔진은 타자별 득점권과 주자 상황 기록까지 매 타석에 적용합니다. 전체 결과로 일반 승패 확률을 정한 뒤, 우세팀이 실제로 이긴 시행들에서 대표 점수와 승리 조건부 총점 전망을 산출합니다. 핸디캡 예측은 제공하지 않으며 미공개 자료만 중립값으로 둡니다. 전체 평균 총점은 {stat(statisticalExpectedTotal, 2)}점입니다. {p.extra_innings
+            <Typography className="source-note">이 경기를 {p.model.simulations.toLocaleString()}번 가상으로 치러본 결과입니다. 팀 타격·수비, 선발과 불펜, 구장, 공개된 날씨·일정·라인업 요인은 모든 시행의 득점률에 반영됩니다. 타석 엔진은 타자별 득점권과 주자 상황 기록까지 매 타석에 적용합니다. 전체 결과로 일반 승패 확률을 정한 뒤, 그 팀이 실제로 이긴 시행들에서만 대표 점수와 총점 전망을 산출합니다. 핸디캡 예측은 제공하지 않으며 미공개 자료만 중립값으로 둡니다. 전체 평균 총점은 {stat(statisticalExpectedTotal, 2)}점입니다. {p.extra_innings
               ? game.league === 'MLB'
                 ? '연장은 실제 MLB 규정대로 승부치기(무사 2루 주자)를 적용해 승부가 날 때까지 치르기 때문에 무승부가 없습니다.'
                 : '연장은 실제 KBO 규정대로 승부치기 없이 11회까지만 치르고, 그래도 동점이면 무승부로 두고 승률 계산에서 뺍니다.'
@@ -648,7 +647,7 @@ function completedGameComparison(game: Game, prediction: Prediction | null,
     awayExpected: expectedScore.away,
     homeExpected: expectedScore.home,
     createdAt: prediction.created_at,
-    favorite: `${favoriteTeam} 우세로 봤음 ${pct(favoriteProbability)}`,
+    favorite: `${favoriteTeam} 승으로 봤음 ${pct(favoriteProbability)}`,
     verdict: winnerCorrect == null ? '무승부 · 비교 제외' : winnerCorrect ? '승패 맞힘' : '승패 틀림',
     verdictClass: winnerCorrect == null ? 'neutral' : winnerCorrect ? 'correct' : 'incorrect',
     runsMae: (Math.abs(expectedScore.away - result.away_score) + Math.abs(expectedScore.home - result.home_score)) / 2,
@@ -975,7 +974,7 @@ function rankedOutcomes(p: NonNullable<Game['prediction']>, game: Game, includeR
   const handicap = handicapSides(p, game)
   const handicapNote = !handicap.fromMarket ? ' · 핸디 배당이 없어 우리 예측 기준'
     : handicap.modelAgrees ? ' · 배당사가 꼽은 팀'
-    : ` · 배당사 마핸이지만 우리는 ${handicap.modelFavorite} 우세로 봄`
+    : ` · 배당사 마핸이지만 우리는 ${handicap.modelFavorite} 승으로 봄`
   if (typeof handicap.minusProbability === 'number') outcomes.push({
     label: `마핸 · ${handicap.minusTeam} -${handicap.runLine}`, probability: handicap.minusProbability,
     note: `${subject(handicap.minusTeam)} ${handicap.minimumMargin}점차 이상으로 이김${handicapNote}`,

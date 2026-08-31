@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from backend.app.config import KST
 from backend.app.models import Game, GameResult, Prediction, PredictionEvaluation
 from backend.app.services.simulation import evaluate_simulation_recipe
+from backend.app.services.residual_attribution import attribute_score_residual
 
 
 def evaluate_game_predictions(session: Session, game: Game, result: GameResult) -> int:
@@ -95,7 +96,9 @@ def _evaluate(prediction: Prediction, result: GameResult) -> dict[str, Any] | No
     }
     recipe = payload.get("simulation_recipe")
     if isinstance(recipe, dict):
-        return evaluate_simulation_recipe(recipe, observed)
+        evaluation = evaluate_simulation_recipe(recipe, observed)
+        evaluation["residual_attribution"] = attribute_score_residual(prediction, result)
+        return evaluation
     tables = payload.get("frequency_tables")
     if not isinstance(tables, dict):
         return None
@@ -109,7 +112,7 @@ def _evaluate(prediction: Prediction, result: GameResult) -> dict[str, Any] | No
     total_count = int((tables.get("totals") or {}).get(str(away_score + home_score), 0))
     margin_count = int((tables.get("margins") or {}).get(str(home_score - away_score), 0))
     outcome_count = int(outcomes.get(outcome, 0))
-    return {
+    evaluation = {
         "simulation_count": simulations,
         "actual_score": {"away": away_score, "home": home_score},
         "actual_score_count": score_count, "actual_score_probability": round(score_count / simulations, 6),
@@ -122,6 +125,8 @@ def _evaluate(prediction: Prediction, result: GameResult) -> dict[str, Any] | No
         "actual_inning_path_count": None, "actual_inning_path_probability": None,
         "inning_data_available": False,
     }
+    evaluation["residual_attribution"] = attribute_score_residual(prediction, result)
+    return evaluation
 
 
 def _naive(value: datetime) -> datetime:

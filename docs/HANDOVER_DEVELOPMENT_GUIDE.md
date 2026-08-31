@@ -16,7 +16,7 @@
 | 운영 DB·스케줄러 | Supabase PostgreSQL·Cron·Vault |
 | 로컬 기본 DB | `data/baseball.db` SQLite |
 | 예측 시뮬레이션 | 경기당 최소 20,000회 |
-| 현재 요약 스키마 | `SIMULATION_SUMMARY_SCHEMA_VERSION = 23` |
+| 현재 요약 스키마 | `SIMULATION_SUMMARY_SCHEMA_VERSION = 33` |
 | 승률 보정 | KBO PASS·활성, MLB HOLD·원승률 유지 |
 | 기본 브랜치 | `main` |
 

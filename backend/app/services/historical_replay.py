@@ -16,6 +16,7 @@ from backend.app.services.prediction import SIMULATION_SUMMARY_SCHEMA_VERSION, p
 from backend.app.services.prediction_evaluation import evaluate_game_predictions
 from backend.app.services.archived_starters import starter_view
 from backend.app.services.team_residuals import TeamResidualHistory
+from backend.app.services.market_offset import MarketOffsetHistory
 from backend.app.services.team_strength import TeamStrengthHistory
 from backend.app.services.probability_calibration import LeagueProbabilityCalibrationHistory
 
@@ -54,6 +55,7 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
                                   .where(Game.league == league)).all():
         archived[record.game_id].append(record)
     probability_history = LeagueProbabilityCalibrationHistory.from_session(session, league)
+    market_offset_history = MarketOffsetHistory.from_session(session, league)
     evaluated_prediction_ids = set(session.scalars(
         select(PredictionEvaluation.prediction_id).join(
             Prediction, Prediction.id == PredictionEvaluation.prediction_id,
@@ -136,6 +138,8 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
             "total_over_probability": (market.raw or {}).get("total_over_probability"),
             "home_implied_probability": market.home_implied_probability,
             "away_implied_probability": market.away_implied_probability,
+            "home_decimal_odds": (market.raw or {}).get("home_decimal_odds"),
+            "away_decimal_odds": (market.raw or {}).get("away_decimal_odds"),
             "bookmaker_count": market.bookmaker_count,
             "provider": market.provider,
             "collected_at": market.collected_at.isoformat(),
@@ -166,6 +170,7 @@ def run_historical_replay(session: Session, league: str, start_date: date | None
              "team_residuals": residual_history.context_for(game),
              "team_strength": team_strength_context,
              "probability_calibration": probability_history.context_for(game),
+             "market_offset": market_offset_history.context_for(game),
              "market": market_context},
             model_runtime=None, bullpens={}, lineup_tables={},
             prediction_context={

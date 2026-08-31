@@ -12,6 +12,7 @@ from backend.app.services.feature_engineering import build_features, expected_ru
 from backend.app.services.model_lifecycle import predict_with_runtime
 from backend.app.services.simulation import INNING_VARIANCE_RATIO, simulate_scores
 from backend.app.services.team_residuals import apply_residual_adjustment
+from backend.app.services.market_offset import market_offset_shadow_probability
 
 
 MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-loss classifier blended into "
@@ -54,7 +55,14 @@ MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-lo
 # reaches the inning engine as a change to the shape of an inning rather than being discarded.
 # MLB adds a batted-ball flight model (Nathan RK4 over real outfield-wall geometry) so tonight's
 # air density and wind adjust the park's home-run behaviour; KBO is unchanged.
-SIMULATION_SUMMARY_SCHEMA_VERSION = 31
+# 32: a posted run line is a comparison/calibration reference only. It never moves score means
+# when a moneyline price is unavailable; score forecasts and run-line diagnostics are separate.
+# 33: a posted total is likewise reference-only. It is collected alongside our fair total and
+# scored after the game, but cannot anchor team score means or select the headline score.
+# 34: adds favorite-collapse path probabilities, favorite fragility, causal-safe residual
+# attribution metadata, and market-offset/segmented-calibration shadow diagnostics.  Stored
+# replays need the new payload even though no unvalidated shadow probability changes production.
+SIMULATION_SUMMARY_SCHEMA_VERSION = 34
 
 
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,
@@ -141,13 +149,18 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
         # The map is fitted only from this league's results that were final before first pitch.
         # It changes the persisted summary hash, but not the underlying Monte Carlo draw seed.
         "probability_calibration": probability_calibration,
+        # Shadow-only market offset parameters belong in the audit hash so a newly fitted
+        # candidate is persisted, but they are excluded from the Monte Carlo seed below because
+        # they must not alter the production distribution before promotion.
+        "market_offset": (game_context or {}).get("market_offset") or {},
         # Market lines never change the score distribution. They are persisted only so the
         # integer headline scenario agrees with the exact total and run line shown beside it.
         "headline_market": {
             key: headline_market.get(key) for key in (
                 "total_line", "home_spread", "home_spread_probability", "total_over_probability",
                 "home_implied_probability",
-                "away_implied_probability", "bookmaker_count", "provider", "collected_at",
+                "away_implied_probability", "home_decimal_odds", "away_decimal_odds",
+                "bookmaker_count", "provider", "collected_at",
             )
         },
         "pregame_context": (game_context or {}).get("pregame") or {},
@@ -162,7 +175,13 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     # the run means, but not the random stream used to quantify that change.
     simulation_seed_data = {
         key: value for key, value in input_data.items()
-        if key not in {"headline_market", "probability_calibration"}
+        if key not in {"headline_market", "probability_calibration", "market_offset"}
+    }
+    # `features` preserves market metadata for auditing, but a market total/run line is not a
+    # baseball input. Exclude that metadata from the seed as well so changing only the posted
+    # reference point leaves the model's Monte Carlo population byte-for-byte unchanged.
+    simulation_seed_data["features"] = {
+        key: value for key, value in features.items() if not key.startswith("market_")
     }
     simulation_seed_hash = hashlib.sha256(
         json.dumps(simulation_seed_data, sort_keys=True, ensure_ascii=False).encode()
@@ -251,6 +270,16 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
     away_probability = simulation["away_two_way_probability"]
     primary_score = simulation["projected_score"]
     disagreement = abs(logistic - simulation["home_two_way_probability"])
+    fragility = favorite_fragility_score(
+        features, (game_context or {}).get("pregame") or {}, volatility, simulation,
+        disagreement, residual_context,
+    )
+    independent_market_probability = market_calibration.get("model_home_probability_before")
+    market_offset_shadow = market_offset_shadow_probability(
+        float(independent_market_probability if independent_market_probability is not None else home_probability),
+        headline_market.get("home_implied_probability"),
+        (game_context or {}).get("market_offset") or {},
+    )
     confidence, confidence_label, missing = _confidence(features, disagreement)
     reasons = _reasons(home, away, home_pitcher, away_pitcher, features)
     score_estimates = build_score_estimates(
@@ -340,6 +369,8 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "upset_volatility": volatility,
             "upset_watch": upset_watch(home_probability, headline_market, volatility,
                                        home.team.name, away.team.name),
+            "favorite_fragility": fragility,
+            "market_offset_shadow": market_offset_shadow,
             "simulation_team_variance": round(team_variance, 4),
             "simulation_home_team_variance": round(home_team_variance, 4),
             "simulation_away_team_variance": round(away_team_variance, 4),
@@ -398,7 +429,10 @@ def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away
             "team_quantiles": simulation["team_quantiles"],
             "team_dense_intervals": simulation["team_dense_intervals"],
             "total_dense_interval": simulation["total_dense_interval"],
-            "game_shape": {key: round(value, 4) for key, value in simulation["game_shape"].items()},
+            "game_shape": {
+                key: round(value, 4) if isinstance(value, (int, float)) else value
+                for key, value in simulation["game_shape"].items()
+            },
             "reasons": reasons,
             "disclaimer": "통계 기반 추정치이며 경기 결과나 수익을 보장하지 않습니다.",
         },
@@ -421,7 +455,9 @@ def apply_market_consensus_anchor(home_runs: float, away_runs: float,
 
     A total or moneyline is valuable external information, but it is neither an observed result
     nor permission to copy the book. The model retains the majority weight, while the consensus
-    corrects implausible total and win-probability divergence. A bare number without provider,
+    corrects implausible win-probability divergence. Totals and run lines are retained for
+    post-game derived-market comparison, not used to make the score chase the book. A bare
+    number without provider,
     collection time, or bookmaker count is never treated as real market evidence.
     """
     market = market or {}
@@ -461,24 +497,19 @@ def apply_market_consensus_anchor(home_runs: float, away_runs: float,
         market_home_probability = None
     home_spread = number("home_spread")
     books = max(1, int(market.get("bookmaker_count") or 1))
-    total_weight = min(.40, .20 + .025 * min(books, 8)) if total_line is not None else 0.0
+    # A market total is a benchmark for our independently-modelled total, not an input. Its
+    # discrepancy and later realized error are accumulated by DerivedMarketHistory.
+    total_weight = 0.0
     probability_weight = min(.35, .16 + .0225 * min(books, 8)) if market_home_probability is not None else 0.0
 
     anchored_total = before_total
-    if total_line is not None:
-        # Keep a single stale or erroneous feed from shifting a projection by several runs.
-        target_total = max(before_total - 3.0, min(before_total + 3.0, total_line))
-        anchored_total = (1 - total_weight) * before_total + total_weight * target_total
 
     margin_sd = max(1.0, (MARGIN_VARIANCE_INFLATION * anchored_total) ** .5)
     model_home_probability = NormalDist().cdf(before_margin / margin_sd)
     market_probability_source = "H2H_NO_VIG"
-    if market_home_probability is None and home_spread is not None and home_spread != 0:
-        # A run line reliably identifies the favourite, but without its price it does not imply
-        # a 50% cover rate. Use direction only and at a much weaker weight.
-        market_home_probability = .54 if home_spread < 0 else .46
-        probability_weight = .10
-        market_probability_source = "SPREAD_DIRECTION_ONLY"
+    # A bare run line identifies the team laying runs but not the no-vig chance of that event.
+    # Do not turn it into a synthetic moneyline: that makes a bookmaker convention look like
+    # lineup information and contaminates the score forecast.
     anchored_probability = model_home_probability
     anchored_margin = before_margin
     if market_home_probability is not None:
@@ -498,7 +529,9 @@ def apply_market_consensus_anchor(home_runs: float, away_runs: float,
         "collected_at": market.get("collected_at"),
         "bookmaker_count": books,
         "total_line": total_line,
+        "total_role": "REFERENCE_ONLY_DERIVED_TOTAL_COMPARISON",
         "home_spread": home_spread,
+        "spread_role": "REFERENCE_ONLY_DERIVED_HANDICAP_COMPARISON",
         "market_home_probability": (round(market_home_probability, 6)
                                     if market_home_probability is not None else None),
         "market_probability_source": market_probability_source if market_home_probability is not None else None,
@@ -663,6 +696,63 @@ def upset_watch(home_probability: float, market: dict[str, Any], volatility: dic
                                   + float(side.get("volatility_bonus") or 0), 5),
         "reasons": reasons,
         "validation": "NOT_YET_PROVEN_AGAINST_CLOSING_PRICE",
+    }
+
+
+def favorite_fragility_score(features: dict[str, Any], pregame: dict[str, Any],
+                             volatility: dict[str, Any], simulation: dict[str, Any],
+                             disagreement: float,
+                             residual_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Score how many plausible paths can break the simulated favorite's advantage."""
+    game_shape = simulation.get("game_shape") or {}
+    favorite = str(game_shape.get("favorite_side") or (
+        "HOME" if simulation["home_two_way_probability"] >= .5 else "AWAY"
+    ))
+    side = favorite.lower()
+    bullpen = ((pregame.get("bullpen") or {}).get(side) or {})
+    schedule = ((pregame.get("schedule") or {}).get(side) or {})
+    bullpen_fatigue = float(bullpen.get("fatigue_index") or 0.0) if bullpen.get("available") else 0.0
+    schedule_fatigue = min(1.0, float(schedule.get("fatigue_index") or 0.0) / .25)
+    starter_unknown = 0.0 if features.get(f"{side}_starter_confirmed") else 1.0
+    lineup_unknown = 0.0 if features.get(f"{side}_lineup_confirmed") else 1.0
+    residual = residual_context or {}
+    residual_outlier = 1.0 if features.get(f"{side}_large_residual_flag") else 0.0
+    stall_loss = float(game_shape.get("favorite_scores_0_to_2_and_loses") or 0.0)
+    bullpen_collapse = float(game_shape.get("favorite_leads_after_five_then_loses") or 0.0)
+    early_underdog = float(game_shape.get("underdog_leads_after_five_and_wins") or 0.0)
+    components = {
+        "bullpen_fatigue": min(1.0, bullpen_fatigue),
+        "schedule_fatigue": schedule_fatigue,
+        "starter_uncertainty": starter_unknown,
+        "lineup_uncertainty": lineup_unknown,
+        "model_disagreement": min(1.0, disagreement / .15),
+        "residual_outlier": residual_outlier,
+        "simulated_offense_stall": min(1.0, stall_loss / .18),
+        "simulated_bullpen_collapse": min(1.0, bullpen_collapse / .10),
+    }
+    weights = {
+        "bullpen_fatigue": .18, "schedule_fatigue": .08,
+        "starter_uncertainty": .12, "lineup_uncertainty": .08,
+        "model_disagreement": .12, "residual_outlier": .10,
+        "simulated_offense_stall": .17, "simulated_bullpen_collapse": .15,
+    }
+    score = round(100 * sum(weights[key] * components[key] for key in weights))
+    contributors = [key for key, value in sorted(
+        components.items(), key=lambda item: weights[item[0]] * item[1], reverse=True,
+    ) if value >= .25]
+    return {
+        "favorite": favorite, "underdog": "AWAY" if favorite == "HOME" else "HOME",
+        "score": score, "level": "HIGH" if score >= 60 else ("MEDIUM" if score >= 35 else "LOW"),
+        "components": {key: round(value, 4) for key, value in components.items()},
+        "weights": weights, "contributors": contributors,
+        "upset_paths": {
+            "favorite_scores_0_to_2_and_loses": round(stall_loss, 4),
+            "favorite_leads_after_five_then_loses": round(bullpen_collapse, 4),
+            "underdog_leads_after_five_and_wins": round(early_underdog, 4),
+        },
+        "directional_run_adjustment": 0.0,
+        "role": "RISK_EXPLANATION_NOT_EXTRA_MEAN_EDGE",
+        "residual_policy_version": residual.get("policy_version"),
     }
 
 

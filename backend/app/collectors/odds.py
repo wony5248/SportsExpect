@@ -43,6 +43,8 @@ def _consensus_event(event: dict[str, Any]) -> dict[str, Any]:
     home_name, away_name = event.get("home_team", ""), event.get("away_team", "")
     home_probabilities: list[float] = []
     away_probabilities: list[float] = []
+    home_decimal_odds: list[float] = []
+    away_decimal_odds: list[float] = []
     total_lines: list[float] = []
     home_spreads: list[float] = []
     # A line on its own says where the market set the bar; the price beside it says how likely
@@ -66,6 +68,11 @@ def _consensus_event(event: dict[str, Any]) -> dict[str, Any]:
                     raw_home, raw_away = 1 / home_price, 1 / away_price
                     home_probabilities.append(raw_home / (raw_home + raw_away))
                     away_probabilities.append(raw_away / (raw_home + raw_away))
+                    # Keep the executable quote as well as the de-vigged probability.  The
+                    # latter scores forecast quality; the former is required for honest ROI
+                    # and closing-line-value evaluation after the game.
+                    home_decimal_odds.append(home_price)
+                    away_decimal_odds.append(away_price)
                     book_used = True
             elif market.get("key") == "totals":
                 points = [_as_float(row.get("point")) for row in outcomes if row.get("name") in {"Over", "Under"}]
@@ -98,6 +105,8 @@ def _consensus_event(event: dict[str, Any]) -> dict[str, Any]:
         "home_spread_probability": _devigged_at_line(spread_quotes, home_spread),
         "home_implied_probability": median(home_probabilities) if home_probabilities else None,
         "away_implied_probability": median(away_probabilities) if away_probabilities else None,
+        "home_decimal_odds": median(home_decimal_odds) if home_decimal_odds else None,
+        "away_decimal_odds": median(away_decimal_odds) if away_decimal_odds else None,
     }
 
 
