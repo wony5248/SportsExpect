@@ -176,7 +176,7 @@ def run_innings_backfill(league: str, limit: int = 50) -> dict[str, Any]:
 def run_cron_refresh(league: str, scope: str, *, target_date: date | None = None,
                      game_ids: set[str] | None = None, only_changed: bool = False) -> dict[str, Any]:
     if scope == "full":
-        return run_full_refresh(league)
+        return run_full_refresh(league, target_date)
     if scope == "nearby":
         return run_nearby_refresh(league)
     if scope == "tomorrow":

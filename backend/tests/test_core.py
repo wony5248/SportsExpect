@@ -55,6 +55,7 @@ from backend.app.services.prediction import (SIMULATION_SUMMARY_SCHEMA_VERSION,
                                              predict_game)
 from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
                                        _missing_leagues_for_date, checkpoint_stage_for_minutes)
+from backend.app.services import jobs as jobs_module
 from pathlib import Path
 from backend.app.services import prediction as prediction_module
 from backend.app.services.model_lifecycle import (_coherent_run_means, _promotion_decision,
@@ -246,6 +247,20 @@ def test_market_snapshot_stage_never_labels_post_start_as_closing():
     game = SimpleNamespace(start_at=start)
     assert _market_snapshot_stage(game, start - timedelta(minutes=15))[0] == "T_MINUS_15M"
     assert _market_snapshot_stage(game, start + timedelta(seconds=1))[0] == "POST_START_REJECTED"
+
+
+def test_dated_full_cron_refresh_uses_the_requested_slate(monkeypatch):
+    target = date(2026, 9, 1)
+    calls = []
+
+    def fake_refresh(league, target_date):
+        calls.append((league, target_date))
+        return {"date": target_date.isoformat()}
+
+    monkeypatch.setattr(jobs_module, "run_full_refresh", fake_refresh)
+    result = jobs_module.run_cron_refresh("MLB", "full", target_date=target)
+    assert calls == [("MLB", target)]
+    assert result == {"date": "2026-09-01"}
 
 
 def test_mlb_lineup_reads_batting_side_from_official_game_data_people():

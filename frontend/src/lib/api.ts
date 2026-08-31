@@ -62,7 +62,13 @@ export async function fetchBacktest(league = 'ALL'): Promise<Backtest> {
   return response.json() as Promise<Backtest>
 }
 
-export async function runManualRefresh(password: string, league: 'ALL' | 'KBO' | 'MLB', targetDate: string): Promise<void> {
+export type ManualRefreshResult = {
+  status: 'QUEUED' | 'COMPLETED'
+  date: string
+  browser_independent: boolean
+}
+
+export async function runManualRefresh(password: string, league: 'ALL' | 'KBO' | 'MLB', targetDate: string): Promise<ManualRefreshResult> {
   const response = await request('/api/v1/manual/refresh', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -72,6 +78,7 @@ export async function runManualRefresh(password: string, league: 'ALL' | 'KBO' |
     const payload = await response.json().catch(() => ({})) as { detail?: string }
     throw new Error(payload.detail ?? `API ${response.status}: 최신화에 실패했습니다.`)
   }
+  return response.json() as Promise<ManualRefreshResult>
 }
 
 async function userRequest(path: string, accessToken: string, init?: RequestInit, timeoutMs = 25_000) {

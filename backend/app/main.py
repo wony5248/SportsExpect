@@ -180,22 +180,58 @@ def refresh(target_date: date = Query(alias="date", default_factory=lambda: date
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@app.post("/api/v1/manual/refresh")
-def manual_refresh(request: ManualRefreshRequest):
-    """Refresh the selected pre-game slate only after the page password is verified."""
+@app.post("/api/v1/manual/refresh", status_code=202)
+def manual_refresh(request: ManualRefreshRequest, session: Session = Depends(get_session)):
+    """Queue a durable refresh after verifying the page password.
+
+    Production hands the work to Supabase pg_net before responding, so closing or navigating
+    away from the browser cannot cancel the actual refresh. SQLite development keeps the direct
+    path because pg_net and Vault are PostgreSQL-only.
+    """
     if not secrets.compare_digest(request.password.get_secret_value(), settings.manual_refresh_password):
         raise HTTPException(status_code=401, detail="새로고침 비밀번호가 올바르지 않습니다.")
     target_date = request.target_date
+    leagues = ("KBO", "MLB") if request.league == "ALL" else (request.league,)
     try:
-        leagues = ("KBO", "MLB") if request.league == "ALL" else (request.league,)
+        if session.get_bind().dialect.name == "postgresql":
+            queued: dict[str, dict[str, int | str]] = {}
+            for league in leagues:
+                chunk_count = int(session.scalar(text(
+                    "select public.invoke_dugout_chunked_refresh(:league, :target_date, false)"
+                ), {"league": league, "target_date": target_date}) or 0)
+                if chunk_count:
+                    queued[league] = {"mode": "CHUNKED", "requests": chunk_count}
+                    continue
+                request_id = int(session.scalar(text(
+                    "select public.invoke_dugout_dated_refresh(:league, 'full', :target_date)"
+                ), {"league": league, "target_date": target_date}) or 0)
+                queued[league] = {"mode": "FULL_DISCOVERY", "requests": 1,
+                                  "request_id": request_id}
+            # pg_net starts its HTTP requests only after the transaction commits.
+            session.commit()
+            return {
+                "status": "QUEUED",
+                "date": target_date.isoformat(),
+                "leagues": queued,
+                "browser_independent": True,
+            }
+
         return {
+            "status": "COMPLETED",
             "date": target_date.isoformat(),
             "leagues": {league: run_full_refresh(
                 league, target_date, trigger="manual_screen", include_inning_backfill=False,
             ) for league in leagues},
+            "browser_independent": False,
         }
     except LockUnavailable as exc:
         raise HTTPException(status_code=409, detail="이미 최신화가 진행 중입니다. 완료 후 다시 시도하세요.") from exc
+    except Exception as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="백그라운드 최신화 요청을 등록하지 못했습니다. Supabase Cron·Vault 설정을 확인하세요.",
+        ) from exc
 
 
 @app.post("/api/v1/admin/data-integrity/pitchers", dependencies=[Depends(require_admin)])

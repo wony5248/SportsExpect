@@ -31,6 +31,10 @@ export default function App() {
   const [manualRefreshPassword, setManualRefreshPassword] = useState('')
   const [manualRefreshBusy, setManualRefreshBusy] = useState(false)
   const [manualRefreshError, setManualRefreshError] = useState<string | null>(null)
+  const [manualRefreshNotice, setManualRefreshNotice] = useState<{
+    severity: 'info' | 'success' | 'error'
+    message: string
+  } | null>(null)
   const [session, setSession] = useState<AuthSession | null>(null)
   const [seasonDates, setSeasonDates] = useState<GameDate[]>([])
   const mobile = useMobile()
@@ -65,6 +69,8 @@ export default function App() {
     if (operationResult.status === 'fulfilled') setOperations(operationResult.value)
     if (backtestResult.status === 'fulfilled') setBacktest(backtestResult.value)
   }, [date, league])
+  const latestLoad = useRef(load)
+  latestLoad.current = load
 
   useEffect(() => { void load() }, [load])
   useEffect(() => {
@@ -97,15 +103,35 @@ export default function App() {
       setManualRefreshError('새로고침 비밀번호를 입력하세요.')
       return
     }
+    const targetDate = date
+    const targetLeague = league
+    const targetLabel = `${targetDate.replaceAll('-', '.')} · ${targetLeague === 'ALL' ? 'KBO·MLB' : targetLeague}`
     setManualRefreshBusy(true)
     setManualRefreshError(null)
+    setManualRefreshNotice({
+      severity: 'info',
+      message: `${targetLabel} 최신화를 백그라운드에서 진행하고 있습니다. 팝업을 닫아도 작업은 계속됩니다.`,
+    })
     try {
-      await runManualRefresh(manualRefreshPassword, league, date)
+      const refresh = await runManualRefresh(manualRefreshPassword, targetLeague, targetDate)
       setManualRefreshOpen(false)
       setManualRefreshPassword('')
-      await load()
+      if (refresh.status === 'QUEUED' && refresh.browser_independent) {
+        setManualRefreshNotice({
+          severity: 'success',
+          message: `${targetLabel} 최신화가 서버에 접수됐습니다. 이제 다른 사이트로 이동하거나 브라우저 탭을 닫아도 계속 진행됩니다. 나중에 돌아오면 저장된 최신 결과가 표시됩니다.`,
+        })
+      } else {
+        setManualRefreshNotice({
+          severity: 'success',
+          message: `${targetLabel} 최신화가 완료됐습니다. 최신 경기 데이터를 다시 불러왔습니다.`,
+        })
+        await latestLoad.current()
+      }
     } catch (err) {
-      setManualRefreshError(err instanceof Error ? err.message : '최신화에 실패했습니다.')
+      const message = err instanceof Error ? err.message : '최신화에 실패했습니다.'
+      setManualRefreshError(message)
+      setManualRefreshNotice({ severity: 'error', message: `${targetLabel} 최신화 실패: ${message}` })
     } finally {
       setManualRefreshBusy(false)
     }
@@ -135,7 +161,9 @@ export default function App() {
               <ToggleButton value="ALL">전체</ToggleButton><ToggleButton value="KBO">KBO</ToggleButton><ToggleButton value="MLB">MLB</ToggleButton>
             </ToggleButtonGroup>
             <TextField type="date" value={date} onChange={(event) => setDate(event.target.value)} size="small" inputProps={{ 'aria-label': '경기 날짜' }} />
-            <Button className="manual-refresh-button" variant="contained" startIcon={<RefreshRounded />} onClick={openManualRefresh} disabled={manualRefreshBusy}>새로고침 · 최신화</Button>
+            <Button className="manual-refresh-button" variant="contained" startIcon={<RefreshRounded />} onClick={openManualRefresh} disabled={manualRefreshBusy}>
+              {manualRefreshBusy ? '최신화 진행 중…' : '새로고침 · 최신화'}
+            </Button>
             {session ? <>
               <Button variant="outlined" startIcon={<SettingsRounded />} onClick={openClaudeSettings}>내 Claude 설정</Button>
               <Button variant="text" startIcon={<LogoutRounded />} onClick={() => void logout()}>{session.user.email ?? '로그아웃'}</Button>
@@ -155,6 +183,11 @@ export default function App() {
             <Box><span>저장 예측</span><strong>{operations.stored_predictions}</strong></Box>
             <Box><span>변경 알림</span><strong>{operations.change_alerts_24h}</strong></Box>
           </Box>}
+          {manualRefreshNotice && <Alert
+            severity={manualRefreshNotice.severity}
+            onClose={manualRefreshBusy ? undefined : () => setManualRefreshNotice(null)}
+            sx={{ mb: 2 }}
+          >{manualRefreshNotice.message}</Alert>}
           {mobile && <Box className="league-bar">
             <ToggleButtonGroup exclusive size="small" value={league} onChange={(_, value) => value && setLeague(value)} aria-label="리그 필터">
               <ToggleButton value="ALL">전체</ToggleButton><ToggleButton value="KBO">KBO</ToggleButton><ToggleButton value="MLB">MLB</ToggleButton>
@@ -214,7 +247,7 @@ export default function App() {
           <p>모든 확률은 통계적 추정치이며 경기 결과 또는 수익을 보장하지 않습니다.</p>
         </footer>
       </Container>
-      <Dialog open={manualRefreshOpen} onClose={manualRefreshBusy ? undefined : () => setManualRefreshOpen(false)} fullWidth maxWidth="xs" className="app-dialog">
+      <Dialog open={manualRefreshOpen} onClose={() => setManualRefreshOpen(false)} fullWidth maxWidth="xs" className="app-dialog">
         <DialogTitle>최신 데이터로 새로고침</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ pt: 1 }}>
@@ -223,11 +256,12 @@ export default function App() {
               onChange={(event) => setManualRefreshPassword(event.target.value)}
               onKeyDown={(event) => { if (event.key === 'Enter') void submitManualRefresh() }}
               autoComplete="off" fullWidth disabled={manualRefreshBusy} />
+            {manualRefreshBusy && <Alert severity="info">최신화는 백그라운드에서 계속됩니다. 이 팝업을 닫아도 안전합니다.</Alert>}
             {manualRefreshError && <Alert severity="error">{manualRefreshError}</Alert>}
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setManualRefreshOpen(false)} disabled={manualRefreshBusy}>취소</Button>
+          <Button onClick={() => setManualRefreshOpen(false)}>{manualRefreshBusy ? '창 닫기' : '취소'}</Button>
           <Button variant="contained" onClick={() => void submitManualRefresh()} disabled={manualRefreshBusy}>
             {manualRefreshBusy ? '최신화 진행 중…' : '최신화 시작'}
           </Button>
