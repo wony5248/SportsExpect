@@ -89,6 +89,13 @@ export default function App() {
   }
 
   useEffect(() => { void load() }, [load])
+  const shouldPollCurrentBoard = date === kstToday()
+    && games.some((game) => game.status === 'SCHEDULED' || game.status === 'LIVE')
+  useEffect(() => {
+    if (!shouldPollCurrentBoard) return
+    const timer = window.setInterval(() => { void latestLoad.current(true) }, 60_000)
+    return () => window.clearInterval(timer)
+  }, [shouldPollCurrentBoard])
   useEffect(() => () => {
     if (refreshPollTimer.current != null) window.clearTimeout(refreshPollTimer.current)
   }, [])

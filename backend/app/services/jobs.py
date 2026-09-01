@@ -3,17 +3,18 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from backend.app.config import KST
 from backend.app.database import SessionLocal, database_now, session_scope
-from backend.app.models import Game, PredictionSnapshot
+from backend.app.models import CrawlLog, Game, LineupEntry, PredictionSnapshot
 from backend.app.services.operations import job_lock
 from backend.app.services.refresh import (backfill_batter_splits, backfill_kbo_innings,
                                           backfill_mlb_innings, refresh_kbo, refresh_market,
                                           refresh_mlb, discover_schedule, predict_stored_games)
 from backend.app.services.model_lifecycle import run_model_lifecycle
 from backend.app.services.historical_replay import run_historical_replay
+from backend.app.services.prediction_evaluation import evaluate_pending_predictions
 
 
 RefreshOperation = Callable[..., dict[str, Any]]
@@ -25,6 +26,9 @@ REPLAY_START_DATE = date(2026, 1, 1)
 REPLAY_END_DATE = date(2026, 12, 31)
 LIVE_REFRESH_LOOKBACK = timedelta(hours=6)
 LIVE_REFRESH_LOOKAHEAD = timedelta(hours=3)
+LINEUP_RETRY_LOOKBACK = timedelta(minutes=5)
+LINEUP_RETRY_LOOKAHEAD = timedelta(minutes=90)
+LINEUP_RETRY_COOLDOWN = timedelta(minutes=10)
 
 
 def checkpoint_stage_for_minutes(minutes_to_start: float) -> str | None:
@@ -64,6 +68,12 @@ def run_full_refresh(league: str, target_date: date | None = None, *, force: boo
 
 
 def run_nearby_refresh(league: str) -> dict[str, Any]:
+    """Synchronize authoritative game states without rerunning pregame enrichment.
+
+    This path runs every five minutes while games are nearby.  Keeping it schedule-only makes
+    live polling cheap and prevents a status check from repeatedly fetching starters, lineups,
+    batter splits and Monte Carlo forecasts.
+    """
     now = database_now()
     with SessionLocal() as session:
         games = session.scalars(select(Game).where(
@@ -80,8 +90,11 @@ def run_nearby_refresh(league: str) -> dict[str, Any]:
         grouped.setdefault(game.game_date, set()).add(game.external_id)
     results = []
     for game_date, ids in sorted(grouped.items()):
-        with job_lock(f"refresh:{league}:{game_date.isoformat()}"):
-            results.append(_operation(league)(game_date, game_ids=ids, trigger="supabase_live_5m"))
+        with job_lock(f"live-state:{league}:{game_date.isoformat()}"):
+            result = discover_schedule(league, game_date)
+            with session_scope() as session:
+                evaluations = evaluate_pending_predictions(session, league, game_date)
+            results.append({**result, "requested_games": len(ids), "evaluations": evaluations})
     return {"league": league, "scope": "nearby", "matched_games": len(games), "runs": results}
 
 
@@ -97,37 +110,77 @@ def run_market_refresh(league: str) -> dict[str, Any]:
 
 
 def run_checkpoint_refresh(league: str) -> dict[str, Any]:
-    """Capture each game once inside every checkpoint window; a one-minute Cron drives this."""
+    """Capture T-40 forecasts and recover lineups missed by the one-shot checkpoint."""
     now = database_now()
     with SessionLocal() as session:
         games = session.scalars(select(Game).where(
             Game.league == league,
             Game.status == "SCHEDULED",
             Game.start_at.is_not(None),
-            Game.start_at >= now + timedelta(minutes=min(CHECKPOINTS.values()) - CHECKPOINT_TOLERANCE_MINUTES),
-            Game.start_at <= now + timedelta(minutes=max(CHECKPOINTS.values()) + CHECKPOINT_TOLERANCE_MINUTES),
+            Game.start_at >= now - LINEUP_RETRY_LOOKBACK,
+            Game.start_at <= now + LINEUP_RETRY_LOOKAHEAD,
         )).all()
         game_ids = [game.id for game in games]
         captured = set(session.execute(select(PredictionSnapshot.game_id, PredictionSnapshot.stage).where(
             PredictionSnapshot.game_id.in_(game_ids),
             PredictionSnapshot.trigger == "checkpoint_exact",
         )).all()) if game_ids else set()
+        lineup_counts = dict(session.execute(
+            select(LineupEntry.game_id, func.count(LineupEntry.id)).where(
+                LineupEntry.game_id.in_(game_ids), LineupEntry.confirmed.is_(True),
+            ).group_by(LineupEntry.game_id)
+        ).all()) if game_ids else {}
+        collectors = {game.id: f"{league.lower()}_lineups_{game.external_id}" for game in games}
+        latest_attempts = dict(session.execute(
+            select(CrawlLog.collector, func.max(CrawlLog.finished_at)).where(
+                CrawlLog.collector.in_(list(collectors.values()))
+            ).group_by(CrawlLog.collector)
+        ).all()) if collectors else {}
     grouped: dict[tuple[str, date], set[str]] = {}
+    retry_grouped: dict[date, set[str]] = {}
     for game in games:
         minutes = (game.start_at - now).total_seconds() / 60
         stage = checkpoint_stage_for_minutes(minutes)
         if stage and (game.id, stage) not in captured:
             grouped.setdefault((stage, game.game_date), set()).add(game.external_id)
+            continue
+        last_attempt = latest_attempts.get(collectors[game.id])
+        if _lineup_retry_needed(minutes, lineup_counts.get(game.id, 0), last_attempt, now):
+            retry_grouped.setdefault(game.game_date, set()).add(game.external_id)
     results = []
     for (stage, game_date), ids in sorted(grouped.items()):
         with job_lock(f"checkpoint:{league}:{stage}:{game_date.isoformat()}"):
             results.append(_operation(league)(
                 game_date, game_ids=ids, trigger="checkpoint_exact", checkpoint_stage=stage,
             ))
+    for game_date, ids in sorted(retry_grouped.items()):
+        with job_lock(f"lineup-retry:{league}:{game_date.isoformat()}"):
+            results.append(_operation(league)(
+                game_date, game_ids=ids, trigger="pregame_lineup_retry",
+            ))
     return {
-        "league": league, "scope": "checkpoints", "matched_games": sum(len(ids) for ids in grouped.values()),
+        "league": league, "scope": "checkpoints",
+        "matched_games": sum(len(ids) for ids in grouped.values()) + sum(len(ids) for ids in retry_grouped.values()),
+        "checkpoint_games": sum(len(ids) for ids in grouped.values()),
+        "lineup_retry_games": sum(len(ids) for ids in retry_grouped.values()),
         "checkpoint_windows": CHECKPOINTS, "tolerance_minutes": CHECKPOINT_TOLERANCE_MINUTES, "runs": results,
     }
+
+
+def _lineup_retry_needed(minutes_to_start: float, confirmed_entries: int,
+                         last_attempt: datetime | None, now: datetime) -> bool:
+    """Retry only near first pitch, with a cooldown after either success or failure."""
+    if confirmed_entries >= 18 or not (-LINEUP_RETRY_LOOKBACK.total_seconds() / 60
+                                       <= minutes_to_start
+                                       <= LINEUP_RETRY_LOOKAHEAD.total_seconds() / 60):
+        return False
+    if last_attempt is None:
+        return True
+    if last_attempt.tzinfo is None and now.tzinfo is not None:
+        last_attempt = last_attempt.replace(tzinfo=now.tzinfo)
+    elif last_attempt.tzinfo is not None and now.tzinfo is None:
+        now = now.replace(tzinfo=last_attempt.tzinfo)
+    return now - last_attempt >= LINEUP_RETRY_COOLDOWN
 
 
 def run_lifecycle_refresh(league: str) -> dict[str, Any]:

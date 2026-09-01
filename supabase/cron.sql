@@ -215,9 +215,9 @@ begin
   end loop;
 end $$;
 
--- Refresh only at the two useful pre-game times. The daily jobs fetch the slate; the dispatcher
--- itself runs in Supabase each minute, but invokes Vercel only for a scheduled game that is
--- exactly 40 minutes from first pitch and has not yet captured that checkpoint.
+-- The dispatcher runs in Supabase each minute, but invokes Vercel only for an uncaptured exact
+-- T-40 checkpoint or an incomplete lineup near first pitch whose last attempt is at least ten
+-- minutes old.
 create or replace function public.invoke_dugout_lineup_refresh(refresh_league text)
 returns bigint
 language plpgsql
@@ -232,13 +232,30 @@ begin
     from public.games game
     where game.league = refresh_league
       and game.status = 'SCHEDULED'
-      and game.start_at > now() + interval '37 minutes 30 seconds'
-      and game.start_at <= now() + interval '42 minutes 30 seconds'
-      and not exists (
-        select 1 from public.prediction_snapshots snapshot
-        where snapshot.game_id = game.id
-          and snapshot.stage = 'T_MINUS_40M'
-          and snapshot.trigger = 'checkpoint_exact'
+      and (
+        (
+          game.start_at > now() + interval '37 minutes 30 seconds'
+          and game.start_at <= now() + interval '42 minutes 30 seconds'
+          and not exists (
+            select 1 from public.prediction_snapshots snapshot
+            where snapshot.game_id = game.id
+              and snapshot.stage = 'T_MINUS_40M'
+              and snapshot.trigger = 'checkpoint_exact'
+          )
+        )
+        or (
+          game.start_at >= now() - interval '5 minutes'
+          and game.start_at <= now() + interval '90 minutes'
+          and (
+            select count(*) from public.lineups lineup
+            where lineup.game_id = game.id and lineup.confirmed is true
+          ) < 18
+          and not exists (
+            select 1 from public.crawl_logs log
+            where log.collector = lower(refresh_league) || '_lineups_' || game.external_id
+              and log.finished_at > now() - interval '10 minutes'
+          )
+        )
       )
   ) into has_due_game;
   if not has_due_game then
@@ -294,3 +311,9 @@ select cron.schedule('dugout-kbo-lineup-40m-dispatch', '* * * * *',
   $$select public.invoke_dugout_lineup_refresh('KBO')$$);
 select cron.schedule('dugout-mlb-lineup-40m-dispatch', '* * * * *',
   $$select public.invoke_dugout_lineup_refresh('MLB')$$);
+-- Five-minute calls only synchronize the official state/result feed. They do not run lineup,
+-- split, starter or simulation enrichment.
+select cron.schedule('dugout-kbo-nearby', '*/5 * * * *',
+  $$select public.invoke_dugout_refresh('KBO', 'nearby')$$);
+select cron.schedule('dugout-mlb-nearby', '2-59/5 * * * *',
+  $$select public.invoke_dugout_refresh('MLB', 'nearby')$$);

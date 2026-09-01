@@ -54,7 +54,8 @@ from backend.app.services.prediction import (SIMULATION_SUMMARY_SCHEMA_VERSION,
                                              favorite_fragility_score,
                                              predict_game)
 from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
-                                       _missing_leagues_for_date, checkpoint_stage_for_minutes)
+                                       _lineup_retry_needed, _missing_leagues_for_date,
+                                       checkpoint_stage_for_minutes)
 from backend.app.services import jobs as jobs_module
 from pathlib import Path
 from backend.app.services import prediction as prediction_module
@@ -717,6 +718,17 @@ def test_exact_checkpoint_windows_do_not_use_broad_stage_buckets():
     assert checkpoint_stage_for_minutes(42.5) == "T_MINUS_40M"
     assert checkpoint_stage_for_minutes(43) is None
     assert checkpoint_stage_for_minutes(60) is None
+
+
+def test_lineup_retry_is_near_first_pitch_and_rate_limited():
+    now = datetime(2026, 9, 1, 8, 0, tzinfo=KST)
+    assert _lineup_retry_needed(90, 0, None, now)
+    assert _lineup_retry_needed(-5, 17, None, now)
+    assert not _lineup_retry_needed(91, 0, None, now)
+    assert not _lineup_retry_needed(-6, 0, None, now)
+    assert not _lineup_retry_needed(30, 18, None, now)
+    assert not _lineup_retry_needed(30, 0, now - timedelta(minutes=9), now)
+    assert _lineup_retry_needed(30, 0, now - timedelta(minutes=10), now)
 
 
 def test_candidate_promotion_requires_improvement_and_non_regression_guards():

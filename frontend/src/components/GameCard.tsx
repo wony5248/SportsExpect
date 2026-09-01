@@ -141,8 +141,8 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           : `${game.time ?? '시간 미정'} KST · ${game.stadium ?? '구장 미정'}`}</span>
         <Stack direction="row" spacing={.7}>
           {engine && <Chip size="small"
-            label={`${isReplay ? '과거 재현 · ' : ''}${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'}`}
-            title={`${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'} 시뮬레이션 엔진`}
+            label={`${isReplay ? '과거 재현 · ' : ''}예측 엔진 · ${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'}`}
+            title={`경기 상태가 아닌 경기 전 ${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'} 시뮬레이션 엔진`}
             className={`engine-chip${engine === 'PLATE_APPEARANCE' ? ' plate' : ''}${isReplay ? ' replay' : ''}`} />}
           <Chip size="small" label={game.freshness.status === 'FRESH' ? '최신' : '갱신 필요'} className={`freshness ${game.freshness.status.toLowerCase()}`} />
           <Chip size="small" label={gameStatusLabel(game.status)} className={`status ${game.status.toLowerCase()}`} />
