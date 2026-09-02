@@ -50,6 +50,12 @@ export type Prediction = {
   data_cutoff?: string | null
   training_eligible?: boolean
   leakage_audit?: { passed?: boolean; method?: string; note?: string; [key: string]: unknown }
+  features?: {
+    home_starter_confirmed?: boolean
+    away_starter_confirmed?: boolean
+    home_lineup_confirmed?: boolean
+    away_lineup_confirmed?: boolean
+  }
   evaluation?: null | {
     simulation_count: number
     actual_score_count: number
