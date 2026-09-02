@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from contextlib import contextmanager
 import json
 import logging
 from statistics import median
@@ -57,6 +58,7 @@ from backend.app.services.jobs import (REPLAY_END_DATE, REPLAY_START_DATE,
                                        _lineup_retry_needed, _missing_leagues_for_date,
                                        checkpoint_stage_for_minutes)
 from backend.app.services import jobs as jobs_module
+from backend.app.services import refresh as refresh_module
 from pathlib import Path
 from backend.app.services import prediction as prediction_module
 from backend.app.services.model_lifecycle import (_coherent_run_means, _promotion_decision,
@@ -69,7 +71,7 @@ from backend.app.services.team_residuals import (ResidualObservation, TeamResidu
                                                  apply_residual_adjustment, available_before,
                                                  residual_context)
 from backend.app.services.residual_attribution import attribute_score_residual
-from backend.app.services.market_offset import (MarketOffsetObservation, fit_market_offset,
+from backend.app.services.market_offset import (MarketOffsetHistory, MarketOffsetObservation, fit_market_offset,
                                                  market_offset_shadow_probability,
                                                  walk_forward_offset_validation)
 from backend.app.services.paired_ablation import paired_ablation_report
@@ -86,6 +88,7 @@ from backend.app.services.probability_calibration import (CALIBRATION_VALIDATION
                                                           ProbabilityObservation,
                                                           calibrated_probability,
                                                           distribution_calibration_validation)
+from backend.app.services.prediction_history_cache import _deserialize, _serialize
 
 
 def test_rank_and_data_tables_are_schema_driven():
@@ -278,7 +281,7 @@ def test_stored_prediction_scope_skips_provider_collection(monkeypatch):
     assert result == {"predictions": 12}
 
 
-def test_manual_background_refresh_queues_baseline_then_one_request_per_game():
+def test_manual_background_refresh_queues_baseline_then_bounded_chunks():
     from backend.app.main import ManualRefreshRequest, manual_refresh
 
     class Rows:
@@ -316,11 +319,11 @@ def test_manual_background_refresh_queues_baseline_then_one_request_per_game():
     assert result["status"] == "QUEUED"
     assert result["browser_independent"] is True
     assert result["leagues"]["MLB"] == {
-        "mode": "STORED_BASELINE_THEN_SINGLE_GAME", "requests": 4, "games": 3,
+        "mode": "STORED_BASELINE_THEN_BOUNDED_CHUNKS", "requests": 2, "chunks": 1, "games": 3,
     }
     assert "'predict'" in session.calls[0][0]
-    assert all("invoke_dugout_game_chunk" in sql for sql, _ in session.calls[1:])
-    assert [params["game_id"] for _, params in session.calls[1:]] == ["MLB-1", "MLB-2", "MLB-3"]
+    assert "invoke_dugout_chunked_refresh" in session.calls[1][0]
+    assert len(session.calls) == 2
     assert session.committed is True
 
 
@@ -395,6 +398,92 @@ def test_mlb_slate_context_aggregates_only_relief_pitches_from_prior_box_scores(
     assert context["bullpen"]["away"]["high_load_arms"] == ["Reliever"]
     assert context["weather"]["run_multiplier"] > 1
     assert context["venue"]["latitude"] == 40
+
+
+def test_concurrent_mlb_workers_reuse_one_committed_slate_context(monkeypatch):
+    games = {
+        "MLB-10": SimpleNamespace(external_id="MLB-10", pregame_context={}, context_collected_at=None),
+        "MLB-11": SimpleNamespace(external_id="MLB-11", pregame_context={}, context_collected_at=None),
+    }
+
+    class Result:
+        def all(self):
+            return [(key, game.context_collected_at) for key, game in games.items()]
+
+    class Scalars:
+        def all(self):
+            return list(games.values())
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def execute(self, _statement):
+            return Result()
+
+        def scalars(self, _statement):
+            return Scalars()
+
+    @contextmanager
+    def fake_scope():
+        yield FakeSession()
+
+    @contextmanager
+    def fake_lock(_name, *, blocking=False):
+        assert blocking is True
+        yield
+
+    class Client:
+        calls = 0
+
+        def slate_context(self, _target_date, scheduled):
+            self.calls += 1
+            now = datetime.now(KST)
+            return SourcePayload(
+                {row["external_id"]: {"snapshot": self.calls} for row in scheduled},
+                "https://statsapi.mlb.com/context", now,
+            )
+
+    monkeypatch.setattr(refresh_module, "SessionLocal", FakeSession)
+    monkeypatch.setattr(refresh_module, "session_scope", fake_scope)
+    monkeypatch.setattr(refresh_module, "job_lock", fake_lock)
+    monkeypatch.setattr(refresh_module, "_tracked", lambda _n, _u, operation, _e: operation())
+    scheduled = [
+        {"external_id": "MLB-10"}, {"external_id": "MLB-11"},
+    ]
+    client = Client()
+    refresh_module._refresh_mlb_slate_context(client, date(2026, 9, 2), scheduled, [])
+    refresh_module._refresh_mlb_slate_context(client, date(2026, 9, 2), scheduled, [])
+
+    assert client.calls == 1
+    assert games["MLB-10"].pregame_context == {"snapshot": 1}
+    assert games["MLB-10"].context_collected_at == games["MLB-11"].context_collected_at
+
+
+def test_prediction_history_cache_round_trip_preserves_context_inputs():
+    residual = TeamResidualHistory([ResidualObservation(
+        game_id=1, started_at=datetime(2026, 8, 1, 18, tzinfo=KST),
+        finalized_at=datetime(2026, 8, 1, 22, tzinfo=KST),
+        home_team_id=10, away_team_id=20, home_expected=4.2, away_expected=3.8,
+        home_actual=5, away_actual=3,
+    )])
+    probability = LeagueProbabilityCalibrationHistory([
+        ProbabilityObservation(1, 2026, datetime(2026, 8, 1, 22, tzinfo=KST), .57, 1.0),
+    ], {"status": "HOLD", "sample_count": 1})
+    market = MarketOffsetHistory([
+        MarketOffsetObservation(1, 2026, datetime(2026, 8, 1, 22, tzinfo=KST), .55, .57, 1.0),
+    ], {"status": "COLLECTING", "sample_count": 0})
+
+    restored = _deserialize(_serialize(residual, probability, market))
+
+    assert restored[0].observations == residual.observations
+    assert restored[1].observations == probability.observations
+    assert restored[1].validation == probability.validation
+    assert restored[2].observations == market.observations
+    assert restored[2].validation == market.validation
 
 
 def test_platoon_signal_is_sample_shrunk_and_requires_actual_split_rows():

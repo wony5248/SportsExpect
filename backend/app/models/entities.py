@@ -483,6 +483,20 @@ class PredictionSnapshot(Base):
     captured_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
 
 
+class PredictionContextCache(Base):
+    """Compact, versioned league history used by every live prediction worker."""
+
+    __tablename__ = "prediction_context_cache"
+
+    league: Mapped[str] = mapped_column(String(8), primary_key=True)
+    fingerprint: Mapped[str] = mapped_column(String(128), index=True)
+    algorithm_version: Mapped[int] = mapped_column(Integer)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC),
+    )
+
+
 class RuntimeSecret(Base):
     """Encrypted provider credential managed through the administrator UI."""
 

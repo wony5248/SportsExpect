@@ -61,49 +61,71 @@ class TeamResidualHistory:
 
     @classmethod
     def from_session(cls, session: Session, league: str) -> TeamResidualHistory:
+        # A prediction payload contains the full simulation population. Residual history needs
+        # only these scalar/sub-object fields, so avoid hydrating the complete ORM entity.
         rows = session.execute(
-            select(Prediction, Game, GameResult)
+            select(
+                Prediction.origin, Prediction.data_cutoff, Prediction.created_at,
+                Prediction.home_expected_runs, Prediction.away_expected_runs,
+                Prediction.leakage_audit,
+                Prediction.payload["residual_calibration"].label("residual_calibration"),
+                Prediction.payload["summary_schema_version"].label("summary_schema_version"),
+                Prediction.payload["features"].label("features"),
+                Prediction.payload["statistical_expected_total"].label("statistical_expected_total"),
+                Prediction.payload["base_home_expected_runs"].label("base_home_expected_runs"),
+                Prediction.payload["base_away_expected_runs"].label("base_away_expected_runs"),
+                Prediction.payload["engine"].label("engine"),
+                Game.id.label("game_id"), Game.start_at, Game.game_date,
+                Game.home_team_id, Game.away_team_id,
+                GameResult.finalized_at, GameResult.home_score, GameResult.away_score,
+            )
             .join(Game, Game.id == Prediction.game_id)
             .join(GameResult, GameResult.game_id == Game.id)
             .where(Game.league == league, Game.status == "FINAL", Game.start_at.is_not(None))
             .order_by(Game.start_at, Prediction.created_at)
-        ).all()
-        candidates: dict[int, tuple[tuple[int, datetime], Prediction, Game, GameResult]] = {}
-        for prediction, game, result in rows:
-            cutoff = prediction.data_cutoff or prediction.created_at
-            if _naive(cutoff) > _naive(game.start_at):
+        ).mappings().all()
+        candidates: dict[int, tuple[tuple[int, datetime], Any]] = {}
+        for row in rows:
+            cutoff = row["data_cutoff"] or row["created_at"]
+            if _naive(cutoff) > _naive(row["start_at"]):
                 continue
-            if prediction.origin == "LIVE_PREGAME" and _naive(prediction.created_at) > _naive(game.start_at):
+            if row["origin"] == "LIVE_PREGAME" and _naive(row["created_at"]) > _naive(row["start_at"]):
                 continue
-            if prediction.origin == "HISTORICAL_REPLAY" and not bool(
-                (prediction.leakage_audit or {}).get("passed")
-            ):
+            if row["origin"] == "HISTORICAL_REPLAY" and not bool((row["leakage_audit"] or {}).get("passed")):
                 continue
-            payload = prediction.payload or {}
-            schema = int(payload.get("summary_schema_version") or 0)
+            schema = int(row["summary_schema_version"] or 0)
             # A current audited replay is a better comparable baseline than a legacy live
             # forecast. Current live forecasts retain priority over retrospective replays.
-            quality = 3 if prediction.origin == "LIVE_PREGAME" and schema >= 10 else (
-                2 if prediction.origin == "HISTORICAL_REPLAY" and schema >= 10 else 1
+            quality = 3 if row["origin"] == "LIVE_PREGAME" and schema >= 10 else (
+                2 if row["origin"] == "HISTORICAL_REPLAY" and schema >= 10 else 1
             )
-            rank = (quality, prediction.created_at)
-            if game.id not in candidates or rank > candidates[game.id][0]:
-                candidates[game.id] = (rank, prediction, game, result)
+            rank = (quality, row["created_at"])
+            if row["game_id"] not in candidates or rank > candidates[row["game_id"]][0]:
+                candidates[row["game_id"]] = (rank, row)
 
         observations = []
-        for _, prediction, game, result in candidates.values():
-            baseline = baseline_expected_runs(prediction)
+        for _, row in candidates.values():
+            calibration = row["residual_calibration"] or {}
+            baseline = (
+                float(row["home_expected_runs"] if calibration.get("baseline_home_expected_runs") is None
+                      else calibration["baseline_home_expected_runs"]),
+                float(row["away_expected_runs"] if calibration.get("baseline_away_expected_runs") is None
+                      else calibration["baseline_away_expected_runs"]),
+            )
+            regime_payload = {
+                "features": row["features"] or {}, "engine": row["engine"],
+                "statistical_expected_total": row["statistical_expected_total"],
+                "base_home_expected_runs": row["base_home_expected_runs"],
+                "base_away_expected_runs": row["base_away_expected_runs"],
+            }
             observations.append(ResidualObservation(
-                game_id=game.id,
-                started_at=_naive(game.start_at),
-                finalized_at=_naive(result.finalized_at),
-                home_team_id=game.home_team_id,
-                away_team_id=game.away_team_id,
+                game_id=row["game_id"], started_at=_naive(row["start_at"]),
+                finalized_at=_naive(row["finalized_at"]),
+                home_team_id=row["home_team_id"], away_team_id=row["away_team_id"],
                 home_expected=baseline[0],
                 away_expected=baseline[1],
-                home_actual=result.home_score,
-                away_actual=result.away_score,
-                **_prediction_regime(prediction.payload or {}, game.game_date),
+                home_actual=row["home_score"], away_actual=row["away_score"],
+                **_prediction_regime(regime_payload, row["game_date"]),
             ))
         return cls(observations)
 

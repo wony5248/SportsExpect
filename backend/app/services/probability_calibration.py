@@ -67,27 +67,35 @@ class LeagueProbabilityCalibrationHistory:
     @classmethod
     def from_session(cls, session: Session, league: str) -> LeagueProbabilityCalibrationHistory:
         rows = session.execute(
-            select(Prediction, Game, GameResult)
+            select(
+                Prediction.id.label("prediction_id"), Prediction.origin,
+                Prediction.data_cutoff, Prediction.created_at, Prediction.training_eligible,
+                Prediction.leakage_audit, Prediction.home_win_probability,
+                Prediction.payload["probability_calibration"].label("probability_calibration"),
+                Prediction.payload["raw_simulation_home_probability"].label("raw_probability"),
+                Prediction.payload["simulation_home_probability"].label("simulation_probability"),
+                Game.id.label("game_id"), Game.game_date, Game.start_at,
+                GameResult.finalized_at, GameResult.home_score, GameResult.away_score,
+            )
             .join(Game, Game.id == Prediction.game_id)
             .join(GameResult, GameResult.game_id == Game.id)
             .where(Game.league == league, Game.start_at.is_not(None))
             .order_by(Game.start_at, Prediction.created_at)
-        ).all()
-        by_game: dict[int, tuple[Prediction, Game, GameResult]] = {}
-        for prediction, game, result in rows:
-            cutoff = prediction.data_cutoff or prediction.created_at
-            if _naive(cutoff) > _naive(game.start_at):
+        ).mappings().all()
+        by_game: dict[int, Any] = {}
+        for row in rows:
+            cutoff = row["data_cutoff"] or row["created_at"]
+            if _naive(cutoff) > _naive(row["start_at"]):
                 continue
-            if prediction.origin == "HISTORICAL_REPLAY" and (
-                not prediction.training_eligible
-                or not bool((prediction.leakage_audit or {}).get("passed"))
+            if row["origin"] == "HISTORICAL_REPLAY" and (
+                not row["training_eligible"] or not bool((row["leakage_audit"] or {}).get("passed"))
             ):
                 continue
-            current = by_game.get(game.id)
-            if current is None or _prefer(prediction, current[0]):
-                by_game[game.id] = (prediction, game, result)
+            current = by_game.get(row["game_id"])
+            if current is None or _prefer_values(row, current):
+                by_game[row["game_id"]] = row
 
-        prediction_ids = [prediction.id for prediction, _, _ in by_game.values()]
+        prediction_ids = [row["prediction_id"] for row in by_game.values()]
         stage_by_prediction: dict[int, str] = {}
         if prediction_ids:
             snapshots = session.scalars(select(PredictionSnapshot).where(
@@ -97,9 +105,8 @@ class LeagueProbabilityCalibrationHistory:
                 stage_by_prediction[snapshot.prediction_id] = snapshot.stage
         observations = []
         distribution_observations = []
-        for prediction, game, result in by_game.values():
-            payload = prediction.payload or {}
-            calibration = payload.get("probability_calibration") or {}
+        for row in by_game.values():
+            calibration = row["probability_calibration"] or {}
             raw_distribution = calibration.get("raw_distribution")
             calibrated_distribution = calibration.get("calibrated_distribution")
             # Disabled calibration produces an identical copy and is not evidence that a
@@ -109,26 +116,25 @@ class LeagueProbabilityCalibrationHistory:
             if (calibration.get("enabled") and isinstance(raw_distribution, dict)
                     and isinstance(calibrated_distribution, dict)):
                 distribution_observations.append(DistributionCalibrationObservation(
-                    game_id=game.id, raw=raw_distribution, calibrated=calibrated_distribution,
-                    home_score=int(result.home_score), away_score=int(result.away_score),
+                    game_id=row["game_id"], raw=raw_distribution, calibrated=calibrated_distribution,
+                    home_score=int(row["home_score"]), away_score=int(row["away_score"]),
                 ))
-            if result.home_score == result.away_score:
+            if row["home_score"] == row["away_score"]:
                 # The production KBO market is two-way with ties excluded.
                 continue
-            raw_probability = payload.get("raw_simulation_home_probability")
+            raw_probability = row["raw_probability"]
             if raw_probability is None:
-                raw_probability = payload.get("simulation_home_probability")
+                raw_probability = row["simulation_probability"]
             if raw_probability is None:
-                raw_probability = prediction.home_win_probability
+                raw_probability = row["home_win_probability"]
             observations.append(ProbabilityObservation(
-                game_id=game.id,
-                season=game.game_date.year,
-                available_at=result.finalized_at,
+                game_id=row["game_id"], season=row["game_date"].year,
+                available_at=row["finalized_at"],
                 probability=_clip(float(raw_probability), .001, .999),
-                outcome=1.0 if result.home_score > result.away_score else 0.0,
+                outcome=1.0 if row["home_score"] > row["away_score"] else 0.0,
                 stage=stage_by_prediction.get(
-                    prediction.id,
-                    "HISTORICAL_REPLAY" if prediction.origin == "HISTORICAL_REPLAY" else "UNKNOWN",
+                    row["prediction_id"],
+                    "HISTORICAL_REPLAY" if row["origin"] == "HISTORICAL_REPLAY" else "UNKNOWN",
                 ),
             ))
         win_validation = walk_forward_win_validation(
@@ -450,6 +456,16 @@ def _prefer(candidate: Prediction, current: Prediction) -> bool:
         return candidate_live
     return _naive(candidate.data_cutoff or candidate.created_at) >= _naive(
         current.data_cutoff or current.created_at
+    )
+
+
+def _prefer_values(candidate: Any, current: Any) -> bool:
+    candidate_live = candidate["origin"] == "LIVE_PREGAME"
+    current_live = current["origin"] == "LIVE_PREGAME"
+    if candidate_live != current_live:
+        return candidate_live
+    return _naive(candidate["data_cutoff"] or candidate["created_at"]) >= _naive(
+        current["data_cutoff"] or current["created_at"]
     )
 
 

@@ -29,47 +29,52 @@ class MarketOffsetObservation:
 class MarketOffsetHistory:
     """Leakage-safe market-offset candidate; it never mutates the production probability."""
 
-    def __init__(self, observations: list[MarketOffsetObservation]):
+    def __init__(self, observations: list[MarketOffsetObservation],
+                 validation: dict[str, Any] | None = None):
         self.observations = sorted(observations, key=lambda row: (row.available_at, row.game_id))
-        self.validation = walk_forward_offset_validation(self.observations)
+        self.validation = validation if validation is not None else walk_forward_offset_validation(self.observations)
 
     @classmethod
     def from_session(cls, session: Session, league: str) -> "MarketOffsetHistory":
         rows = session.execute(
-            select(Prediction, Game, GameResult)
+            select(
+                Prediction.origin, Prediction.data_cutoff, Prediction.created_at,
+                Prediction.leakage_audit,
+                Prediction.payload["headline_market"].label("headline_market"),
+                Prediction.payload["market_calibration"].label("market_calibration"),
+                Game.id.label("game_id"), Game.game_date, Game.start_at,
+                GameResult.finalized_at, GameResult.home_score, GameResult.away_score,
+            )
             .join(Game, Game.id == Prediction.game_id)
             .join(GameResult, GameResult.game_id == Game.id)
             .where(Game.league == league, Game.start_at.is_not(None))
             .order_by(Game.start_at, Prediction.created_at)
-        ).all()
-        by_game: dict[int, tuple[Prediction, Game, GameResult]] = {}
-        for prediction, game, result in rows:
-            cutoff = prediction.data_cutoff or prediction.created_at
-            if _naive(cutoff) > _naive(game.start_at):
+        ).mappings().all()
+        by_game: dict[int, Any] = {}
+        for row in rows:
+            cutoff = row["data_cutoff"] or row["created_at"]
+            if _naive(cutoff) > _naive(row["start_at"]):
                 continue
-            if result.home_score == result.away_score:
+            if row["home_score"] == row["away_score"]:
                 continue
-            if prediction.origin == "HISTORICAL_REPLAY" and not bool(
-                (prediction.leakage_audit or {}).get("passed")
-            ):
+            if row["origin"] == "HISTORICAL_REPLAY" and not bool((row["leakage_audit"] or {}).get("passed")):
                 continue
-            current = by_game.get(game.id)
-            if current is None or _prefer(prediction, current[0]):
-                by_game[game.id] = (prediction, game, result)
+            current = by_game.get(row["game_id"])
+            if current is None or _prefer_values(row, current):
+                by_game[row["game_id"]] = row
         observations: list[MarketOffsetObservation] = []
-        for prediction, game, result in by_game.values():
-            payload = prediction.payload or {}
-            market = payload.get("headline_market") or {}
-            calibration = payload.get("market_calibration") or {}
+        for row in by_game.values():
+            market = row["headline_market"] or {}
+            calibration = row["market_calibration"] or {}
             market_probability = _number(market.get("home_implied_probability"))
             model_probability = _number(calibration.get("model_home_probability_before"))
             if market_probability is None or model_probability is None:
                 continue
             observations.append(MarketOffsetObservation(
-                game_id=game.id, season=game.game_date.year, available_at=result.finalized_at,
+                game_id=row["game_id"], season=row["game_date"].year, available_at=row["finalized_at"],
                 market_probability=_clip(market_probability),
                 independent_model_probability=_clip(model_probability),
-                outcome=1.0 if result.home_score > result.away_score else 0.0,
+                outcome=1.0 if row["home_score"] > row["away_score"] else 0.0,
             ))
         return cls(observations)
 
@@ -191,6 +196,14 @@ def _prefer(candidate: Prediction, current: Prediction) -> bool:
     if candidate.origin != current.origin:
         return candidate.origin == "LIVE_PREGAME"
     return _naive(candidate.data_cutoff or candidate.created_at) > _naive(current.data_cutoff or current.created_at)
+
+
+def _prefer_values(candidate: Any, current: Any) -> bool:
+    if candidate["origin"] != current["origin"]:
+        return candidate["origin"] == "LIVE_PREGAME"
+    return _naive(candidate["data_cutoff"] or candidate["created_at"]) > _naive(
+        current["data_cutoff"] or current["created_at"]
+    )
 
 
 def _number(value: Any) -> float | None:

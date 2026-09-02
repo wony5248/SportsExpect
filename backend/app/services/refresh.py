@@ -36,10 +36,9 @@ from backend.app.services.batting import build_batter_table, league_average_tabl
 from backend.app.services.bullpen import load_profiles, seed_league
 from backend.app.services.model_lifecycle import load_champion_runtime
 from backend.app.services.prediction_evaluation import evaluate_pending_predictions
-from backend.app.services.team_residuals import TeamResidualHistory
 from backend.app.services.team_strength import TeamStrengthHistory
-from backend.app.services.probability_calibration import LeagueProbabilityCalibrationHistory
-from backend.app.services.market_offset import MarketOffsetHistory
+from backend.app.services.prediction_history_cache import load_prediction_histories
+from backend.app.services.operations import job_lock
 from backend.app.services.pregame_context import prediction_context
 
 
@@ -207,19 +206,11 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
             with session_scope() as session:
                 for raw in fetched_games:
                     upsert_game(session, raw, games_source.source_url, games_source.collected_at, "MLB")
-            scheduled = [row for row in fetched_games if row.get("status") == "SCHEDULED"
-                         and (not game_ids or row["external_id"] in game_ids)]
-            context_source = _tracked(
-                "mlb_pregame_context", "/api/v1.1/game/{gamePk}/feed/live + prior box scores",
-                lambda: client.slate_context(target_date, scheduled), errors,
-            ) if scheduled else None
-            if context_source:
-                with session_scope() as session:
-                    for external_id, context in context_source.data.items():
-                        stored_game = session.scalar(select(Game).where(Game.external_id == external_id))
-                        if stored_game:
-                            stored_game.pregame_context = context
-                            stored_game.context_collected_at = context_source.collected_at
+            # Every per-game worker needs the same weather/bullpen slate. Serialize this one
+            # provider collection by league/date and write all scheduled games at once; workers
+            # arriving behind the lock reuse that exact committed snapshot.
+            all_scheduled = [row for row in fetched_games if row.get("status") == "SCHEDULED"]
+            _refresh_mlb_slate_context(client, target_date, all_scheduled, errors)
         with session_scope() as session:
             fresh = team_stats_fresh(session, target_date, "MLB")
         if force or not fresh:
@@ -287,6 +278,50 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
     finally:
         if own_client:
             client.close()
+
+
+MLB_SLATE_CONTEXT_BURST_TTL = timedelta(seconds=60)
+
+
+def _refresh_mlb_slate_context(client: MlbClient, target_date: date,
+                               scheduled: list[dict[str, Any]], errors: list[str]) -> None:
+    """Collect one immutable MLB common-input snapshot for a concurrent refresh burst."""
+    if not scheduled:
+        return
+    external_ids = [row["external_id"] for row in scheduled]
+    with job_lock(f"mlb-slate-context:{target_date.isoformat()}", blocking=True):
+        cutoff = database_now() - MLB_SLATE_CONTEXT_BURST_TTL
+        with SessionLocal() as session:
+            collected = dict(session.execute(select(Game.external_id, Game.context_collected_at).where(
+                Game.external_id.in_(external_ids),
+            )).all())
+        if len(collected) == len(external_ids) and all(
+            value is not None and _comparable_datetime(value, cutoff) >= cutoff for value in collected.values()
+        ):
+            return
+        context_source = _tracked(
+            "mlb_pregame_context", "/api/v1.1/game/{gamePk}/feed/live + prior box scores",
+            lambda: client.slate_context(target_date, scheduled), errors,
+        )
+        if not context_source:
+            return
+        with session_scope() as session:
+            stored = {
+                game.external_id: game
+                for game in session.scalars(select(Game).where(Game.external_id.in_(external_ids))).all()
+            }
+            for external_id, context in context_source.data.items():
+                if external_id in stored:
+                    stored[external_id].pregame_context = context
+                    stored[external_id].context_collected_at = context_source.collected_at
+
+
+def _comparable_datetime(value: datetime, reference: datetime) -> datetime:
+    if value.tzinfo is None and reference.tzinfo is not None:
+        return value.replace(tzinfo=reference.tzinfo)
+    if value.tzinfo is not None and reference.tzinfo is None:
+        return value.replace(tzinfo=None)
+    return value
 
 
 def refresh_all(target_date: date, force: bool = False, trigger: str = "manual") -> dict[str, Any]:
@@ -366,6 +401,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
                    checkpoint_stage: str | None = None, *, only_changed: bool = False,
                    completed_game_ids: set[str] | None = None) -> int:
     predicted = 0
+    residual_history, probability_history, market_offset_history = load_prediction_histories(league)
     with session_scope() as session:
         query = select(Game).options(joinedload(Game.home_team), joinedload(Game.away_team)).where(
             Game.game_date == target_date, Game.league == league, Game.status == "SCHEDULED"
@@ -374,10 +410,7 @@ def _predict_games(league: str, target_date: date, game_ids: set[str] | None, er
             query = query.where(Game.external_id.in_(game_ids))
         games = session.scalars(query).all()
         model_runtime = load_champion_runtime(session, league)
-        residual_history = TeamResidualHistory.from_session(session, league)
         strength_history = TeamStrengthHistory.from_session(session, league)
-        probability_history = LeagueProbabilityCalibrationHistory.from_session(session, league)
-        market_offset_history = MarketOffsetHistory.from_session(session, league)
         # Seed any team that has no profile yet, then read them all back, so a bullpen update
         # made since the last refresh reaches this slate's predictions. Both are optional
         # enrichments: if their tables are not migrated yet the slate still gets predictions.

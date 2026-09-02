@@ -164,8 +164,8 @@ $$;
 
 revoke all on function public.invoke_dugout_chunked_refresh(text, date, boolean) from public, anon, authenticated;
 
--- MLB starter enrichment can approach the serverless deadline even for five games. Fan the
--- late daily refresh out one game per HTTP request so each prediction commits independently.
+-- Kept for compatibility with older callers. New dispatchers use five-game chunks now that
+-- league histories and the MLB slate context are shared across workers.
 create or replace function public.invoke_dugout_per_game_refresh(
   refresh_league text,
   refresh_date date,
@@ -294,7 +294,7 @@ select cron.schedule('dugout-mlb-next-day-discovery', '55 13 * * *',
     'MLB', 'discover', (now() at time zone 'Asia/Seoul')::date + 1
   )$$);
 select cron.schedule('dugout-mlb-daily-pregame', '0 14 * * *',
-  $$select public.invoke_dugout_per_game_refresh(
+  $$select public.invoke_dugout_chunked_refresh(
     'MLB', (now() at time zone 'Asia/Seoul')::date + 1, false
   )$$);
 -- Every two hours at minute 10 of even KST hours. These calls never collect lineups and the

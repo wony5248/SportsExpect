@@ -203,18 +203,19 @@ def manual_refresh(request: ManualRefreshRequest, session: Session = Depends(get
                 ).order_by(Game.start_at, Game.external_id)).all())
                 if game_ids:
                     # First create a fast baseline from committed data. Full provider refreshes
-                    # then run one game per request so none can consume the whole pg_net deadline.
+                    # then run bounded five-game chunks. Common league history and MLB slate
+                    # context are shared, so per-game fan-out only creates a thundering herd.
                     session.scalar(text(
                         "select public.invoke_dugout_dated_refresh(:league, 'predict', :target_date)"
                     ), {"league": league, "target_date": target_date})
-                    for game_id in game_ids:
-                        session.scalar(text(
-                            "select public.invoke_dugout_game_chunk("
-                            ":league, :target_date, ARRAY[:game_id]::text[], false)"
-                        ), {"league": league, "target_date": target_date, "game_id": game_id})
+                    session.scalar(text(
+                        "select public.invoke_dugout_chunked_refresh(:league, :target_date, false)"
+                    ), {"league": league, "target_date": target_date})
+                    chunks = (len(game_ids) + 4) // 5
                     queued[league] = {
-                        "mode": "STORED_BASELINE_THEN_SINGLE_GAME",
-                        "requests": len(game_ids) + 1,
+                        "mode": "STORED_BASELINE_THEN_BOUNDED_CHUNKS",
+                        "requests": chunks + 1,
+                        "chunks": chunks,
                         "games": len(game_ids),
                     }
                     continue

@@ -50,18 +50,23 @@ def process_lock(name: str, *, blocking: bool = False) -> Iterator[None]:
 
 
 @contextmanager
-def job_lock(name: str) -> Iterator[None]:
+def job_lock(name: str, *, blocking: bool = False) -> Iterator[None]:
     """Serialize a refresh across Vercel instances with a PostgreSQL advisory lock."""
     if IS_SQLITE:
-        with process_lock(name, blocking=False):
+        with process_lock(name, blocking=blocking):
             yield
         return
     connection = engine.connect()
     # Transaction-scoped locks are safe with Supabase's transaction pooler (PgBouncer).
-    acquired = bool(connection.scalar(text("SELECT pg_try_advisory_xact_lock(hashtext(:name))"), {"name": name}))
-    if not acquired:
-        connection.close()
-        raise LockUnavailable(f"{name} 작업이 이미 실행 중입니다.")
+    if blocking:
+        connection.execute(text("SELECT pg_advisory_xact_lock(hashtext(:name))"), {"name": name})
+    else:
+        acquired = bool(connection.scalar(
+            text("SELECT pg_try_advisory_xact_lock(hashtext(:name))"), {"name": name},
+        ))
+        if not acquired:
+            connection.close()
+            raise LockUnavailable(f"{name} 작업이 이미 실행 중입니다.")
     try:
         yield
     finally:
