@@ -150,6 +150,8 @@ body { margin: 0; min-width: 320px; background: #071713; }
 .pick.lead .pick-gauge i { background: #7ee7b8; }
 .pick > b { color: #7ee7b8; font-size: 1.35rem; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
 .pick > small { color: #6b847b; font-size: .58rem; line-height: 1.35; }
+.pick-total-mode { display: flex; align-items: baseline; gap: 6px; color: #8ba299; font-size: .59rem; }
+.pick-total-mode strong { color: #dcebe5; font-size: .85rem; font-variant-numeric: tabular-nums; }
 /* Second-stage picks are read inside one branch, so they are marked as conditional and always
    carry the chance of actually landing beneath the headline percentage. */
 .pick.conditional { border-color: rgba(126,231,184,.22); background: rgba(126,231,184,.055); }

@@ -52,9 +52,11 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const engine = p?.engine ?? (coherent ? 'INNING_RATE' : undefined)
   // A displayed starter can be committed before a slower forecast refresh finishes. Read the
   // prediction's own feature snapshot so this label means the simulation used both starters.
-  const startersApplied = Boolean(
-    p?.features?.home_starter_confirmed && p?.features?.away_starter_confirmed,
-  )
+  const homeStarterApplied = Boolean(p?.features?.home_starter_confirmed)
+  const awayStarterApplied = Boolean(p?.features?.away_starter_confirmed)
+  const starterInputLabel = homeStarterApplied && awayStarterApplied
+    ? '양 팀 선발 반영'
+    : homeStarterApplied || awayStarterApplied ? '일부 선발 반영' : '선발 미반영'
   // MLB games cannot end level, so a tied score from any stored payload is dropped before it
   // can be displayed. Older forecasts were saved before extra innings were simulated and do
   // contain them.
@@ -146,8 +148,8 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
           : `${game.time ?? '시간 미정'} KST · ${game.stadium ?? '구장 미정'}`}</span>
         <Stack direction="row" spacing={.7}>
           {engine && <Chip size="small"
-            label={`${isReplay ? '과거 재현 · ' : ''}예측 엔진 · ${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'} · ${startersApplied ? '선발 반영' : '선발 미반영'}`}
-            title={`경기 상태가 아닌 경기 전 ${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'} 시뮬레이션 엔진 · ${startersApplied ? '양 팀 선발 기록이 이 예측에 반영됨' : '이 예측은 양 팀 선발 기록 반영 전임'}`}
+            label={`${isReplay ? '과거 재현 · ' : ''}예측 엔진 · ${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'} · ${starterInputLabel}`}
+            title={`경기 상태가 아닌 경기 전 ${engine === 'PLATE_APPEARANCE' ? '타석별' : '이닝별'} 시뮬레이션 엔진 · ${starterInputLabel}`}
             className={`engine-chip${engine === 'PLATE_APPEARANCE' ? ' plate' : ''}${isReplay ? ' replay' : ''}`} />}
           <Chip size="small" label={game.freshness.status === 'FRESH' ? '최신' : '갱신 필요'} className={`freshness ${game.freshness.status.toLowerCase()}`} />
           <Chip size="small" label={gameStatusLabel(game.status)} className={`status ${game.status.toLowerCase()}`} />
@@ -223,6 +225,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             <strong>{pick.pick}</strong>
             {pick.probability != null && <><Box className="pick-gauge"><i style={{ width: pct(pick.probability) }} /></Box>
               <b>{pct(pick.probability)}</b></>}
+            {pick.key === 'total' && statisticalExpectedTotal != null && <span className="pick-total-mode">
+              평균 합산 점수 <strong>{stat(statisticalExpectedTotal, 1)}점</strong>
+            </span>}
             {pick.stage === 2 && pick.jointProbability != null
               && <span className="pick-joint">승패까지 함께 맞을 확률 {pct(pick.jointProbability)}</span>}
             {pick.note && <small>{pick.note}</small>}
