@@ -670,6 +670,9 @@ def _odds_credits_used_today(session: Session, now: datetime) -> int:
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = session.execute(select(CrawlLog.collector, func.count()).where(
         CrawlLog.collector.in_(("kbo_market", "mlb_market")),
+        # Old The Odds API checkpoint logs used the same collector names. Counting those rows
+        # as API-Sports HTTP requests can instantly report hundreds of requests on migration day.
+        CrawlLog.source_url.like("%api-sports.io%"),
         CrawlLog.finished_at >= day_start,
     ).group_by(CrawlLog.collector)).all()
     return sum(int(count) for _, count in rows)
@@ -711,6 +714,7 @@ def _refresh_market_locked(league: str, errors: list[str], *, force: bool = Fals
         # CrawlLog gates provider calls even when no event matches a locally stored game.
         latest = session.scalar(select(func.max(CrawlLog.finished_at)).where(
             CrawlLog.collector == collector, CrawlLog.status == "SUCCESS",
+            CrawlLog.source_url.like("%api-sports.io%"),
         ))
         used_today = _odds_credits_used_today(session, now)
         upcoming_games = session.scalars(select(Game).where(
@@ -746,6 +750,7 @@ def _refresh_market_locked(league: str, errors: list[str], *, force: bool = Fals
         for _ in range(max(1, client.request_count)):
             _log(collector, "SUCCESS", source.source_url, started, None)
         matched_games = 0
+        matched_game_ids: list[str] = []
         with session_scope() as session:
             games = session.scalars(select(Game).options(
                 joinedload(Game.home_team), joinedload(Game.away_team),
@@ -767,10 +772,12 @@ def _refresh_market_locked(league: str, errors: list[str], *, force: bool = Fals
                 if game:
                     upsert_market_consensus(session, game, row, source.source_url, source.collected_at)
                     matched_games += 1
+                    matched_game_ids.append(game.external_id)
         return {
             "status": "collected",
             "provider_events": len(source.data),
             "matched_games": matched_games,
+            "matched_game_ids": matched_game_ids,
             "provider_usage": client.last_usage,
             "requests_this_collection": client.request_count,
             "requests_used_today": used_today + client.request_count,

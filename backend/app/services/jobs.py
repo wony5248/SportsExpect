@@ -107,7 +107,25 @@ def run_tomorrow_discovery(league: str) -> dict[str, Any]:
 def run_market_refresh(league: str, *, force: bool = False) -> dict[str, Any]:
     slot_date = datetime.now(KST).date()
     with job_lock(f"market:{league}:{slot_date.isoformat()}"):
-        return refresh_market(league, force=force)
+        result = refresh_market(league, force=force)
+        matched_ids = set(result.get("matched_game_ids") or [])
+        if not matched_ids:
+            return result
+        with SessionLocal() as session:
+            rows = session.execute(select(Game.game_date, Game.external_id).where(
+                Game.league == league, Game.external_id.in_(matched_ids),
+                Game.status == "SCHEDULED",
+            )).all()
+        grouped: dict[date, set[str]] = {}
+        for game_date, external_id in rows:
+            grouped.setdefault(game_date, set()).add(external_id)
+        prediction_refresh = [
+            predict_stored_games(
+                league, game_date, trigger="manual_market_refresh", game_ids=game_ids,
+            )
+            for game_date, game_ids in sorted(grouped.items())
+        ]
+        return {**result, "prediction_refresh": prediction_refresh}
 
 
 def run_checkpoint_refresh(league: str) -> dict[str, Any]:

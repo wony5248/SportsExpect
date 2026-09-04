@@ -15,7 +15,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from backend.app.config import KST, database_url_from_environment, settings
 from backend.app.database.base import Base
-from backend.app.models import (Game, GameResult, GameStarter, LineupEntry, MarketSnapshot, ModelVersion, PitcherStat, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
+from backend.app.models import (CrawlLog, Game, GameResult, GameStarter, LineupEntry, MarketSnapshot, ModelVersion, PitcherStat, Prediction, PredictionEvaluation, PredictionSnapshot, Team,
                                 ModelLifecycleEvent, TeamBullpenEvent, UserClaudeSetting)
 from backend.app.repositories.repository import (_market_snapshot_stage, _prediction_changes, game_cards,
                                                   game_dates, upsert_game, upsert_market_consensus)
@@ -39,7 +39,8 @@ from backend.app.services.feature_engineering import (HOME_FIELD_MULTIPLIERS, ba
                                                       _platoon_feature, _recent_pitcher_deviation)
 from backend.app.services.refresh import (SPLIT_FETCH_BUDGET, _collect_batter_splits, _market_event_date,
                                           _market_checkpoint_due, _market_refresh_due,
-                                          _odds_request_credit_cost, _months_for_recent, _optional,
+                                          _odds_request_credit_cost, _odds_credits_used_today,
+                                          _months_for_recent, _optional,
                                           _prediction_stage, _recent_by_team, _split_budget,
                                           _lineup_split_tables)
 from backend.app.services.batting import SINGLE, STATE_INDEX, build_batter_table
@@ -837,6 +838,27 @@ def test_market_refresh_slots_are_anchored_to_kst_once_per_day():
 def test_odds_credit_cost_counts_markets_times_regions(monkeypatch):
     assert _odds_request_credit_cost("MLB") == 3
     assert _odds_request_credit_cost("KBO") == 3
+
+
+def test_api_sports_budget_ignores_legacy_odds_provider_logs():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = datetime(2026, 9, 4, 21, 0)
+    with Session(engine) as session:
+        for index in range(5):
+            session.add(CrawlLog(
+                collector="mlb_market", status="SUCCESS",
+                source_url="https://api.the-odds-api.com/v4/sports",
+                started_at=now - timedelta(minutes=index), finished_at=now - timedelta(minutes=index),
+            ))
+        for index in range(3):
+            session.add(CrawlLog(
+                collector="mlb_market", status="SUCCESS" if index < 2 else "FAILED",
+                source_url="https://v1.baseball.api-sports.io/odds",
+                started_at=now - timedelta(minutes=index), finished_at=now - timedelta(minutes=index),
+            ))
+        session.flush()
+        assert _odds_credits_used_today(session, now) == 3
 
 
 def test_successful_market_attempt_suppresses_repeat_when_provider_has_no_match():
