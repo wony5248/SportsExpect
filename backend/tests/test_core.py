@@ -301,6 +301,19 @@ def test_mlb_starter_scope_uses_requested_slate(monkeypatch):
     assert result == {"starters_updated_games": 8}
 
 
+def test_market_scope_can_force_one_current_collection(monkeypatch):
+    calls = []
+
+    def fake_refresh(league, *, force=False):
+        calls.append((league, force))
+        return {"status": "collected"}
+
+    monkeypatch.setattr(jobs_module, "run_market_refresh", fake_refresh)
+    result = jobs_module.run_cron_refresh("MLB", "market", force=True)
+    assert calls == [("MLB", True)]
+    assert result == {"status": "collected"}
+
+
 def test_manual_background_refresh_queues_baseline_then_bounded_chunks():
     from backend.app.main import ManualRefreshRequest, manual_refresh
 

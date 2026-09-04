@@ -104,10 +104,10 @@ def run_tomorrow_discovery(league: str) -> dict[str, Any]:
     return run_full_refresh(league, target_date, trigger="supabase_tomorrow_discovery")
 
 
-def run_market_refresh(league: str) -> dict[str, Any]:
+def run_market_refresh(league: str, *, force: bool = False) -> dict[str, Any]:
     slot_date = datetime.now(KST).date()
     with job_lock(f"market:{league}:{slot_date.isoformat()}"):
-        return refresh_market(league)
+        return refresh_market(league, force=force)
 
 
 def run_checkpoint_refresh(league: str) -> dict[str, Any]:
@@ -228,7 +228,8 @@ def run_innings_backfill(league: str, limit: int = 50) -> dict[str, Any]:
 
 
 def run_cron_refresh(league: str, scope: str, *, target_date: date | None = None,
-                     game_ids: set[str] | None = None, only_changed: bool = False) -> dict[str, Any]:
+                     game_ids: set[str] | None = None, only_changed: bool = False,
+                     force: bool = False) -> dict[str, Any]:
     if scope == "full":
         return run_full_refresh(league, target_date)
     if scope == "nearby":
@@ -257,7 +258,7 @@ def run_cron_refresh(league: str, scope: str, *, target_date: date | None = None
                 game_ids=game_ids,
             )
     if scope == "market":
-        return run_market_refresh(league)
+        return run_market_refresh(league, force=force)
     if scope == "starters":
         if league != "MLB" or target_date is None:
             raise ValueError("starters scope requires MLB and target_date")

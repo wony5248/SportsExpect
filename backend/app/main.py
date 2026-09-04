@@ -276,6 +276,7 @@ def cron_refresh(
     target_date: date | None = Query(default=None, alias="date"),
     game_ids: str | None = Query(default=None),
     only_changed: bool = Query(default=False),
+    force: bool = Query(default=False),
 ):
     selected_ids = {value for value in (game_ids or "").split(",") if value}
     if scope == "games" and (target_date is None or not selected_ids):
@@ -291,7 +292,7 @@ def cron_refresh(
     try:
         return run_cron_refresh(
             league, scope, target_date=target_date,
-            game_ids=selected_ids or None, only_changed=only_changed,
+            game_ids=selected_ids or None, only_changed=only_changed, force=force,
         )
     except LockUnavailable as exc:
         # A concurrent full/nearby run is expected occasionally; Cron can safely retry later.

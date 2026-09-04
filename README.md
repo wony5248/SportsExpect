@@ -79,6 +79,14 @@ curl -X POST -H 'x-admin-token: YOUR_ADMIN_TOKEN' \
   'https://YOUR-API.vercel.app/api/v1/admin/cron/refresh?league=KBO&scope=market'
 ```
 
+정기 슬롯과 무관하게 현재 시점 배당을 한 번 다시 받으려면 관리자 호출에
+`force=true`를 추가합니다. 강제 호출도 일일 20요청 상한을 넘을 수 없습니다.
+
+```bash
+curl -X POST -H 'x-admin-token: YOUR_ADMIN_TOKEN' \
+  'https://YOUR-API.vercel.app/api/v1/admin/cron/refresh?league=MLB&scope=market&force=true'
+```
+
 ## 선택형 Claude 보조 예측
 
 Claude는 기존 통계 모델을 대체하지 않습니다. 팀명, 리그·구장, 파생 통계 특징, 기존 승률·기대득점만 구조화 출력 API에 보내고, 응답을 최대 25% 이내의 보조 가중치로 결합합니다. 실제 기본 가중치는 15%에 Claude가 반환한 자신도를 곱해 더 낮아질 수 있습니다. 선수명, 수집 원문, API 키는 프롬프트에 넣지 않습니다. API 오류·시간 초과·한도 초과 시 해당 경기는 통계 모델만으로 즉시 계산됩니다.

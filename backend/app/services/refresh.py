@@ -687,24 +687,24 @@ def _market_event_date(value: str | None) -> date | None:
         return None
 
 
-def refresh_market(league: str) -> dict[str, Any]:
+def refresh_market(league: str, *, force: bool = False) -> dict[str, Any]:
     """Run the daily structured-market collector without refreshing baseball sources."""
     init_db()
     errors: list[str] = []
-    result = _refresh_market(league, errors)
+    result = _refresh_market(league, errors, force=force)
     return {"league": league, "collector": "market", **result, "errors": errors}
 
 
-def _refresh_market(league: str, errors: list[str]) -> dict[str, Any]:
+def _refresh_market(league: str, errors: list[str], *, force: bool = False) -> dict[str, Any]:
     if not settings.api_sports_key:
         return {"status": "disabled", "matched_games": 0}
     # Full-slate refreshes run in parallel workers. Serialize the shared paid provider across
     # both leagues, then re-check due state and budget after acquiring the lock.
     with job_lock("api-sports-odds-provider", blocking=True):
-        return _refresh_market_locked(league, errors)
+        return _refresh_market_locked(league, errors, force=force)
 
 
-def _refresh_market_locked(league: str, errors: list[str]) -> dict[str, Any]:
+def _refresh_market_locked(league: str, errors: list[str], *, force: bool = False) -> dict[str, Any]:
     collector = f"{league.lower()}_market"
     now = database_now()
     with session_scope() as session:
@@ -721,7 +721,7 @@ def _refresh_market_locked(league: str, errors: list[str]) -> dict[str, Any]:
     # API-Sports publishes pre-match odds once per day, so four intraday checkpoint requests
     # cannot reveal fresher provider data. One successful league collection per daily slot is
     # sufficient; frequent cron dispatches stop here locally.
-    if not _market_refresh_due(league, latest, now):
+    if not force and not _market_refresh_due(league, latest, now):
         return {"status": "already_collected", "matched_games": 0}
     if not target_dates:
         return {"status": "no_upcoming_games", "matched_games": 0}
