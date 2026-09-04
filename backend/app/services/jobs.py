@@ -11,7 +11,8 @@ from backend.app.models import CrawlLog, Game, LineupEntry, PredictionSnapshot
 from backend.app.services.operations import job_lock
 from backend.app.services.refresh import (backfill_batter_splits, backfill_kbo_innings,
                                           backfill_mlb_innings, refresh_kbo, refresh_market,
-                                          refresh_mlb, discover_schedule, predict_stored_games)
+                                          refresh_mlb, refresh_mlb_starters, discover_schedule,
+                                          predict_stored_games)
 from backend.app.services.model_lifecycle import run_model_lifecycle
 from backend.app.services.historical_replay import run_historical_replay
 from backend.app.services.prediction_evaluation import evaluate_pending_predictions
@@ -257,6 +258,11 @@ def run_cron_refresh(league: str, scope: str, *, target_date: date | None = None
             )
     if scope == "market":
         return run_market_refresh(league)
+    if scope == "starters":
+        if league != "MLB" or target_date is None:
+            raise ValueError("starters scope requires MLB and target_date")
+        with job_lock(f"mlb-starters:{target_date.isoformat()}"):
+            return refresh_mlb_starters(target_date)
     if scope == "checkpoints":
         return run_checkpoint_refresh(league)
     if scope == "lifecycle":

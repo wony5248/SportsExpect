@@ -614,7 +614,7 @@ def _operating_prediction(runtime: dict[str, Any] | None,
                           row: dict[str, Any]) -> tuple[float, float, float, str]:
     """Evaluate through the exact production score engine, not an unrelated Poisson proxy."""
     from backend.app.services.feature_engineering import logistic_probability
-    from backend.app.services.prediction import apply_market_consensus_anchor, blend_classifier_into_means
+    from backend.app.services.prediction import market_reference_audit, blend_classifier_into_means
     from backend.app.services.simulation import simulate_scores
     from backend.app.services.team_residuals import apply_residual_adjustment
 
@@ -633,7 +633,7 @@ def _operating_prediction(runtime: dict[str, Any] | None,
     home_runs, away_runs = apply_residual_adjustment(
         home_runs, away_runs, row.get("residual_context") or {},
     )
-    home_runs, away_runs, _market = apply_market_consensus_anchor(
+    home_runs, away_runs, _market = market_reference_audit(
         home_runs, away_runs, row.get("market_context") or {}, str(row.get("league") or "MLB"),
     )
     recipe = row.get("simulation_recipe")
@@ -697,7 +697,7 @@ def _fit_logistic_offset(x: np.ndarray, y: np.ndarray,
 def _baseline_offsets(row: dict[str, Any]) -> tuple[float, float, float]:
     """Return the leakage-safe baseline logit and run means used as residual-model offsets."""
     from backend.app.services.feature_engineering import logistic_probability
-    from backend.app.services.prediction import apply_market_consensus_anchor, blend_classifier_into_means
+    from backend.app.services.prediction import market_reference_audit, blend_classifier_into_means
     from backend.app.services.team_residuals import apply_residual_adjustment
 
     probability = logistic_probability(defaultdict(float, row["features"]))
@@ -710,7 +710,7 @@ def _baseline_offsets(row: dict[str, Any]) -> tuple[float, float, float]:
     home_runs, away_runs = apply_residual_adjustment(
         home_runs, away_runs, row.get("residual_context") or {},
     )
-    home_runs, away_runs, _market = apply_market_consensus_anchor(
+    home_runs, away_runs, _market = market_reference_audit(
         home_runs, away_runs, row.get("market_context") or {}, str(row.get("league") or "MLB"),
     )
     logit = math.log(_clip(probability, .001, .999) / (1 - _clip(probability, .001, .999)))

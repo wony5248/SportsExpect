@@ -10,8 +10,7 @@ from zoneinfo import ZoneInfo
 ROOT_DIR = Path(__file__).resolve().parents[2]
 KST = ZoneInfo("Asia/Seoul")
 
-# httpx's INFO message contains the complete request URL. The Odds API uses a
-# query-string credential, so successful request logs must never include it.
+# Keep third-party HTTP request details out of routine application logs.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
@@ -52,15 +51,14 @@ class Settings:
     retry_base_seconds: float = float(os.getenv("COLLECTOR_RETRY_BASE_SECONDS", "0.75"))
     backup_retention_days: int = int(os.getenv("BACKUP_RETENTION_DAYS", "14"))
     stale_after_minutes: int = int(os.getenv("STALE_AFTER_MINUTES", "360"))
-    odds_api_key: str | None = os.getenv("ODDS_API_KEY")
-    odds_api_regions: str = os.getenv("ODDS_API_REGIONS", "us")
-    # US books rarely post a KBO run line, so KBO uses the eu region. Each extra region
-    # multiplies the provider's credit cost; eu,us would double every KBO collection.
-    odds_api_regions_kbo: str = os.getenv("ODDS_API_REGIONS_KBO", "eu")
-    # This is a credit budget, not an HTTP request count. With three markets and one region each
-    # successful league collection costs three credits, keeping a 500-credit plan usable for
-    # roughly twenty days even when all four pregame checkpoints run for both leagues.
-    odds_api_daily_credit_budget: int = max(0, int(os.getenv("ODDS_API_DAILY_CREDIT_BUDGET", "24")))
+    api_sports_key: str | None = os.getenv("API_SPORTS_KEY")
+    # API-Sports currently identifies MLB and KBO by numeric league ids. Keep these deploy-time
+    # configurable so a provider catalogue change does not require an application release.
+    api_sports_mlb_league_id: int = int(os.getenv("API_SPORTS_MLB_LEAGUE_ID", "1"))
+    api_sports_kbo_league_id: int = int(os.getenv("API_SPORTS_KBO_LEAGUE_ID", "3"))
+    # This is an HTTP request cap. One collection normally uses one odds request plus one games
+    # request for each scheduled date in the next 36 hours (usually 2-3 requests per league/day).
+    api_sports_daily_request_budget: int = max(0, int(os.getenv("API_SPORTS_DAILY_REQUEST_BUDGET", "20")))
     # Used exclusively to encrypt user-owned provider keys at rest.
     secret_encryption_key: str | None = os.getenv("SECRET_ENCRYPTION_KEY")
     # Claude runtime safety limits are application policy, not deployment knobs.

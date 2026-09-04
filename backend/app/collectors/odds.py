@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from statistics import median
 from typing import Any
 
@@ -11,38 +11,132 @@ from backend.app.config import KST, settings
 
 
 class OddsClient:
-    """Optional structured feed used for both comparison and conservative consensus anchoring."""
+    """API-Sports Baseball odds feed, used only as an external comparison benchmark."""
 
     def __init__(self, timeout: float = 20.0, transport: httpx.BaseTransport | None = None):
-        self.base_url = "https://api.the-odds-api.com"
+        self.base_url = "https://v1.baseball.api-sports.io"
         self.client = httpx.Client(base_url=self.base_url, timeout=timeout, follow_redirects=True,
-                                   transport=transport, headers={"User-Agent": "DugoutLab/0.3"})
+                                   transport=transport, headers={
+                                       "User-Agent": "DugoutLab/0.3",
+                                       "x-apisports-key": settings.api_sports_key or "",
+                                   })
         self.last_usage: dict[str, int] = {}
+        self.request_count = 0
 
     def close(self) -> None:
         self.client.close()
 
-    def consensus(self, league: str) -> SourcePayload:
-        if not settings.odds_api_key:
-            return SourcePayload([], "https://the-odds-api.com", datetime.now(KST))
-        sport = "baseball_kbo" if league == "KBO" else "baseball_mlb"
-        regions = settings.odds_api_regions_kbo if league == "KBO" else settings.odds_api_regions
-        # spreads (the run line) reveals which club the market makes the -1.5 favorite.
-        # Note: each extra market or region raises The Odds API credit cost per request.
-        response = self.client.get(f"/v4/sports/{sport}/odds", params={
-            "apiKey": settings.odds_api_key, "regions": regions,
-            "markets": "h2h,spreads,totals", "oddsFormat": "decimal", "dateFormat": "iso",
-        })
+    def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        response = self.client.get(path, params=params)
+        self.request_count += 1
         self.last_usage = {
-            key.removeprefix("x-requests-"): int(response.headers[key])
-            for key in ("x-requests-last", "x-requests-used", "x-requests-remaining")
+            key.removeprefix("x-ratelimit-requests-"): int(response.headers[key])
+            for key in ("x-ratelimit-requests-limit", "x-ratelimit-requests-remaining")
             if response.headers.get(key, "").isdigit()
         }
         if response.is_error:
-            # Do not let httpx include the apiKey-bearing request URL in logs.
-            raise RuntimeError(f"Odds provider returned HTTP {response.status_code}")
-        rows = [_consensus_event(event) for event in response.json()]
-        return SourcePayload(rows, str(response.url).split("?", 1)[0], datetime.now(KST))
+            raise RuntimeError(f"API-Sports returned HTTP {response.status_code}")
+        payload = response.json()
+        errors = payload.get("errors") if isinstance(payload, dict) else None
+        if errors:
+            raise RuntimeError(f"API-Sports returned an application error: {errors}")
+        return payload
+
+    def consensus(self, league: str, target_dates: list[date]) -> SourcePayload:
+        if not settings.api_sports_key:
+            return SourcePayload([], self.base_url, datetime.now(KST))
+        league_id = (settings.api_sports_kbo_league_id if league == "KBO"
+                     else settings.api_sports_mlb_league_id)
+        game_index: dict[str, dict[str, Any]] = {}
+        seasons: set[int] = set()
+        for target in sorted(set(target_dates)):
+            seasons.add(target.year)
+            payload = self._get("/games", {
+                "date": target.isoformat(), "league": league_id, "season": target.year,
+                "timezone": "Asia/Seoul",
+            })
+            for game in payload.get("response") or []:
+                game_index[str(game.get("id") or "")] = game
+
+        rows: list[dict[str, Any]] = []
+        for season in sorted(seasons):
+            payload = self._get("/odds", {"league": league_id, "season": season})
+            for event in payload.get("response") or []:
+                game_id = str((event.get("game") or {}).get("id") or event.get("game_id") or "")
+                row = _api_sports_consensus(event, game_index.get(game_id))
+                if row["home_name"] and row["away_name"]:
+                    rows.append(row)
+        return SourcePayload(rows, f"{self.base_url}/odds", datetime.now(KST))
+
+
+def _api_sports_consensus(event: dict[str, Any], game: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Normalize API-Sports' bookmaker/bet/value nesting into the app's consensus schema."""
+    game = game or event.get("game") or {}
+    teams = game.get("teams") or event.get("teams") or {}
+    home_name = str((teams.get("home") or {}).get("name") or event.get("home_name") or "")
+    away_name = str((teams.get("away") or {}).get("name") or event.get("away_name") or "")
+    converted = {
+        "id": (event.get("game") or {}).get("id") or event.get("game_id") or game.get("id"),
+        "commence_time": game.get("date") or event.get("date"),
+        "home_team": home_name,
+        "away_team": away_name,
+        "bookmakers": [],
+    }
+    for bookmaker in event.get("bookmakers") or []:
+        markets = []
+        for bet in bookmaker.get("bets") or bookmaker.get("markets") or []:
+            name = str(bet.get("name") or bet.get("key") or "").lower()
+            values = bet.get("values") or bet.get("outcomes") or []
+            if name in {"home/away", "match winner", "moneyline", "h2h"}:
+                outcomes = _api_sports_outcomes(values, home_name, away_name, "h2h")
+                key = "h2h"
+            elif "over/under" in name or "total" in name:
+                outcomes = _api_sports_outcomes(values, home_name, away_name, "totals")
+                key = "totals"
+            elif "handicap" in name or "run line" in name or "spread" in name:
+                outcomes = _api_sports_outcomes(values, home_name, away_name, "spreads")
+                key = "spreads"
+            else:
+                continue
+            if outcomes:
+                markets.append({"key": key, "outcomes": outcomes})
+        if markets:
+            converted["bookmakers"].append({
+                "key": bookmaker.get("id") or bookmaker.get("name"), "markets": markets,
+            })
+    row = _consensus_event(converted)
+    row["provider"] = "API-Sports Baseball"
+    return row
+
+
+def _api_sports_outcomes(values: list[dict[str, Any]], home_name: str, away_name: str,
+                         market: str) -> list[dict[str, Any]]:
+    outcomes = []
+    for value in values:
+        label = str(value.get("value") or value.get("name") or "").strip()
+        price = _as_float(value.get("odd") if value.get("odd") is not None else value.get("price"))
+        lower = label.lower()
+        point = _number_from_label(label)
+        if market == "h2h":
+            name = home_name if lower in {"home", home_name.lower()} else away_name if lower in {"away", away_name.lower()} else ""
+        elif market == "totals":
+            name = "Over" if lower.startswith("over") else "Under" if lower.startswith("under") else ""
+        else:
+            name = home_name if lower.startswith("home") or home_name.lower() in lower else away_name if lower.startswith("away") or away_name.lower() in lower else ""
+        if name and price is not None:
+            outcome = {"name": name, "price": price}
+            if point is not None:
+                outcome["point"] = point
+            outcomes.append(outcome)
+    return outcomes
+
+
+def _number_from_label(value: str) -> float | None:
+    for token in reversed(value.replace("(", " ").replace(")", " ").split()):
+        parsed = _as_float(token)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _consensus_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -100,7 +194,7 @@ def _consensus_event(event: dict[str, Any]) -> dict[str, Any]:
     total_line = median(total_lines) if total_lines else None
     home_spread = median(home_spreads) if home_spreads else None
     return {
-        "provider": "The Odds API", "external_event_id": str(event.get("id", "")),
+        "provider": "API-Sports Baseball", "external_event_id": str(event.get("id", "")),
         "commence_time": event.get("commence_time"), "home_name": home_name, "away_name": away_name,
         "bookmaker_count": len(used_books),
         "total_line": total_line,

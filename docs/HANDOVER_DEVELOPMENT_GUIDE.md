@@ -29,14 +29,14 @@
 - GitHub 저장소 읽기·쓰기 권한
 - Vercel 팀과 `sports-expect`, `sports-expect-api` 프로젝트 권한
 - Supabase 프로젝트의 Database, SQL Editor, Authentication, Vault, Cron 확인 권한
-- 선택 데이터인 The Odds API 계정 또는 키 관리 권한
+- 선택 데이터인 API-Sports Baseball 계정 또는 키 관리 권한
 - 운영 사용자 초대·삭제가 필요하면 Supabase Authentication 관리자 권한
 
 비밀값 목록은 다음과 같으며 기존 값의 원문을 메신저로 전달하기보다 서비스에서 교체하는 것이 안전하다.
 
 - Vercel API: `BASEBALL_DATABASE_URL`, `ADMIN_TOKEN`, `SECRET_ENCRYPTION_KEY`
 - Vercel API: `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`
-- Vercel API 선택값: `ODDS_API_KEY`, `ODDS_API_REGIONS`, `ODDS_API_REGIONS_KBO`
+- Vercel API 선택값: `API_SPORTS_KEY`, `API_SPORTS_MLB_LEAGUE_ID`, `API_SPORTS_KBO_LEAGUE_ID`, `API_SPORTS_DAILY_REQUEST_BUDGET`
 - Vercel 프런트: `VITE_API_BASE_URL`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`
 - Supabase Vault: `dugout_backend_url`, `dugout_admin_token`
 

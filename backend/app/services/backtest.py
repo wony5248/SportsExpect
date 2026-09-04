@@ -193,7 +193,7 @@ def walk_forward_backtest(session: Session, league: str = "ALL", stage: str | No
         })
     market_metrics = _metrics(market_evaluated, "probability") if market_evaluated else {
         "sample_size": 0,
-        "message": "ODDS_API_KEY와 경기 전 시장 스냅샷이 쌓이면 동일 경기 시장 기준 비교가 시작됩니다.",
+        "message": "API_SPORTS_KEY와 경기 전 시장 스냅샷이 쌓이면 동일 경기 시장 기준 비교가 시작됩니다.",
     }
     market_total_errors = [abs(float(row["total_error"])) for row in market_evaluated if row["total_error"] is not None]
     if market_total_errors:

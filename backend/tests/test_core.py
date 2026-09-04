@@ -32,7 +32,7 @@ from backend.app.collectors.kbo.client import (KBO_BASE_STATES, KboClient, _batt
                                                _scoreboard_innings, _flag)
 from backend.app.collectors.kbo.client import SourcePayload
 from backend.app.collectors.mlb.client import MLB_BASE_STATES, MlbClient, _linescore, _weather_context
-from backend.app.collectors.odds import _consensus_event
+from backend.app.collectors.odds import _api_sports_consensus, _consensus_event
 from backend.app.services.feature_engineering import (HOME_FIELD_MULTIPLIERS, batted_ball_clumping,
                                                       expected_runs, _effective_lineup_ops,
                                                       _lineup_matchup_summary, _paired_pitcher_difference,
@@ -51,7 +51,7 @@ from backend.app.services.trajectory import (air_density, flight, park_home_run_
                                              park_weather_home_run_multiplier)
 from backend.app.services.prediction import (SIMULATION_SUMMARY_SCHEMA_VERSION,
                                              _apply_daily_bullpen_workload,
-                                             apply_market_consensus_anchor,
+                                             market_reference_audit,
                                              blend_classifier_into_means, build_score_estimates,
                                              favorite_fragility_score,
                                              predict_game)
@@ -232,7 +232,7 @@ def test_market_snapshots_retain_unchanged_checkpoint_and_executable_prices():
                     source_url="test", collected_at=start - timedelta(days=1))
         session.add(game); session.flush()
         quote = {
-            "provider": "The Odds API", "bookmaker_count": 4, "total_line": 8.5,
+            "provider": "TEST_BOOKS", "bookmaker_count": 4, "total_line": 8.5,
             "home_spread": -1.5, "home_implied_probability": .58,
             "away_implied_probability": .42, "home_decimal_odds": 1.72,
             "away_decimal_odds": 2.20,
@@ -280,6 +280,25 @@ def test_stored_prediction_scope_skips_provider_collection(monkeypatch):
     result = jobs_module.run_cron_refresh("MLB", "predict", target_date=target)
     assert calls == [("MLB", target, "supabase_stored_prediction", None)]
     assert result == {"predictions": 12}
+
+
+def test_mlb_starter_scope_uses_requested_slate(monkeypatch):
+    target = date(2026, 9, 5)
+    calls = []
+
+    def fake_refresh(target_date):
+        calls.append(target_date)
+        return {"starters_updated_games": 8}
+
+    @contextmanager
+    def fake_lock(*_args, **_kwargs):
+        yield
+
+    monkeypatch.setattr(jobs_module, "refresh_mlb_starters", fake_refresh)
+    monkeypatch.setattr(jobs_module, "job_lock", fake_lock)
+    result = jobs_module.run_cron_refresh("MLB", "starters", target_date=target)
+    assert calls == [target]
+    assert result == {"starters_updated_games": 8}
 
 
 def test_manual_background_refresh_queues_baseline_then_bounded_chunks():
@@ -796,18 +815,15 @@ def test_market_refresh_slots_are_anchored_to_kst_once_per_day():
     kbo_latest = datetime(2026, 8, 21, 12, 0, tzinfo=KST)
     assert not _market_refresh_due("KBO", kbo_latest, datetime(2026, 8, 22, 11, 59, tzinfo=KST))
     assert _market_refresh_due("KBO", kbo_latest, datetime(2026, 8, 22, 12, 0, tzinfo=KST))
-    mlb_latest = datetime(2026, 8, 21, 22, 0, tzinfo=KST)
-    assert not _market_refresh_due("MLB", mlb_latest, datetime(2026, 8, 22, 21, 59, tzinfo=KST))
-    assert _market_refresh_due("MLB", mlb_latest, datetime(2026, 8, 22, 22, 0, tzinfo=KST))
+    mlb_latest = datetime(2026, 8, 21, 21, 0, tzinfo=KST)
+    assert not _market_refresh_due("MLB", mlb_latest, datetime(2026, 8, 22, 20, 59, tzinfo=KST))
+    assert _market_refresh_due("MLB", mlb_latest, datetime(2026, 8, 22, 21, 0, tzinfo=KST))
     assert _market_event_date("2026-08-22T15:30:00Z") == date(2026, 8, 23)
 
 
 def test_odds_credit_cost_counts_markets_times_regions(monkeypatch):
-    monkeypatch.setattr(refresh_module, "settings", SimpleNamespace(
-        odds_api_regions="us", odds_api_regions_kbo="eu,us",
-    ))
     assert _odds_request_credit_cost("MLB") == 3
-    assert _odds_request_credit_cost("KBO") == 6
+    assert _odds_request_credit_cost("KBO") == 3
 
 
 def test_successful_market_attempt_suppresses_repeat_when_provider_has_no_match():
@@ -1876,9 +1892,9 @@ def test_second_stage_markets_are_priced_only_inside_the_winning_branch():
     assert total["over_probability"] > result["totals"]["8.5"]["over"]
     assert conditional["mean_runs"]["home"] > result["mean_runs"]["home"]
 
-    # The headline score is chosen under these same two decisions.
+    # The headline score is winner-branch representative; its sum defines the total direction.
     primary = result["projected_score"]
-    assert primary["total_conditioning"] == "EXPECTED_TOTAL_VS_LINE"
+    assert primary["total_conditioning"] == "HEADLINE_SCORE_TOTAL_VS_LINE"
     assert primary["headline_total_pick"] == total["pick"]
     assert primary["scenario_over_probability"] == total["over_probability"]
     assert (primary["home"] + primary["away"] > total["line"]) is (total["pick"] == "OVER")
@@ -1960,27 +1976,28 @@ def test_total_pick_follows_expected_total_and_keeps_market_edge_as_context():
 
     assert cheap["frequency_tables"] == dear["frequency_tables"]
     assert cheap_total["model_over_probability"] == dear_total["model_over_probability"]
-    assert cheap_total["pick_basis"] == "EXPECTED_TOTAL_VS_LINE"
+    assert cheap_total["pick_basis"] == "HEADLINE_SCORE_TOTAL_VS_LINE"
     assert cheap_total["comparable"] is True
     assert cheap_total["pick"] == dear_total["pick"] == "OVER"
     assert cheap_total["edge"] > 0 and dear_total["edge"] < 0
-    assert cheap_total["expected_total"] > cheap_total["line"]
+    assert cheap_total["expected_total"] == cheap["projected_score"]["home"] + cheap["projected_score"]["away"]
+    assert (cheap_total["pick"] == "OVER") == (cheap_total["expected_total"] > cheap_total["line"])
     # The total read is priced from an unchanged score population; its market price must not
     # choose a different representative score.
     assert (cheap["projected_score"]["home"], cheap["projected_score"]["away"]) == (
         dear["projected_score"]["home"], dear["projected_score"]["away"]
     )
-    assert cheap["projected_score"]["total_conditioning"] == "EXPECTED_TOTAL_VS_LINE"
+    assert cheap["projected_score"]["total_conditioning"] == "HEADLINE_SCORE_TOTAL_VS_LINE"
 
     # Both sides lean over inside the winning branch, while the price only changes value context.
     assert cheap_total["over_probability"] == dear_total["over_probability"] > .5
 
     without_price = simulate_scores(5.4, 4.0, 20_000, 20260824, **common)
     without_total = without_price["winner_conditional_market"]["headline_total"]
-    assert without_total["pick_basis"] == "EXPECTED_TOTAL_VS_LINE"
+    assert without_total["pick_basis"] == "HEADLINE_SCORE_TOTAL_VS_LINE"
     assert without_total["comparable"] is False
     assert without_total["edge"] is None
-    assert without_price["projected_score"]["total_conditioning"] == "EXPECTED_TOTAL_VS_LINE"
+    assert without_price["projected_score"]["total_conditioning"] == "HEADLINE_SCORE_TOTAL_VS_LINE"
 
     # A price only means anything at the line it was quoted for, so a model-derived line
     # (no market total collected) never borrows it.
@@ -1989,21 +2006,34 @@ def test_total_pick_follows_expected_total_and_keeps_market_edge_as_context():
     model_total = model_line["winner_conditional_market"]["headline_total"]
     assert model_total["line_source"] == "MODEL_FAIR"
     assert model_total["market_over_probability"] is None
-    assert model_total["pick_basis"] == "EXPECTED_TOTAL_VS_LINE"
+    assert model_total["pick_basis"] == "HEADLINE_SCORE_TOTAL_VS_LINE"
 
 
-def test_total_pick_cannot_say_over_when_expected_total_is_below_line():
+def test_total_pick_direction_always_matches_representative_score_total():
     result = simulate_scores(
         6.2, 6.0, 20_000, 20260904, league="MLB",
         headline_total_line=12.5, headline_total_over_probability=.10,
     )
     total = result["winner_conditional_market"]["headline_total"]
-    # The very cheap over price creates a positive over edge. Previously that edge incorrectly
-    # changed the card to over even though the displayed mean was below 12.5.
+    # Market price may change edge context, but never direction or representative score.
     assert total["edge"] > 0
-    assert total["expected_total"] < total["line"]
-    assert total["pick"] == "UNDER"
-    assert total["pick_edge"] < 0
+    assert total["expected_total"] == result["projected_score"]["home"] + result["projected_score"]["away"]
+    assert (total["pick"] == "OVER") == (total["expected_total"] > total["line"])
+
+
+def test_total_pick_is_neutral_when_representative_total_equals_line():
+    baseline = simulate_scores(5.4, 4.0, 20_000, 20260904, league="MLB")
+    score_total = baseline["projected_score"]["home"] + baseline["projected_score"]["away"]
+    result = simulate_scores(
+        5.4, 4.0, 20_000, 20260904, league="MLB",
+        headline_total_line=float(score_total), headline_total_over_probability=.45,
+    )
+    total = result["winner_conditional_market"]["headline_total"]
+    assert result["projected_score"]["home"] + result["projected_score"]["away"] == score_total
+    assert total["expected_total"] == total["line"]
+    assert total["pick"] == "PUSH"
+    assert total["comparable"] is False
+    assert total["pick_edge"] is None
 
 
 def test_headline_score_is_centred_on_the_branch_it_is_selected_from():
@@ -2100,7 +2130,7 @@ def test_coherent_headline_score_is_not_selected_to_match_total_direction(
     assert result["projected_score"]["scenario_probability"] > 0
 
 
-def test_verified_market_consensus_conservatively_changes_simulation_population():
+def test_verified_market_consensus_never_changes_simulation_population():
     home_team, away_team = SimpleNamespace(name="Home"), SimpleNamespace(name="Away")
     recent = {"10": {"games": 10, "win_rate": .5}}
     home = SimpleNamespace(team=home_team, recent=recent, win_rate=.55, home_win_rate=.58, runs_per_game=4.8,
@@ -2134,10 +2164,11 @@ def test_verified_market_consensus_conservatively_changes_simulation_population(
     )
     assert lower["input_hash"] != upper["input_hash"]
     assert lower["payload"]["frequency_tables"] == upper["payload"]["frequency_tables"]
-    assert lower["home_expected_runs"] + lower["away_expected_runs"] == (
-        upper["home_expected_runs"] + upper["away_expected_runs"]
+    assert (lower["home_expected_runs"], lower["away_expected_runs"]) == (
+        upper["home_expected_runs"], upper["away_expected_runs"]
     )
-    assert lower["payload"]["market_calibration"]["enabled"] is True
+    assert lower["payload"]["market_calibration"]["enabled"] is False
+    assert lower["payload"]["market_calibration"]["reason"] == "REFERENCE_ONLY_PENDING_RESIDUAL_VALIDATION"
     assert lower["payload"]["market_calibration"]["total_weight"] == 0
     assert lower["payload"]["market_calibration"]["total_role"] == "REFERENCE_ONLY_DERIVED_TOTAL_COMPARISON"
     assert lower["payload"]["primary_score"]["headline_total_line"] == 7.5
@@ -2147,7 +2178,7 @@ def test_verified_market_consensus_conservatively_changes_simulation_population(
 
 
 def test_unverified_bare_market_number_cannot_move_model_means():
-    home, away, audit = apply_market_consensus_anchor(
+    home, away, audit = market_reference_audit(
         5.2, 4.3, {"total_line": 14.5, "home_spread": -2.5}, "MLB",
     )
     assert (home, away) == (5.2, 4.3)
@@ -2161,8 +2192,8 @@ def test_verified_run_line_without_moneyline_is_reference_only_for_scores():
         "provider": "TEST_BOOKS", "bookmaker_count": 4,
         "collected_at": "2026-08-24T10:00:00+09:00", "total_line": 8.5,
     }
-    home_a, away_a, audit_a = apply_market_consensus_anchor(5.2, 4.3, baseline, "MLB")
-    home_b, away_b, audit_b = apply_market_consensus_anchor(
+    home_a, away_a, audit_a = market_reference_audit(5.2, 4.3, baseline, "MLB")
+    home_b, away_b, audit_b = market_reference_audit(
         5.2, 4.3, {**baseline, "home_spread": -2.5}, "MLB")
     assert (home_b, away_b) == (home_a, away_a)
     assert audit_b["spread_role"] == "REFERENCE_ONLY_DERIVED_HANDICAP_COMPARISON"
@@ -2170,17 +2201,16 @@ def test_verified_run_line_without_moneyline_is_reference_only_for_scores():
     assert audit_b["market_home_probability"] is None
 
 
-def test_market_moneyline_can_temper_margin_but_total_is_reference_only():
-    home, away, audit = apply_market_consensus_anchor(7.0, 3.0, {
+def test_market_moneyline_and_total_are_both_reference_only():
+    home, away, audit = market_reference_audit(7.0, 3.0, {
         "provider": "TEST_BOOKS", "bookmaker_count": 8, "total_line": 8.0,
         "home_implied_probability": .45, "away_implied_probability": .55,
     }, "MLB")
-    assert audit["enabled"] is True
+    assert audit["enabled"] is False
     assert audit["total_weight"] == 0
     assert home + away == 10.0
-    # A contradictory market tempers a large model edge but cannot blindly reverse it.
-    assert home > away
-    assert audit["anchored_home_probability"] < audit["model_home_probability_before"]
+    assert (home, away) == (7.0, 3.0)
+    assert audit["probability_weight"] == 0
 
 
 def test_ui_registered_secret_is_encrypted_and_requires_same_master_key():
@@ -3020,6 +3050,36 @@ def test_market_consensus_removes_two_way_margin_and_uses_median_lines():
         (1 / 2.30) / ((1 / 2.30) + (1 / 1.62)), abs=1e-6)
     # De-vigged, so the two sides are complements rather than summing above one.
     assert priced_row["home_spread_probability"] < 1 / 2.30
+
+
+def test_api_sports_odds_are_normalized_with_game_metadata():
+    event = {
+        "game": {"id": 991},
+        "bookmakers": [{"id": 7, "name": "Example", "bets": [
+            {"name": "Home/Away", "values": [
+                {"value": "Home", "odd": "1.80"}, {"value": "Away", "odd": "2.10"},
+            ]},
+            {"name": "Over/Under", "values": [
+                {"value": "Over 8.5", "odd": "1.95"}, {"value": "Under 8.5", "odd": "1.87"},
+            ]},
+            {"name": "Asian Handicap", "values": [
+                {"value": "Home -1.5", "odd": "2.20"}, {"value": "Away +1.5", "odd": "1.66"},
+            ]},
+        ]}],
+    }
+    game = {
+        "id": 991, "date": "2026-09-04T18:30:00+09:00",
+        "teams": {"home": {"name": "KIA Tigers"}, "away": {"name": "Kiwoom Heroes"}},
+    }
+    row = _api_sports_consensus(event, game)
+    assert row["provider"] == "API-Sports Baseball"
+    assert row["external_event_id"] == "991"
+    assert row["commence_time"] == game["date"]
+    assert row["total_line"] == 8.5
+    assert row["home_spread"] == -1.5
+    assert row["bookmaker_count"] == 1
+    assert row["total_over_probability"] == pytest.approx(
+        (1 / 1.95) / ((1 / 1.95) + (1 / 1.87)), abs=1e-6)
 
 
 def test_market_prices_are_only_devigged_at_the_line_they_were_quoted_for():

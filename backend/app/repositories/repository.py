@@ -355,7 +355,7 @@ def replace_lineups(session: Session, game: Game, entries: list[dict[str, Any]],
 
 def upsert_market_consensus(session: Session, game: Game, raw: dict[str, Any], source_url: str,
                             collected_at: datetime) -> MarketConsensus:
-    provider = str(raw.get("provider", "The Odds API"))
+    provider = str(raw.get("provider", "API-Sports Baseball"))
     snapshot_raw = dict(raw)
     snapshot_stage, minutes_to_start = _market_snapshot_stage(game, collected_at)
     row = session.scalar(select(MarketConsensus).where(

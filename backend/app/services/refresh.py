@@ -280,6 +280,55 @@ def refresh_mlb(target_date: date, force: bool = False, client: MlbClient | None
             client.close()
 
 
+def refresh_mlb_starters(target_date: date) -> dict[str, Any]:
+    """Refresh probable starters and regenerate affected MLB forecasts without full enrichment."""
+    init_db()
+    client = MlbClient()
+    errors: list[str] = []
+    updated_ids: set[str] = set()
+    try:
+        games_source = _tracked("mlb_games", "/api/v1/schedule", lambda: client.games(target_date), errors)
+        games = games_source.data if games_source else []
+        if games_source:
+            with session_scope() as session:
+                for raw in games:
+                    upsert_game(session, raw, games_source.source_url, games_source.collected_at, "MLB")
+        scheduled_ids = {
+            raw["external_id"] for raw in games if raw.get("status") == "SCHEDULED"
+        }
+        for raw in games:
+            if raw.get("status") != "SCHEDULED":
+                continue
+            starter_source = _tracked(
+                f"mlb_starters_{raw['external_id']}", "/api/v1/people/{id}/stats",
+                lambda item=raw: client.starter_stats(item), errors,
+            )
+            if not starter_source:
+                continue
+            with session_scope() as session:
+                game = session.scalar(select(Game).where(Game.external_id == raw["external_id"]))
+                if game:
+                    for pitcher in starter_source.data:
+                        upsert_pitcher(session, game, pitcher, starter_source.source_url,
+                                       starter_source.collected_at)
+                    updated_ids.add(raw["external_id"])
+        # Refresh the once-daily market reference before regenerating forecasts, so the saved
+        # card compares its new representative score with the current line. Market data remains
+        # excluded from all score and probability inputs.
+        market_status = _refresh_market("MLB", errors)
+        predicted = _predict_games(
+            "MLB", target_date, scheduled_ids or None, errors, "supabase_mlb_21_starters",
+            None, only_changed=True,
+        ) if scheduled_ids else 0
+        return {
+            "league": "MLB", "date": target_date.isoformat(), "scope": "starters",
+            "games": len(games), "starters_updated_games": len(updated_ids),
+            "predictions": predicted, "market": market_status, "errors": errors,
+        }
+    finally:
+        client.close()
+
+
 MLB_SLATE_CONTEXT_BURST_TTL = timedelta(seconds=60)
 
 
@@ -561,9 +610,8 @@ def _months_for_recent(target: date, days: int) -> list[tuple[int, int]]:
     return months
 
 
-MARKET_REFRESH_HOURS_KST = {"KBO": 12, "MLB": 22}
+MARKET_REFRESH_HOURS_KST = {"KBO": 12, "MLB": 21}
 MARKET_CHECKPOINT_LOOKAHEAD_HOURS = 36
-ODDS_MARKETS_PER_CALL = 3
 
 
 def _market_refresh_due(league: str, latest: datetime | None, now: datetime) -> bool:
@@ -614,20 +662,17 @@ def _market_checkpoint_due(session: Session, league: str, now: datetime,
 
 
 def _odds_request_credit_cost(league: str) -> int:
-    regions = settings.odds_api_regions_kbo if league == "KBO" else settings.odds_api_regions
-    region_count = len({region.strip() for region in regions.split(",") if region.strip()})
-    return ODDS_MARKETS_PER_CALL * max(1, region_count)
+    """Conservative normal-call estimate kept for operations/backward compatibility."""
+    return 3
 
 
 def _odds_credits_used_today(session: Session, now: datetime) -> int:
     day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     rows = session.execute(select(CrawlLog.collector, func.count()).where(
         CrawlLog.collector.in_(("kbo_market", "mlb_market")),
-        CrawlLog.status == "SUCCESS", CrawlLog.finished_at >= day_start,
+        CrawlLog.finished_at >= day_start,
     ).group_by(CrawlLog.collector)).all()
-    return sum(int(count) * _odds_request_credit_cost(
-        "KBO" if collector == "kbo_market" else "MLB"
-    ) for collector, count in rows)
+    return sum(int(count) for _, count in rows)
 
 
 def _market_event_date(value: str | None) -> date | None:
@@ -651,11 +696,11 @@ def refresh_market(league: str) -> dict[str, Any]:
 
 
 def _refresh_market(league: str, errors: list[str]) -> dict[str, Any]:
-    if not settings.odds_api_key:
+    if not settings.api_sports_key:
         return {"status": "disabled", "matched_games": 0}
     # Full-slate refreshes run in parallel workers. Serialize the shared paid provider across
     # both leagues, then re-check due state and budget after acquiring the lock.
-    with job_lock("odds-api-provider", blocking=True):
+    with job_lock("api-sports-odds-provider", blocking=True):
         return _refresh_market_locked(league, errors)
 
 
@@ -667,29 +712,47 @@ def _refresh_market_locked(league: str, errors: list[str]) -> dict[str, Any]:
         latest = session.scalar(select(func.max(CrawlLog.finished_at)).where(
             CrawlLog.collector == collector, CrawlLog.status == "SUCCESS",
         ))
-        checkpoint_due = _market_checkpoint_due(session, league, now, latest)
         used_today = _odds_credits_used_today(session, now)
-    if not checkpoint_due and not _market_refresh_due(league, latest, now):
+        upcoming_games = session.scalars(select(Game).where(
+            Game.league == league, Game.status == "SCHEDULED", Game.start_at.is_not(None),
+            Game.start_at > now, Game.start_at <= now + timedelta(hours=MARKET_CHECKPOINT_LOOKAHEAD_HOURS),
+        )).all()
+        target_dates = sorted({game.game_date for game in upcoming_games})
+    # API-Sports publishes pre-match odds once per day, so four intraday checkpoint requests
+    # cannot reveal fresher provider data. One successful league collection per daily slot is
+    # sufficient; frequent cron dispatches stop here locally.
+    if not _market_refresh_due(league, latest, now):
         return {"status": "already_collected", "matched_games": 0}
-    estimated_cost = _odds_request_credit_cost(league)
-    if used_today + estimated_cost > settings.odds_api_daily_credit_budget:
+    if not target_dates:
+        return {"status": "no_upcoming_games", "matched_games": 0}
+    estimated_cost = len(target_dates) + len({day.year for day in target_dates})
+    if used_today + estimated_cost > settings.api_sports_daily_request_budget:
         return {
-            "status": "daily_credit_budget_reached", "matched_games": 0,
-            "estimated_credits_used_today": used_today,
-            "daily_credit_budget": settings.odds_api_daily_credit_budget,
+            "status": "daily_request_budget_reached", "matched_games": 0,
+            "requests_used_today": used_today,
+            "daily_request_budget": settings.api_sports_daily_request_budget,
         }
     client = OddsClient()
     try:
-        source = _tracked(collector, "https://api.the-odds-api.com/v4/sports",
-                          lambda: client.consensus(league), errors)
-        if not source:
+        started = datetime.now(KST)
+        try:
+            source = client.consensus(league, target_dates)
+        except Exception as exc:
+            message = f"{collector}: {type(exc).__name__}: {exc} (1회 시도)"
+            errors.append(message)
+            for _ in range(max(1, client.request_count)):
+                _log(collector, "FAILED", "https://v1.baseball.api-sports.io", started, message)
             return {"status": "failed", "matched_games": 0}
+        for _ in range(max(1, client.request_count)):
+            _log(collector, "SUCCESS", source.source_url, started, None)
         matched_games = 0
         with session_scope() as session:
-            games = session.scalars(select(Game).options(joinedload(Game.home_team), joinedload(Game.away_team)).where(
-                # Prices first observed after first pitch are not pregame evidence and must
-                # never become a closing line by accident.
-                Game.league == league, Game.status == "SCHEDULED",
+            games = session.scalars(select(Game).options(
+                joinedload(Game.home_team), joinedload(Game.away_team),
+            ).where(
+                Game.league == league, Game.status == "SCHEDULED", Game.start_at.is_not(None),
+                Game.start_at > now,
+                Game.start_at <= now + timedelta(hours=MARKET_CHECKPOINT_LOOKAHEAD_HOURS),
             )).all()
             by_matchup = {
                 (game.game_date, _team_key(game.away_team.name), _team_key(game.home_team.name)): game
@@ -709,8 +772,9 @@ def _refresh_market_locked(league: str, errors: list[str]) -> dict[str, Any]:
             "provider_events": len(source.data),
             "matched_games": matched_games,
             "provider_usage": client.last_usage,
-            "estimated_credits_used_today": used_today + estimated_cost,
-            "daily_credit_budget": settings.odds_api_daily_credit_budget,
+            "requests_this_collection": client.request_count,
+            "requests_used_today": used_today + client.request_count,
+            "daily_request_budget": settings.api_sports_daily_request_budget,
         }
     finally:
         client.close()

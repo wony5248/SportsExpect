@@ -85,6 +85,9 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const headlineScore = predictedScore ?? fullDistributionScore ?? (meanScore ? {
     away: Math.round(meanScore.away), home: Math.round(meanScore.home),
   } : undefined)
+  const headlineExpectedTotal = headlineScore
+    ? headlineScore.away + headlineScore.home
+    : undefined
   const modeTotal = p?.simulation_modes?.total_runs
   const modeOutcome = p?.simulation_modes?.outcome
   const statisticalExpectedTotal = p?.statistical_expected_total ?? (
@@ -103,7 +106,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const handicap = p && coherent ? handicapSides(p, game) : null
   // Stage two: the run line and the total priced inside the branch where the club stage one
   // named actually wins. Null on forecasts saved before the two-stage model.
-  const conditional = p && coherent ? conditionalMarket(p, game) : null
+  const conditional = p && coherent ? conditionalMarket(p, game, headlineExpectedTotal) : null
   const picks = p && coherent && ranking && handicap
     ? marketPicks(p, game, ranking, handicap, conditional).filter((pick) => pick.key !== 'handicap')
     : null
@@ -136,7 +139,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
   const isReplay = p?.origin === 'HISTORICAL_REPLAY'
   const evaluation = p?.evaluation
   const verdicts = isFinal && game.result && p && ranking
-    ? marketVerdicts(p, game, ranking, conditional).filter((verdict) => !verdict.market.includes('핸디캡'))
+    ? marketVerdicts(p, game, ranking, conditional, headlineExpectedTotal).filter((verdict) => !verdict.market.includes('핸디캡'))
     : null
   const judgedVerdicts = verdicts?.filter((verdict) => verdict.hit != null) ?? []
   const verdictHits = judgedVerdicts.filter((verdict) => verdict.hit).length
@@ -225,8 +228,8 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
             <strong>{pick.pick}</strong>
             {pick.probability != null && <><Box className="pick-gauge"><i style={{ width: pct(pick.probability) }} /></Box>
               <b>{pct(pick.probability)}</b></>}
-            {pick.key === 'total' && statisticalExpectedTotal != null && <span className="pick-total-mode">
-              평균 합산 점수 <strong>{stat(statisticalExpectedTotal, 1)}점</strong>
+            {pick.key === 'total' && headlineExpectedTotal != null && <span className="pick-total-mode">
+              유력 예상 점수 총합 <strong>{stat(headlineExpectedTotal, 0)}점</strong>
             </span>}
             {pick.stage === 2 && pick.jointProbability != null
               && <span className="pick-joint">승패까지 함께 맞을 확률 {pct(pick.jointProbability)}</span>}
@@ -695,7 +698,8 @@ type MarketPick = {
 
 /** Reads the second-stage market block, which only exists on forecasts saved by the two-stage
  *  model. Older cards keep the previous full-population behaviour. */
-function conditionalMarket(p: NonNullable<Game['prediction']>, game: Game) {
+function conditionalMarket(p: NonNullable<Game['prediction']>, game: Game,
+                           headlineExpectedTotal?: number) {
   const conditional = p.winner_conditional_market
   if (!conditional) return null
   // The stored branch belongs to whichever club the saved forecast favoured. A card must never
@@ -703,25 +707,27 @@ function conditionalMarket(p: NonNullable<Game['prediction']>, game: Game) {
   const modelHomeFavored = p.home_win_probability >= p.away_win_probability
   if (conditional.winner !== (modelHomeFavored ? 'HOME' : 'AWAY')) return null
   const side = (value: 'HOME' | 'AWAY') => value === 'HOME' ? game.home : game.away
-  const expectedTotal = statisticalTotal(p)
+  const expectedTotal = headlineExpectedTotal ?? statisticalTotal(p)
   const storedTotal = conditional.headline_total
   const pick = expectedTotal === storedTotal.line
-    ? (storedTotal.model_over_probability >= storedTotal.model_under_probability ? 'OVER' : 'UNDER')
+    ? 'PUSH'
     : expectedTotal > storedTotal.line ? 'OVER' : 'UNDER'
   return {
     ...conditional,
-    // Normalize forecasts saved before EXPECTED_TOTAL_VS_LINE was introduced too, so an old
-    // cached card cannot contradict the average total printed directly below the pick.
+    // Normalize older cached forecasts too, so the direction can never contradict the
+    // representative score printed on the same card.
     headline_total: {
       ...storedTotal,
       expected_total: expectedTotal,
       pick,
-      pick_probability: pick === 'OVER'
-        ? storedTotal.model_over_probability : storedTotal.model_under_probability,
-      pick_edge: storedTotal.edge == null ? null
+      pick_probability: pick === 'OVER' ? storedTotal.model_over_probability
+        : pick === 'UNDER' ? storedTotal.model_under_probability : storedTotal.push_probability,
+      pick_edge: pick === 'PUSH' || storedTotal.edge == null ? null
         : pick === 'OVER' ? storedTotal.edge : -storedTotal.edge,
-      joint_pick_probability: pick === 'OVER'
-        ? storedTotal.joint_over_probability : storedTotal.joint_under_probability,
+      joint_pick_probability: pick === 'OVER' ? storedTotal.joint_over_probability
+        : pick === 'UNDER' ? storedTotal.joint_under_probability
+          : storedTotal.push_probability * conditional.scenario_probability,
+      comparable: storedTotal.comparable && pick !== 'PUSH',
     },
     winnerTeam: side(conditional.winner),
     minusTeam: side(conditional.handicap.minus_side),
@@ -802,28 +808,31 @@ function marketPicks(p: NonNullable<Game['prediction']>, game: Game,
             : `${hc.minimum_margin - 1}점차 이내로 이김`} · ${edgeNote}`,
     })
 
-    // The direction follows the same expected-total-versus-line comparison printed on the card.
+    // The direction follows the same representative-score total printed on the card.
     // Market price remains supporting context and can no longer make those statements clash.
     const tot = conditional.headline_total
     const line = tot.line
     const takeOver = tot.pick === 'OVER'
+    const takePush = tot.pick === 'PUSH'
     const totalLineNote = tot.line_source === 'MARKET' ? '실제 배당 기준점' : '배당 없어 우리가 계산'
     picks.push({
       key: 'total',
       market: '2차 · 총점',
       line: String(line),
-      pick: takeOver ? '오버' : '언더',
+      pick: takePush ? '기준 동일 · 관망' : takeOver ? '오버' : '언더',
       probability: tot.pick_probability,
       jointProbability: tot.comparable ? undefined : tot.joint_pick_probability,
       comparable: tot.comparable,
       stage: 2,
-      hit: actualTotal == null || actualTotal === line ? undefined
+      hit: takePush || actualTotal == null || actualTotal === line ? undefined
         : takeOver ? actualTotal > line : actualTotal < line,
-      note: tot.comparable
-        ? `평균 ${stat(tot.expected_total ?? statisticalTotal(p), 1)}점이 기준 ${line}점보다 ${takeOver ? '높아' : '낮아'} ${takeOver ? '오버' : '언더'} · 배당사 ${pct(takeOver ? tot.market_over_probability! : tot.market_under_probability!)} 대비 ${
+      note: takePush
+        ? `유력 예상 점수 총합 ${stat(tot.expected_total ?? statisticalTotal(p), 0)}점이 기준 ${line}점과 같아 방향 예측 제외`
+        : tot.comparable
+        ? `유력 예상 점수 총합 ${stat(tot.expected_total ?? statisticalTotal(p), 0)}점이 기준 ${line}점보다 ${takeOver ? '높아' : '낮아'} ${takeOver ? '오버' : '언더'} · 배당사 ${pct(takeOver ? tot.market_over_probability! : tot.market_under_probability!)} 대비 ${
             tot.pick_edge! >= 0 ? '+' : ''}${(tot.pick_edge! * 100).toFixed(1)}%p · ${scenario} ${
             pct(takeOver ? tot.over_probability : tot.under_probability)} · ${totalLineNote}`
-        : `평균 ${stat(tot.expected_total ?? statisticalTotal(p), 1)}점이 기준 ${line}점보다 ${takeOver ? '높아' : '낮아'} ${takeOver ? '오버' : '언더'} · ${totalLineNote}${
+        : `유력 예상 점수 총합 ${stat(tot.expected_total ?? statisticalTotal(p), 0)}점이 기준 ${line}점보다 ${takeOver ? '높아' : '낮아'} ${takeOver ? '오버' : '언더'} · ${totalLineNote}${
             tot.line_source === 'MARKET' ? ' · 배당 가격 미수집이라 비교 불가' : ''}`,
     })
     return picks
@@ -916,7 +925,8 @@ function handicapSides(p: NonNullable<Game['prediction']>, game: Game) {
 
 function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
                         ranking: ReturnType<typeof rankedOutcomes>,
-                        conditional: ReturnType<typeof conditionalMarket>): MarketVerdict[] {
+                        conditional: ReturnType<typeof conditionalMarket>,
+                        headlineExpectedTotal?: number): MarketVerdict[] {
   if (game.status !== 'FINAL') return []
   const result = game.result
   if (!result) return []
@@ -951,12 +961,13 @@ function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
     })
     const line = conditional.headline_total.line
     const pickOver = conditional.headline_total.pick === 'OVER'
+    const pickPush = conditional.headline_total.pick === 'PUSH'
     rows.push({
       market: `2차 · 총점 ${line}${conditional.headline_total.comparable ? '' : ' · 참고'}`,
-      pick: `${pickOver ? '오버' : '언더'} ${line}`,
+      pick: pickPush ? `기준 동일 · 관망 ${line}` : `${pickOver ? '오버' : '언더'} ${line}`,
       probability: conditional.headline_total.pick_probability,
       actual: total === line ? `기준점과 같은 ${total}점` : `${total > line ? '오버' : '언더'} (${total}점)`,
-      hit: total === line ? null : (total > line) === pickOver,
+      hit: pickPush || total === line ? null : (total > line) === pickOver,
       expectedTotal: conditional.headline_total.expected_total ?? statisticalTotal(p),
     })
     return rows
@@ -986,7 +997,7 @@ function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
       probability: Math.max(totals.over, totals.under),
       actual: total === ranking.line ? `기준점과 같은 ${total}점` : `${total > ranking.line ? '오버' : '언더'} (${total}점)`,
       hit: total === ranking.line ? null : (total > ranking.line) === pickOver,
-      expectedTotal: statisticalTotal(p),
+      expectedTotal: headlineExpectedTotal ?? statisticalTotal(p),
     })
   }
   return rows

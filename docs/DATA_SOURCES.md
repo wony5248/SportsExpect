@@ -15,7 +15,7 @@
 | OAA·Fielding Run Value·포수 프레이밍 | MLB | Baseball Savant 공식 리더보드 | 실제 선발 라인업만 합산, outs 기준 정규화 |
 | 좌·우/2B/3B/HR 구장 계수 | MLB | Baseball Savant Statcast Park Factors | 3년 PA 축소값, PA 엔진 이벤트 확률과 기대득점에 일관 적용 |
 | 현역 불펜과 최근 투구수 | MLB | MLB Stats API 현역 로스터·공식 박스스코어 | 등판 후보, 손 유형, SV/HLD, K-BB%, 최근 1~3일 workload |
-| 시장 승률·기준 총점 | KBO/MLB | The Odds API(선택) | 모델 입력에서 제외하고 비교 기준으로만 저장 |
+| 시장 승률·기준 총점 | KBO/MLB | API-Sports Baseball(선택) | 모델 입력에서 제외하고 비교·사후 잔차 기준으로만 저장 |
 
 ## 조사했지만 기본 수집에서 제외
 

@@ -1226,6 +1226,40 @@ def _summarize(home_innings: np.ndarray, away_innings: np.ndarray, home: np.ndar
         float(home.mean()), float(away.mean()), home_two_way, away_two_way, handicap,
         headline_total_line, headline_home_spread, winner_conditional_market,
     )
+    if winner_conditional_market:
+        # The representative score is the forecast shown most prominently to the reader, so its
+        # integer total is also the one and only headline total forecast. Synchronize the market
+        # direction after score selection; the selector itself is intentionally not filtered by
+        # a market line, avoiding a circular score choice.
+        headline_total = winner_conditional_market["headline_total"]
+        projected_total = int(projected_score["home"] + projected_score["away"])
+        line = float(headline_total["line"])
+        pick = "OVER" if projected_total > line else "UNDER" if projected_total < line else "PUSH"
+        if pick == "OVER":
+            pick_probability = headline_total["model_over_probability"]
+            pick_edge = headline_total["edge"]
+            joint_pick_probability = headline_total["joint_over_probability"]
+        elif pick == "UNDER":
+            pick_probability = headline_total["model_under_probability"]
+            pick_edge = (-headline_total["edge"] if headline_total["edge"] is not None else None)
+            joint_pick_probability = headline_total["joint_under_probability"]
+        else:
+            pick_probability = float(np.mean(total == line))
+            pick_edge = None
+            joint_pick_probability = headline_total["push_probability"] * winner_conditional_market["scenario_probability"]
+        headline_total.update({
+            "expected_total": projected_total,
+            "pick": pick,
+            "pick_probability": round(pick_probability, 4),
+            "pick_edge": round(pick_edge, 4) if pick_edge is not None else None,
+            "pick_basis": "HEADLINE_SCORE_TOTAL_VS_LINE",
+            "joint_pick_probability": round(joint_pick_probability, 4),
+            "comparable": bool(headline_total["comparable"] and pick != "PUSH"),
+        })
+        for score in [projected_score, *projected_score_candidates]:
+            score["headline_total_pick"] = headline_total["pick"]
+            score["headline_total_expected"] = projected_total
+            score["total_conditioning"] = "HEADLINE_SCORE_TOTAL_VS_LINE"
     projected_score = with_trajectory(projected_score)
     projected_score_candidates = [
         with_trajectory(score) if index < 3 else score

@@ -363,12 +363,12 @@ export type WinnerConditionalMarket = {
     market_over_probability: number | null
     market_under_probability: number | null
     edge: number | null
-    /** Full-population mean total used to choose over/under relative to the line. */
+    /** Total of the representative headline score used to choose over/under. */
     expected_total?: number
-    pick: 'OVER' | 'UNDER'
+    pick: 'OVER' | 'UNDER' | 'PUSH'
     pick_probability: number
     pick_edge: number | null
-    pick_basis: 'EXPECTED_TOTAL_VS_LINE' | 'EDGE_VS_MARKET' | 'NO_MARKET_PRICE'
+    pick_basis: 'HEADLINE_SCORE_TOTAL_VS_LINE' | 'EXPECTED_TOTAL_VS_LINE' | 'EDGE_VS_MARKET' | 'NO_MARKET_PRICE'
     comparable: boolean
     joint_over_probability: number
     joint_under_probability: number

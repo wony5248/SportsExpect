@@ -22,7 +22,7 @@ Dugout Lab은 KBO와 MLB의 공식 경기·팀·선수 데이터를 수집해 �
 ```text
 KBO 공식 데이터 ─┐
 MLB Stats API ───┼─> collectors ─> refresh service ─> Supabase PostgreSQL
-The Odds API ────┘                         │                    │
+API-Sports Baseball ─┘                     │                    │
                                            │                    ├─ games/results/stats
                                            │                    ├─ starters/lineups/splits
                                            │                    ├─ predictions/snapshots

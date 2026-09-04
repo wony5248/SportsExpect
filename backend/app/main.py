@@ -272,7 +272,7 @@ def cancelled_game_data_integrity(repair: bool = Query(default=False), session: 
 @app.post("/api/v1/admin/cron/refresh", dependencies=[Depends(require_admin)])
 def cron_refresh(
     league: str = Query(pattern="^(KBO|MLB)$"),
-    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle|splits|replay|innings|discover|games|predict)$"),
+    scope: str = Query(default="full", pattern="^(full|nearby|tomorrow|market|checkpoints|lifecycle|splits|replay|innings|discover|games|predict|starters)$"),
     target_date: date | None = Query(default=None, alias="date"),
     game_ids: str | None = Query(default=None),
     only_changed: bool = Query(default=False),
@@ -284,6 +284,8 @@ def cron_refresh(
         raise HTTPException(status_code=422, detail="discover 범위에는 date가 필요합니다.")
     if scope == "predict" and target_date is None:
         raise HTTPException(status_code=422, detail="predict 범위에는 date가 필요합니다.")
+    if scope == "starters" and (league != "MLB" or target_date is None):
+        raise HTTPException(status_code=422, detail="starters 범위에는 MLB와 date가 필요합니다.")
     if len(selected_ids) > 5:
         raise HTTPException(status_code=422, detail="한 번에 최대 5경기까지만 최신화할 수 있습니다.")
     try:

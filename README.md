@@ -43,7 +43,7 @@ docker compose exec api python -m backend.app.cli refresh --date 2026-08-22 --le
 
 ## 사전 경기 최신화
 
-- KBO는 매일 13:00 KST에, MLB는 매일 23:00 KST에 오늘의 시작 전 경기를 수집하고 예측합니다. MLB 배당 수집은 22:00 KST입니다.
+- KBO는 매일 13:00 KST에, MLB는 다음 날 경기를 매일 23:00 KST에 수집하고 예측합니다. 21:00 KST에는 다음 날 MLB 선발과 배당을 먼저 갱신하고, 바뀐 입력으로 예측도 다시 계산합니다.
 - Supabase는 매분 경기 시작 40분 전인지 확인하되, 해당 시간이 된 시작 전 경기가 있을 때만 Vercel을 호출해 라인업 기반 예측을 한 번 갱신합니다.
 - 배포 화면 우측 상단 `새로고침 · 최신화`를 누른 뒤 비밀번호 `0930`을 입력하면 위 일정과 별개로 즉시 오늘의 KBO·MLB 데이터를 수집하고 예측합니다.
 - 시작 전(`SCHEDULED`) 경기만 새 예측을 생성합니다. 양 팀의 공식 9인 라인업과 충분한 타자 데이터가 준비된 경기는 타석 단위 시뮬레이션을 사용합니다.
@@ -55,23 +55,23 @@ docker compose exec api python -m backend.app.cli refresh --date 2026-08-22 --le
 
 ## 선택형 실제 시장 기준점
 
-베트맨·라이브스코어의 동적 화면을 스크래핑하지 않습니다. 선택적으로 The Odds API의 구조화된 `h2h`, `spreads`, `totals` 응답을 받아 북메이커 중앙 기준 총점과 마진 제거 승률을 저장합니다. 최신 합의값은 `market_consensus`, 경기 전 변경 이력은 `market_snapshots`에 남깁니다. 검증된 경기 전 합의값이 있으면 모델 자체 예측이 여전히 과반 가중치를 갖는 범위에서 총점은 최대 40%, 승률은 최대 35%만 보수적으로 축소 결합합니다. 키가 없거나 출처가 검증되지 않은 숫자는 예측값을 변경하지 않으며 모델 자체 공정선으로 명시합니다.
+베트맨·라이브스코어의 동적 화면을 스크래핑하지 않습니다. 선택적으로 API-Sports Baseball의 구조화된 배당 응답을 받아 북메이커 중앙 기준 총점과 마진 제거 승률을 저장합니다. 최신 합의값은 `market_consensus`, 경기 전 변경 이력은 `market_snapshots`에 남깁니다. 배당사의 총점·승패·핸디캡은 모델 입력이나 시뮬레이션 모수를 전혀 바꾸지 않으며 비교 및 향후 사후 잔차 검증에만 사용합니다.
 
 ```bash
 # .env에 추가한 뒤 재기동
-ODDS_API_KEY=발급받은키
-ODDS_API_REGIONS=us
+API_SPORTS_KEY=발급받은키
+API_SPORTS_DAILY_REQUEST_BUDGET=20
 docker compose up -d --build
 ```
 
-키가 없으면 이 수집만 자동으로 건너뛰므로 무료 기본 운영은 그대로 유지됩니다. KBO는 매일 12:00 KST, MLB는 매일 00:00 KST에 한 지역·두 마켓을 한 번씩 조회합니다. 리그당 2크레딧, 두 리그 합계 하루 4크레딧으로 30일 기준 약 120크레딧입니다. 다음 날 경기까지 같은 응답에서 함께 저장하며 성공한 일일 슬롯은 다시 호출하지 않습니다.
+키가 없으면 이 수집만 자동으로 건너뜁니다. API-Sports 배당은 하루 한 번 갱신되므로 KBO 12:00, MLB 21:00 KST 슬롯에서만 조회합니다. 정상 수집은 가까운 경기 날짜별 `/games`와 시즌별 `/odds`를 합쳐 보통 리그당 2~3요청이고, 앱 자체 일일 상한은 20요청입니다.
 
-### The Odds API 무료 키 발급·등록
+### API-Sports 무료 키 발급·등록
 
-1. [The Odds API Get Access](https://the-odds-api.com/#get-access)에서 `Starter FREE · 500 credits/month`의 `START`를 선택합니다.
-2. 이메일 주소로 가입하고 받은 API 키를 복사합니다. 원문 키는 Git, 프런트 코드, 메신저에 올리지 않습니다.
-3. Oracle VM은 `/home/ubuntu/sports-expect/.env`에 `ODDS_API_KEY=발급키`와 `ODDS_API_REGIONS=us`를 넣고 `docker compose -f compose.yaml -f compose.oracle.yaml up -d --build`를 실행합니다.
-4. Vercel은 백엔드 프로젝트의 `Settings → Environment Variables`에 같은 두 값을 `Production` 대상으로 등록한 뒤 재배포합니다. Supabase와 프런트 Vercel 프로젝트에는 배당 키를 등록하지 않습니다.
+1. [API-Sports Baseball](https://api-sports.io/sports/baseball)에서 계정을 만들고 Baseball API 키를 발급합니다.
+2. 원문 키는 Git, 프런트 코드, 메신저에 올리지 않습니다.
+3. Oracle VM은 `/home/ubuntu/sports-expect/.env`에 `API_SPORTS_KEY=발급키`를 넣고 재빌드합니다.
+4. Vercel은 백엔드 프로젝트에 같은 값을 `Production` 대상으로 등록한 뒤 재배포합니다. Supabase와 프런트 프로젝트에는 키를 등록하지 않습니다.
 5. 배포 후 관리자 API의 `scope=market`을 호출하거나 다음 정기 시각을 기다립니다. 응답이 `collected`면 수집, `already_collected`면 해당 일일 슬롯에서 이미 수집된 상태입니다.
 
 ```bash
@@ -149,8 +149,8 @@ MONTE_CARLO_SIMS=20000
 COLLECTOR_RETRY_ATTEMPTS=3
 BACKUP_RETENTION_DAYS=14
 STALE_AFTER_MINUTES=360
-ODDS_API_KEY=
-ODDS_API_REGIONS=us
+API_SPORTS_KEY=
+API_SPORTS_DAILY_REQUEST_BUDGET=20
 SECRET_ENCRYPTION_KEY=long-random-secret
 ```
 

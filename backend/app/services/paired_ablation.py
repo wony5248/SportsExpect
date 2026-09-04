@@ -48,11 +48,11 @@ def _variant_recipes(prediction: Any) -> dict[str, dict[str, Any]]:
 
     # Remove the residual layer but preserve the same market treatment so only one component
     # changes.  Import locally to avoid prediction.py importing this diagnostic module back.
-    from backend.app.services.prediction import apply_market_consensus_anchor
+    from backend.app.services.prediction import market_reference_audit
     baseline_home = residual.get("baseline_home_expected_runs")
     baseline_away = residual.get("baseline_away_expected_runs")
     if baseline_home is not None and baseline_away is not None:
-        home, away, _ = apply_market_consensus_anchor(
+        home, away, _ = market_reference_audit(
             float(baseline_home), float(baseline_away), market, str(production.get("league") or "MLB"),
         )
         variants["no_residual"] = {**production, "home_expected": home, "away_expected": away}

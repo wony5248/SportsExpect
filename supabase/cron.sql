@@ -23,7 +23,7 @@ begin
   if refresh_league not in ('KBO', 'MLB') then
     raise exception 'Unsupported league: %', refresh_league;
   end if;
-  if refresh_scope not in ('full', 'nearby', 'tomorrow', 'market', 'checkpoints', 'lifecycle', 'splits', 'replay', 'discover', 'games', 'predict') then
+  if refresh_scope not in ('full', 'nearby', 'tomorrow', 'market', 'checkpoints', 'lifecycle', 'splits', 'replay', 'discover', 'games', 'predict', 'starters') then
     raise exception 'Unsupported scope: %', refresh_scope;
   end if;
 
@@ -270,15 +270,11 @@ revoke all on function public.invoke_dugout_lineup_refresh(text) from public, an
 -- Cron expressions are UTC. MLB's 23:00 KST job targets the following KST slate.
 select cron.schedule('dugout-kbo-daily-pregame', '0 4 * * *',
   $$select public.invoke_dugout_refresh('KBO', 'full')$$);
-select cron.schedule('dugout-mlb-market', '0 13 * * *',
-  $$select public.invoke_dugout_refresh('MLB', 'market')$$);
--- The API performs a cheap local due-check first and contacts the odds provider only when an
--- upcoming game is missing its T-24h/T-3h/T-60m/T-15m quote.  Frequent dispatch therefore
--- improves closing-line coverage without multiplying provider calls for completed stages.
-select cron.schedule('dugout-kbo-market-checkpoints', '*/10 * * * *',
+select cron.schedule('dugout-kbo-market', '0 3 * * *',
   $$select public.invoke_dugout_refresh('KBO', 'market')$$);
-select cron.schedule('dugout-mlb-market-checkpoints', '5-59/10 * * * *',
-  $$select public.invoke_dugout_refresh('MLB', 'market')$$);
+-- API-Sports refreshes pre-match odds once daily, so there are no intraday market checkpoint
+-- calls. MLB odds are collected inside the 21:00 starter job below; the backend additionally
+-- enforces a per-day request cap.
 -- Publish a usable next-day baseline at 13:00 KST. This uses only committed records and is
 -- intentionally independent from the slower starter/provider enrichment later in the day.
 select cron.schedule('dugout-mlb-early-next-day-discovery', '50 3 * * *',
@@ -288,6 +284,12 @@ select cron.schedule('dugout-mlb-early-next-day-discovery', '50 3 * * *',
 select cron.schedule('dugout-mlb-early-prediction', '0 4 * * *',
   $$select public.invoke_dugout_dated_refresh(
     'MLB', 'predict', (now() at time zone 'Asia/Seoul')::date + 1
+  )$$);
+-- 21:00 KST (12:00 UTC): refresh the next day's official starters and API-Sports odds, then
+-- regenerate forecasts whose inputs changed. Odds remain comparison-only model metadata.
+select cron.schedule('dugout-mlb-starters-21-kst', '0 12 * * *',
+  $$select public.invoke_dugout_dated_refresh(
+    'MLB', 'starters', (now() at time zone 'Asia/Seoul')::date + 1
   )$$);
 select cron.schedule('dugout-mlb-next-day-discovery', '55 13 * * *',
   $$select public.invoke_dugout_dated_refresh(

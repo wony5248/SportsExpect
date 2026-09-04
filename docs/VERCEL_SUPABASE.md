@@ -7,7 +7,7 @@
 - Supabase 프로젝트 1개
 - Vercel 프로젝트 2개: `dugout-api`, `dugout-web`
 - 32바이트 이상의 임의 `ADMIN_TOKEN`
-- 선택 사항: `ODDS_API_KEY` (Claude 키는 각 사용자가 로그인 후 자기 화면에서 등록)
+- 선택 사항: `API_SPORTS_KEY` (Claude 키는 각 사용자가 로그인 후 자기 화면에서 등록)
 
 토큰은 아래처럼 생성할 수 있습니다.
 
@@ -64,10 +64,10 @@ Git 저장소를 Vercel에서 가져오고 첫 번째 프로젝트를 다음처�
 | `SECRET_ENCRYPTION_KEY` | 사용자별 Claude 키를 암호화할 별도 장기 비밀값(필수) |
 | `SUPABASE_URL` | Supabase Project URL |
 | `SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key (`sb_publishable_...`) |
-| `ODDS_API_KEY` | 보유한 경우만 등록 |
-| `ODDS_API_REGIONS` | `us` (한 지역만 조회해 크레딧 제한) |
-| `ODDS_API_REGIONS_KBO` | `eu` (KBO 런라인은 eu 북메이커 위주, 지역 추가 시 크레딧 배수 증가) |
-| `ODDS_API_DAILY_CREDIT_BUDGET` | `24` (요청 수가 아닌 일일 크레딧 상한) |
+| `API_SPORTS_KEY` | 보유한 경우만 등록 |
+| `API_SPORTS_MLB_LEAGUE_ID` | `1` |
+| `API_SPORTS_KBO_LEAGUE_ID` | `3` |
+| `API_SPORTS_DAILY_REQUEST_BUDGET` | `20` (앱 내부 일일 HTTP 요청 상한) |
 
 `ADMIN_TOKEN`은 관리자 API 전용 서버 비밀값이며 프런트에 등록하지 않습니다. 화면의 수동 최신화 비밀번호는 기본값 `0930`이며, 필요하면 API 프로젝트에 `MANUAL_REFRESH_PASSWORD` 환경변수로 바꿀 수 있습니다. Claude API 키·모델·활성 여부는 각 사용자가 로그인 후 `내 Claude 설정`에서 관리합니다.
 
@@ -123,7 +123,7 @@ select vault.create_secret('YOUR_ADMIN_TOKEN', 'dugout_admin_token');
 그다음 [`supabase/cron.sql`](../supabase/cron.sql)의 전체 내용을 SQL Editor에서 실행합니다. 무료 티어에 맞춰 다음의 사전 경기 갱신만 자동 등록됩니다.
 
 - KBO 전체 사전 갱신: 매일 13:00 KST
-- MLB 배당 수집: 매일 22:00 KST
+- MLB 다음 날 선발·배당 수집 및 변경 예측 재계산: 매일 21:00 KST
 - MLB 전체 사전 갱신: 매일 23:00 KST
 - 양 리그 라인업 갱신: 경기 시작 정확히 40분 전 1회
 
@@ -135,14 +135,14 @@ select vault.create_secret('YOUR_ADMIN_TOKEN', 'dugout_admin_token');
 select jobid, jobname, schedule, active from cron.job where jobname like 'dugout-%' order by jobname;
 ```
 
-위 조회에서 `dugout-kbo-daily-pregame`, `dugout-mlb-market`, `dugout-mlb-daily-pregame`, 그리고 두 `lineup-40m-dispatch` 작업만 활성화되어야 합니다.
+위 조회에서 `dugout-kbo-market`, `dugout-mlb-starters-21-kst`, 양 리그 일일 갱신과 두 `lineup-40m-dispatch` 작업이 활성화되어야 합니다. 예전 `market-checkpoints` 작업은 없어야 합니다.
 
 ## 7. 최종 확인
 
 1. API `/health`가 `database: connected`를 반환합니다.
 2. 수동 KBO 및 MLB 갱신이 각각 `200`을 반환합니다.
 3. 프런트에서 오늘 날짜의 경기 카드가 나타납니다.
-4. `cron.job`에 일일 사전 갱신 3개와 40분 전 dispatcher 2개만 활성화되어 있습니다.
+4. `cron.job`에 정의된 일일 사전·배당·21시 MLB 선발 갱신과 40분 전 dispatcher만 활성화되어 있습니다.
 5. 화면의 `새로고침 · 최신화`에 비밀번호 `0930`을 입력하면 즉시 갱신이 실행됩니다.
 6. 서로 다른 두 사용자로 로그인했을 때 Claude 키 상태와 개인 분석이 분리되는지 확인합니다.
 
