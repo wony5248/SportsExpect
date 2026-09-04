@@ -198,7 +198,7 @@ export default function GameCard({ game, signedIn, onRequireLogin }: {
         {verdicts && verdicts.length > 0 && <Box className="market-verdicts">
           {verdicts.map((verdict) => <Box key={verdict.market} className={`market-verdict ${verdict.hit == null ? 'neutral' : verdict.hit ? 'hit' : 'miss'}`}>
             <span>{verdict.market}</span>
-            <b>{verdict.hit == null ? '판정 제외' : verdict.hit ? '적중' : '미적중'}</b>
+            <b>{verdict.hit == null ? '판정 제외' : verdict.hit ? '적중' : '미적중'}{verdict.expectedTotal != null ? ` · 예상 총점 ${stat(verdict.expectedTotal, 1)}점` : ''}</b>
             <small>예측 {verdict.pick} ({pct(verdict.probability)}) · 실제 {verdict.actual}</small>
           </Box>)}
         </Box>}
@@ -665,7 +665,14 @@ function completedGameComparison(game: Game, prediction: Prediction | null,
 
 type RankedOutcome = { label: string; probability: number; note?: string; hit?: boolean; actual?: string }
 
-type MarketVerdict = { market: string; pick: string; probability: number; actual: string; hit: boolean | null }
+type MarketVerdict = {
+  market: string
+  pick: string
+  probability: number
+  actual: string
+  hit: boolean | null
+  expectedTotal?: number
+}
 
 type MarketPick = {
   key: string
@@ -696,8 +703,26 @@ function conditionalMarket(p: NonNullable<Game['prediction']>, game: Game) {
   const modelHomeFavored = p.home_win_probability >= p.away_win_probability
   if (conditional.winner !== (modelHomeFavored ? 'HOME' : 'AWAY')) return null
   const side = (value: 'HOME' | 'AWAY') => value === 'HOME' ? game.home : game.away
+  const expectedTotal = statisticalTotal(p)
+  const storedTotal = conditional.headline_total
+  const pick = expectedTotal === storedTotal.line
+    ? (storedTotal.model_over_probability >= storedTotal.model_under_probability ? 'OVER' : 'UNDER')
+    : expectedTotal > storedTotal.line ? 'OVER' : 'UNDER'
   return {
     ...conditional,
+    // Normalize forecasts saved before EXPECTED_TOTAL_VS_LINE was introduced too, so an old
+    // cached card cannot contradict the average total printed directly below the pick.
+    headline_total: {
+      ...storedTotal,
+      expected_total: expectedTotal,
+      pick,
+      pick_probability: pick === 'OVER'
+        ? storedTotal.model_over_probability : storedTotal.model_under_probability,
+      pick_edge: storedTotal.edge == null ? null
+        : pick === 'OVER' ? storedTotal.edge : -storedTotal.edge,
+      joint_pick_probability: pick === 'OVER'
+        ? storedTotal.joint_over_probability : storedTotal.joint_under_probability,
+    },
     winnerTeam: side(conditional.winner),
     minusTeam: side(conditional.handicap.minus_side),
     plusTeam: side(conditional.handicap.plus_side),
@@ -777,9 +802,8 @@ function marketPicks(p: NonNullable<Game['prediction']>, game: Game,
             : `${hc.minimum_margin - 1}점차 이내로 이김`} · ${edgeNote}`,
     })
 
-    // The total is read the same way as the run line: the book sets its number so the two sides
-    // are near even and states the rest in the price, so the pick is the disagreement with that
-    // price. The branch read stays beside it as the explanation.
+    // The direction follows the same expected-total-versus-line comparison printed on the card.
+    // Market price remains supporting context and can no longer make those statements clash.
     const tot = conditional.headline_total
     const line = tot.line
     const takeOver = tot.pick === 'OVER'
@@ -796,10 +820,10 @@ function marketPicks(p: NonNullable<Game['prediction']>, game: Game,
       hit: actualTotal == null || actualTotal === line ? undefined
         : takeOver ? actualTotal > line : actualTotal < line,
       note: tot.comparable
-        ? `배당사 ${pct(takeOver ? tot.market_over_probability! : tot.market_under_probability!)} 대비 ${
+        ? `평균 ${stat(tot.expected_total ?? statisticalTotal(p), 1)}점이 기준 ${line}점보다 ${takeOver ? '높아' : '낮아'} ${takeOver ? '오버' : '언더'} · 배당사 ${pct(takeOver ? tot.market_over_probability! : tot.market_under_probability!)} 대비 ${
             tot.pick_edge! >= 0 ? '+' : ''}${(tot.pick_edge! * 100).toFixed(1)}%p · ${scenario} ${
             pct(takeOver ? tot.over_probability : tot.under_probability)} · ${totalLineNote}`
-        : `${scenario} 두 팀 합계 ${line}점 ${takeOver ? '초과' : '미만'} · ${totalLineNote}${
+        : `평균 ${stat(tot.expected_total ?? statisticalTotal(p), 1)}점이 기준 ${line}점보다 ${takeOver ? '높아' : '낮아'} ${takeOver ? '오버' : '언더'} · ${totalLineNote}${
             tot.line_source === 'MARKET' ? ' · 배당 가격 미수집이라 비교 불가' : ''}`,
     })
     return picks
@@ -933,6 +957,7 @@ function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
       probability: conditional.headline_total.pick_probability,
       actual: total === line ? `기준점과 같은 ${total}점` : `${total > line ? '오버' : '언더'} (${total}점)`,
       hit: total === line ? null : (total > line) === pickOver,
+      expectedTotal: conditional.headline_total.expected_total ?? statisticalTotal(p),
     })
     return rows
   }
@@ -961,6 +986,7 @@ function marketVerdicts(p: NonNullable<Game['prediction']>, game: Game,
       probability: Math.max(totals.over, totals.under),
       actual: total === ranking.line ? `기준점과 같은 ${total}점` : `${total > ranking.line ? '오버' : '언더'} (${total}점)`,
       hit: total === ranking.line ? null : (total > ranking.line) === pickOver,
+      expectedTotal: statisticalTotal(p),
     })
   }
   return rows
@@ -1037,6 +1063,10 @@ function fairTotalLine(p: NonNullable<Game['prediction']>) {
     const gap = (value: number) => Math.abs(p.totals[String(value)].over - p.totals[String(value)].under)
     return gap(line) < gap(best) ? line : best
   })
+}
+
+function statisticalTotal(p: NonNullable<Game['prediction']>) {
+  return p.statistical_expected_total ?? p.home_expected_runs + p.away_expected_runs
 }
 
 /** How the game is likely to feel, which separates matchups far better than an exact score.

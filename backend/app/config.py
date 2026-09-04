@@ -54,9 +54,13 @@ class Settings:
     stale_after_minutes: int = int(os.getenv("STALE_AFTER_MINUTES", "360"))
     odds_api_key: str | None = os.getenv("ODDS_API_KEY")
     odds_api_regions: str = os.getenv("ODDS_API_REGIONS", "us")
-    # US books rarely post a KBO run line, so the KBO call defaults to eu (Pinnacle) plus us.
-    # Each extra region multiplies The Odds API credit cost of that call.
-    odds_api_regions_kbo: str = os.getenv("ODDS_API_REGIONS_KBO", "eu,us")
+    # US books rarely post a KBO run line, so KBO uses the eu region. Each extra region
+    # multiplies the provider's credit cost; eu,us would double every KBO collection.
+    odds_api_regions_kbo: str = os.getenv("ODDS_API_REGIONS_KBO", "eu")
+    # This is a credit budget, not an HTTP request count. With three markets and one region each
+    # successful league collection costs three credits, keeping a 500-credit plan usable for
+    # roughly twenty days even when all four pregame checkpoints run for both leagues.
+    odds_api_daily_credit_budget: int = max(0, int(os.getenv("ODDS_API_DAILY_CREDIT_BUDGET", "24")))
     # Used exclusively to encrypt user-owned provider keys at rest.
     secret_encryption_key: str | None = os.getenv("SECRET_ENCRYPTION_KEY")
     # Claude runtime safety limits are application policy, not deployment knobs.

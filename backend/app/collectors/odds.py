@@ -17,6 +17,7 @@ class OddsClient:
         self.base_url = "https://api.the-odds-api.com"
         self.client = httpx.Client(base_url=self.base_url, timeout=timeout, follow_redirects=True,
                                    transport=transport, headers={"User-Agent": "DugoutLab/0.3"})
+        self.last_usage: dict[str, int] = {}
 
     def close(self) -> None:
         self.client.close()
@@ -32,6 +33,11 @@ class OddsClient:
             "apiKey": settings.odds_api_key, "regions": regions,
             "markets": "h2h,spreads,totals", "oddsFormat": "decimal", "dateFormat": "iso",
         })
+        self.last_usage = {
+            key.removeprefix("x-requests-"): int(response.headers[key])
+            for key in ("x-requests-last", "x-requests-used", "x-requests-remaining")
+            if response.headers.get(key, "").isdigit()
+        }
         if response.is_error:
             # Do not let httpx include the apiKey-bearing request URL in logs.
             raise RuntimeError(f"Odds provider returned HTTP {response.status_code}")

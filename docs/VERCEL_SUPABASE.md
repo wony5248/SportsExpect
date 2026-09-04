@@ -66,7 +66,8 @@ Git 저장소를 Vercel에서 가져오고 첫 번째 프로젝트를 다음처�
 | `SUPABASE_PUBLISHABLE_KEY` | Supabase publishable key (`sb_publishable_...`) |
 | `ODDS_API_KEY` | 보유한 경우만 등록 |
 | `ODDS_API_REGIONS` | `us` (한 지역만 조회해 크레딧 제한) |
-| `ODDS_API_REGIONS_KBO` | `eu,us` (KBO 런라인은 eu 북메이커 위주라 별도 지정) |
+| `ODDS_API_REGIONS_KBO` | `eu` (KBO 런라인은 eu 북메이커 위주, 지역 추가 시 크레딧 배수 증가) |
+| `ODDS_API_DAILY_CREDIT_BUDGET` | `24` (요청 수가 아닌 일일 크레딧 상한) |
 
 `ADMIN_TOKEN`은 관리자 API 전용 서버 비밀값이며 프런트에 등록하지 않습니다. 화면의 수동 최신화 비밀번호는 기본값 `0930`이며, 필요하면 API 프로젝트에 `MANUAL_REFRESH_PASSWORD` 환경변수로 바꿀 수 있습니다. Claude API 키·모델·활성 여부는 각 사용자가 로그인 후 `내 Claude 설정`에서 관리합니다.
 

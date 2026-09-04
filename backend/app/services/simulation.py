@@ -812,9 +812,11 @@ def _winner_conditional_market(score_counts: Counter[tuple[int, int]], simulatio
     # Branch narrative for the total, on the same footing as the run line above.
     probabilities = _total_probabilities(total_counts, branch_size, line)
 
-    # The decision, again on the market's own unconditional event. A book sets the total so the
-    # two sides are close to even and then states the rest in the price, so the number worth
-    # answering is not "which side is over half" but "where do we disagree with what was quoted".
+    # Price the market's event over the full population. The displayed direction, however, must
+    # answer the same plain-language question as the displayed expected total: is our mean total
+    # above or below the posted line? Letting a cheap price flip that direction produced cards
+    # that said "12.4 expected" and "over 12.5" at the same time. The price edge remains useful
+    # supporting information, but it no longer changes the forecast direction.
     population_totals: Counter[int] = Counter()
     for (home_runs, away_runs), count in score_counts.items():
         population_totals[home_runs + away_runs] += count
@@ -830,14 +832,14 @@ def _winner_conditional_market(score_counts: Counter[tuple[int, int]], simulatio
     if market_over is not None and line_source != "MARKET":
         market_over = None
     total_edge = model_over - market_over if market_over is not None else None
-    if total_edge is not None:
-        pick_over = total_edge > 0
-        total_pick_basis = "EDGE_VS_MARKET"
+    population_mean_total = sum(total * count for total, count in population_totals.items()) / simulations
+    if population_mean_total == line:
+        # Exact equality is rare, but the probability majority is a stable tie-breaker and avoids
+        # making floating-point noise decide the label.
+        pick_over = model_over >= .5
     else:
-        # No collected price, so nothing to disagree with. Report the branch read instead and
-        # let the card say the comparison is unavailable.
-        pick_over = probabilities["over"] >= probabilities["under"]
-        total_pick_basis = "NO_MARKET_PRICE"
+        pick_over = population_mean_total > line
+    total_pick_basis = "EXPECTED_TOTAL_VS_LINE"
     headline_total = {
         "line": line,
         "line_source": line_source,
@@ -851,10 +853,9 @@ def _winner_conditional_market(score_counts: Counter[tuple[int, int]], simulatio
         "market_over_probability": round(market_over, 4) if market_over is not None else None,
         "market_under_probability": round(1 - market_over, 4) if market_over is not None else None,
         "edge": round(total_edge, 4) if total_edge is not None else None,
+        "expected_total": round(population_mean_total, 4),
         "pick": "OVER" if pick_over else "UNDER",
-        "pick_probability": round(
-            (model_over if pick_over else 1 - model_over) if total_edge is not None
-            else max(probabilities["over"], probabilities["under"]), 4),
+        "pick_probability": round(model_over if pick_over else 1 - model_over, 4),
         "pick_edge": round(total_edge if pick_over else -total_edge, 4) if total_edge is not None else None,
         "pick_basis": total_pick_basis,
         "comparable": bool(total_edge is not None),
@@ -980,7 +981,8 @@ def _coherent_scenario_score_projection(
         scenario_under = float(scenario_total["under_probability"])
         # Named for what actually decided the direction, so a stored score can be audited
         # against the rule that produced it.
-        total_conditioning = ("MARKET_EDGE" if scenario_total["pick_basis"] == "EDGE_VS_MARKET"
+        total_conditioning = ("EXPECTED_TOTAL_VS_LINE"
+                              if scenario_total["pick_basis"] == "EXPECTED_TOTAL_VS_LINE"
                               else "WINNER_CONDITIONAL")
     else:
         decidable_total_probability = total_probabilities["over"] + total_probabilities["under"]

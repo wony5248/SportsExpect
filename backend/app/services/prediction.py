@@ -62,7 +62,9 @@ MODEL_ALGORITHM = ("dynamic league environment + matchup-strength means + win-lo
 # 34: adds favorite-collapse path probabilities, favorite fragility, causal-safe residual
 # attribution metadata, and market-offset/segmented-calibration shadow diagnostics.  Stored
 # replays need the new payload even though no unvalidated shadow probability changes production.
-SIMULATION_SUMMARY_SCHEMA_VERSION = 34
+# 35: total picks follow the displayed expected total relative to the line; market price remains
+# comparison context and can no longer reverse the forecast direction.
+SIMULATION_SUMMARY_SCHEMA_VERSION = 35
 
 
 def predict_game(game: Any, home: Any, away: Any, home_pitcher: Any | None, away_pitcher: Any | None,

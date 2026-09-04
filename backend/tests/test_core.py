@@ -38,7 +38,8 @@ from backend.app.services.feature_engineering import (HOME_FIELD_MULTIPLIERS, ba
                                                       _lineup_matchup_summary, _paired_pitcher_difference,
                                                       _platoon_feature, _recent_pitcher_deviation)
 from backend.app.services.refresh import (SPLIT_FETCH_BUDGET, _collect_batter_splits, _market_event_date,
-                                          _market_refresh_due, _months_for_recent, _optional,
+                                          _market_checkpoint_due, _market_refresh_due,
+                                          _odds_request_credit_cost, _months_for_recent, _optional,
                                           _prediction_stage, _recent_by_team, _split_budget,
                                           _lineup_split_tables)
 from backend.app.services.batting import SINGLE, STATE_INDEX, build_batter_table
@@ -799,6 +800,35 @@ def test_market_refresh_slots_are_anchored_to_kst_once_per_day():
     assert not _market_refresh_due("MLB", mlb_latest, datetime(2026, 8, 22, 21, 59, tzinfo=KST))
     assert _market_refresh_due("MLB", mlb_latest, datetime(2026, 8, 22, 22, 0, tzinfo=KST))
     assert _market_event_date("2026-08-22T15:30:00Z") == date(2026, 8, 23)
+
+
+def test_odds_credit_cost_counts_markets_times_regions(monkeypatch):
+    monkeypatch.setattr(refresh_module, "settings", SimpleNamespace(
+        odds_api_regions="us", odds_api_regions_kbo="eu,us",
+    ))
+    assert _odds_request_credit_cost("MLB") == 3
+    assert _odds_request_credit_cost("KBO") == 6
+
+
+def test_successful_market_attempt_suppresses_repeat_when_provider_has_no_match():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    now = datetime(2026, 9, 4, 12, 0)
+    with Session(engine) as session:
+        away = Team(league="KBO", code="AW", name="Away")
+        home = Team(league="KBO", code="HM", name="Home")
+        session.add_all([away, home]); session.flush()
+        game = Game(
+            external_id="KBO-NO-ODDS", league="KBO", game_date=now.date(),
+            start_at=now + timedelta(hours=5), start_time=(now + timedelta(hours=5)).time(),
+            away_team_id=away.id, home_team_id=home.id, status="SCHEDULED",
+            source="test", source_url="test", collected_at=now,
+        )
+        session.add(game); session.flush()
+        assert _market_checkpoint_due(session, "KBO", now, None)
+        # No MarketSnapshot was written because the provider did not return/match this event.
+        # The successful slate request still counts as this stage's attempt.
+        assert not _market_checkpoint_due(session, "KBO", now, now)
 
 
 def test_exact_checkpoint_windows_do_not_use_broad_stage_buckets():
@@ -1848,7 +1878,7 @@ def test_second_stage_markets_are_priced_only_inside_the_winning_branch():
 
     # The headline score is chosen under these same two decisions.
     primary = result["projected_score"]
-    assert primary["total_conditioning"] == "WINNER_CONDITIONAL"
+    assert primary["total_conditioning"] == "EXPECTED_TOTAL_VS_LINE"
     assert primary["headline_total_pick"] == total["pick"]
     assert primary["scenario_over_probability"] == total["over_probability"]
     assert (primary["home"] + primary["away"] > total["line"]) is (total["pick"] == "OVER")
@@ -1919,9 +1949,9 @@ def test_run_line_pick_is_decided_against_the_market_price_not_a_flat_half():
     assert away_handicap["market_minus_probability"] == pytest.approx(.65)
 
 
-def test_total_pick_is_decided_against_the_market_price_not_a_flat_half():
-    # A book sets the total so the two sides are near even and states the rest in the price, so
-    # the question worth answering is where we disagree with the quote, not which side clears 50%.
+def test_total_pick_follows_expected_total_and_keeps_market_edge_as_context():
+    # The price can change the measured edge, but it must not flip the direction away from the
+    # expected total printed on the same card.
     common = dict(league="MLB", headline_total_line=8.5, headline_home_spread=-1.5)
     cheap = simulate_scores(5.4, 4.0, 20_000, 20260824, headline_total_over_probability=.40, **common)
     dear = simulate_scores(5.4, 4.0, 20_000, 20260824, headline_total_over_probability=.60, **common)
@@ -1930,27 +1960,27 @@ def test_total_pick_is_decided_against_the_market_price_not_a_flat_half():
 
     assert cheap["frequency_tables"] == dear["frequency_tables"]
     assert cheap_total["model_over_probability"] == dear_total["model_over_probability"]
-    assert cheap_total["pick_basis"] == "EDGE_VS_MARKET"
+    assert cheap_total["pick_basis"] == "EXPECTED_TOTAL_VS_LINE"
     assert cheap_total["comparable"] is True
-    assert cheap_total["pick"] == "OVER" and cheap_total["edge"] > 0
-    assert dear_total["pick"] == "UNDER" and dear_total["edge"] < 0
+    assert cheap_total["pick"] == dear_total["pick"] == "OVER"
+    assert cheap_total["edge"] > 0 and dear_total["edge"] < 0
+    assert cheap_total["expected_total"] > cheap_total["line"]
     # The total read is priced from an unchanged score population; its market price must not
     # choose a different representative score.
     assert (cheap["projected_score"]["home"], cheap["projected_score"]["away"]) == (
         dear["projected_score"]["home"], dear["projected_score"]["away"]
     )
-    assert cheap["projected_score"]["total_conditioning"] == "MARKET_EDGE"
+    assert cheap["projected_score"]["total_conditioning"] == "EXPECTED_TOTAL_VS_LINE"
 
-    # Both sides leaned over inside the winning branch, so a branch-majority rule would have
-    # named the same side for both prices. The price is what separates them.
+    # Both sides lean over inside the winning branch, while the price only changes value context.
     assert cheap_total["over_probability"] == dear_total["over_probability"] > .5
 
     without_price = simulate_scores(5.4, 4.0, 20_000, 20260824, **common)
     without_total = without_price["winner_conditional_market"]["headline_total"]
-    assert without_total["pick_basis"] == "NO_MARKET_PRICE"
+    assert without_total["pick_basis"] == "EXPECTED_TOTAL_VS_LINE"
     assert without_total["comparable"] is False
     assert without_total["edge"] is None
-    assert without_price["projected_score"]["total_conditioning"] == "WINNER_CONDITIONAL"
+    assert without_price["projected_score"]["total_conditioning"] == "EXPECTED_TOTAL_VS_LINE"
 
     # A price only means anything at the line it was quoted for, so a model-derived line
     # (no market total collected) never borrows it.
@@ -1959,7 +1989,21 @@ def test_total_pick_is_decided_against_the_market_price_not_a_flat_half():
     model_total = model_line["winner_conditional_market"]["headline_total"]
     assert model_total["line_source"] == "MODEL_FAIR"
     assert model_total["market_over_probability"] is None
-    assert model_total["pick_basis"] == "NO_MARKET_PRICE"
+    assert model_total["pick_basis"] == "EXPECTED_TOTAL_VS_LINE"
+
+
+def test_total_pick_cannot_say_over_when_expected_total_is_below_line():
+    result = simulate_scores(
+        6.2, 6.0, 20_000, 20260904, league="MLB",
+        headline_total_line=12.5, headline_total_over_probability=.10,
+    )
+    total = result["winner_conditional_market"]["headline_total"]
+    # The very cheap over price creates a positive over edge. Previously that edge incorrectly
+    # changed the card to over even though the displayed mean was below 12.5.
+    assert total["edge"] > 0
+    assert total["expected_total"] < total["line"]
+    assert total["pick"] == "UNDER"
+    assert total["pick_edge"] < 0
 
 
 def test_headline_score_is_centred_on_the_branch_it_is_selected_from():

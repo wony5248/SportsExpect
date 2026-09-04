@@ -563,6 +563,7 @@ def _months_for_recent(target: date, days: int) -> list[tuple[int, int]]:
 
 MARKET_REFRESH_HOURS_KST = {"KBO": 12, "MLB": 22}
 MARKET_CHECKPOINT_LOOKAHEAD_HOURS = 36
+ODDS_MARKETS_PER_CALL = 3
 
 
 def _market_refresh_due(league: str, latest: datetime | None, now: datetime) -> bool:
@@ -573,7 +574,18 @@ def _market_refresh_due(league: str, latest: datetime | None, now: datetime) -> 
     return latest is None or latest < scheduled
 
 
-def _market_checkpoint_due(session: Session, league: str, now: datetime) -> bool:
+def _market_stage_started_at(game: Game, stage: str) -> datetime:
+    offsets = {
+        "T_MINUS_24H": timedelta(hours=MARKET_CHECKPOINT_LOOKAHEAD_HOURS),
+        "T_MINUS_3H": timedelta(hours=12),
+        "T_MINUS_60M": timedelta(minutes=120),
+        "T_MINUS_15M": timedelta(minutes=35),
+    }
+    return game.start_at - offsets[stage]
+
+
+def _market_checkpoint_due(session: Session, league: str, now: datetime,
+                           latest: datetime | None = None) -> bool:
     """Whether any upcoming game lacks the quote checkpoint appropriate for `now`.
 
     This query is deliberately local and cheap.  Cron may ask frequently, but an external odds
@@ -589,9 +601,33 @@ def _market_checkpoint_due(session: Session, league: str, now: datetime) -> bool
         snapshots = session.scalars(select(MarketSnapshot).where(
             MarketSnapshot.game_id == game.id,
         )).all()
-        if not any((row.raw or {}).get("snapshot_stage") == stage for row in snapshots):
+        has_snapshot = any((row.raw or {}).get("snapshot_stage") == stage for row in snapshots)
+        # A successful league-wide provider request also counts as an attempt for this stage.
+        # Otherwise an unavailable or unmatched event leaves no MarketSnapshot and the ten-minute
+        # cron spends credits on the same missing quote for the entire stage.
+        attempted_stage = latest is not None and _comparable_datetime(
+            latest, _market_stage_started_at(game, stage),
+        ) >= _market_stage_started_at(game, stage)
+        if not has_snapshot and not attempted_stage:
             return True
     return False
+
+
+def _odds_request_credit_cost(league: str) -> int:
+    regions = settings.odds_api_regions_kbo if league == "KBO" else settings.odds_api_regions
+    region_count = len({region.strip() for region in regions.split(",") if region.strip()})
+    return ODDS_MARKETS_PER_CALL * max(1, region_count)
+
+
+def _odds_credits_used_today(session: Session, now: datetime) -> int:
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = session.execute(select(CrawlLog.collector, func.count()).where(
+        CrawlLog.collector.in_(("kbo_market", "mlb_market")),
+        CrawlLog.status == "SUCCESS", CrawlLog.finished_at >= day_start,
+    ).group_by(CrawlLog.collector)).all()
+    return sum(int(count) * _odds_request_credit_cost(
+        "KBO" if collector == "kbo_market" else "MLB"
+    ) for collector, count in rows)
 
 
 def _market_event_date(value: str | None) -> date | None:
@@ -617,6 +653,13 @@ def refresh_market(league: str) -> dict[str, Any]:
 def _refresh_market(league: str, errors: list[str]) -> dict[str, Any]:
     if not settings.odds_api_key:
         return {"status": "disabled", "matched_games": 0}
+    # Full-slate refreshes run in parallel workers. Serialize the shared paid provider across
+    # both leagues, then re-check due state and budget after acquiring the lock.
+    with job_lock("odds-api-provider", blocking=True):
+        return _refresh_market_locked(league, errors)
+
+
+def _refresh_market_locked(league: str, errors: list[str]) -> dict[str, Any]:
     collector = f"{league.lower()}_market"
     now = database_now()
     with session_scope() as session:
@@ -624,9 +667,17 @@ def _refresh_market(league: str, errors: list[str]) -> dict[str, Any]:
         latest = session.scalar(select(func.max(CrawlLog.finished_at)).where(
             CrawlLog.collector == collector, CrawlLog.status == "SUCCESS",
         ))
-        checkpoint_due = _market_checkpoint_due(session, league, now)
+        checkpoint_due = _market_checkpoint_due(session, league, now, latest)
+        used_today = _odds_credits_used_today(session, now)
     if not checkpoint_due and not _market_refresh_due(league, latest, now):
         return {"status": "already_collected", "matched_games": 0}
+    estimated_cost = _odds_request_credit_cost(league)
+    if used_today + estimated_cost > settings.odds_api_daily_credit_budget:
+        return {
+            "status": "daily_credit_budget_reached", "matched_games": 0,
+            "estimated_credits_used_today": used_today,
+            "daily_credit_budget": settings.odds_api_daily_credit_budget,
+        }
     client = OddsClient()
     try:
         source = _tracked(collector, "https://api.the-odds-api.com/v4/sports",
@@ -657,6 +708,9 @@ def _refresh_market(league: str, errors: list[str]) -> dict[str, Any]:
             "status": "collected",
             "provider_events": len(source.data),
             "matched_games": matched_games,
+            "provider_usage": client.last_usage,
+            "estimated_credits_used_today": used_today + estimated_cost,
+            "daily_credit_budget": settings.odds_api_daily_credit_budget,
         }
     finally:
         client.close()
